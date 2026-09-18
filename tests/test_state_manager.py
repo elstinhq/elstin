@@ -1,0 +1,217 @@
+"""Round-trips epic/story/PR bookkeeping through StateManager. Confirms
+forge-internal fields persist and that JIRA-sourced fields (jira_key,
+assignment) are never mutated by any StateManager write method — only
+forge-internal tracking columns are."""
+from __future__ import annotations
+
+import pytest
+
+pytestmark = pytest.mark.usefixtures("forge_db")
+
+
+def test_epic_round_trip(project_id):
+    from forge.state.manager import StateManager
+
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2", "ENG-3"], ["ENG-4"]])
+
+    epic = sm.get_epic("ENG-1")
+    assert epic["jira_key"] == "ENG-1"
+    assert epic["project_id"] == project_id
+    assert epic["repo"] is None  # no folder chosen yet
+    assert epic["phase"] == "planning"
+    assert epic["levels"] == [["ENG-2", "ENG-3"], ["ENG-4"]]
+    assert epic["plan_approved"] is False
+    assert epic["manual_gate"] is True
+
+    repo_id = sm.add_project_repo(project_id, "/repo/widgets")
+    sm.set_epic_project_repo("ENG-1", repo_id)
+    assert sm.get_epic("ENG-1")["repo"] == "/repo/widgets"  # resolved via the join
+
+    sm.approve_epic_plan("ENG-1")
+    sm.set_epic_phase("ENG-1", "implementing")
+    sm.set_integration_branch("ENG-1", "agent/epic-ENG-1")
+
+    epic = sm.get_epic("ENG-1")
+    assert epic["plan_approved"] is True
+    assert epic["phase"] == "implementing"
+    assert epic["integration_branch"] == "agent/epic-ENG-1"
+
+
+def test_create_epic_is_idempotent(project_id):
+    from forge.state.manager import StateManager
+
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id)
+    sm.set_epic_phase("ENG-1", "implementing")
+    sm.create_epic("ENG-1", project_id=project_id)  # second call must not reset phase
+
+    assert sm.get_epic("ENG-1")["phase"] == "implementing"
+
+
+def test_story_lifecycle_and_listing(project_id):
+    from forge.state.manager import StateManager
+
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id)
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0)
+    sm.create_story("ENG-3", epic_key="ENG-1", wave=0)
+    sm.create_story("ENG-4", epic_key="ENG-1", wave=1)
+
+    stories = sm.list_stories_for_epic("ENG-1")
+    assert {s["jira_key"] for s in stories} == {"ENG-2", "ENG-3", "ENG-4"}
+    assert all(s["status"] == "pending" for s in stories)
+
+    sm.set_story_thread_id("ENG-2", "thread-abc")
+    sm.set_story_worktree("ENG-2", worktree_path="/data/repos/eng-2", branch="ENG-2-add-widget")
+    sm.set_story_status("ENG-2", "dispatched")
+
+    story = sm.get_story("ENG-2")
+    assert story["thread_id"] == "thread-abc"
+    assert story["worktree_path"] == "/data/repos/eng-2"
+    assert story["branch"] == "ENG-2-add-widget"
+    assert story["status"] == "dispatched"
+    assert story["epic_key"] == "ENG-1"
+
+    sm.set_story_status("ENG-2", "pending", parked_reason="plan_approval_gate")
+    story = sm.get_story("ENG-2")
+    assert story["status"] == "pending"
+    assert story["parked_reason"] == "plan_approval_gate"
+
+
+def test_retry_story_run_failure_redispatches(project_id):
+    """failure_stage="run" (or unset) goes back to "pending" — a full
+    redispatch, since a run failure never reaches a PR to preserve."""
+    from forge.state.manager import StateManager
+
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id)
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0)
+    sm.set_epic_phase("ENG-1", "failed")
+    sm.set_story_status("ENG-2", "failed", failure_stage="run")
+
+    sm.retry_story("ENG-2")
+
+    story = sm.get_story("ENG-2")
+    assert story["status"] == "pending"
+    assert story["failure_stage"] is None
+    assert story["parked_reason"] is None
+    assert story["retry_count"] == 1
+    assert sm.get_epic("ENG-1")["phase"] == "implementing"  # no longer excluded from polling
+
+
+def test_retry_story_merge_failure_reattempts_merge(project_id):
+    """failure_stage="merge" goes back to "awaiting_pr_review" with the gate
+    cleared, mirroring how a CI failure already parks a story rather than
+    discarding its work — the run itself already succeeded here."""
+    from forge.state.manager import StateManager
+
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id)
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0)
+    sm.set_story_gate_approved("ENG-2", True)
+    sm.set_story_status("ENG-2", "failed", failure_stage="merge")
+
+    sm.retry_story("ENG-2")
+
+    story = sm.get_story("ENG-2")
+    assert story["status"] == "awaiting_pr_review"
+    assert story["failure_stage"] is None
+    assert story["gate_approved"] is False
+    assert story["retry_count"] == 1
+
+
+def test_retry_story_increments_across_repeated_retries(project_id):
+    from forge.state.manager import StateManager
+
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id)
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0)
+
+    sm.set_story_status("ENG-2", "failed", failure_stage="run")
+    sm.retry_story("ENG-2")
+    sm.set_story_status("ENG-2", "failed", failure_stage="run")
+    sm.retry_story("ENG-2")
+
+    assert sm.get_story("ENG-2")["retry_count"] == 2
+
+
+def test_pull_request_upsert(project_id):
+    from forge.state.manager import StateManager
+
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id)
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0)
+
+    assert sm.get_pull_request("ENG-2") is None
+
+    sm.upsert_pull_request("ENG-2", number=42, url="https://github.com/acme/widgets/pull/42")
+    pr = sm.get_pull_request("ENG-2")
+    assert pr == {"story_key": "ENG-2", "number": 42, "url": "https://github.com/acme/widgets/pull/42", "state": "open"}
+
+    sm.upsert_pull_request("ENG-2", state="merged")
+    pr = sm.get_pull_request("ENG-2")
+    assert pr["state"] == "merged"
+    assert pr["number"] == 42  # unspecified fields on the second upsert are preserved
+
+
+def test_comment_watermark_round_trip():
+    from forge.state.manager import StateManager
+
+    sm = StateManager()
+    assert sm.get_comment_watermark("ENG-1") is None
+
+    sm.set_comment_watermark("ENG-1", "10001")
+    assert sm.get_comment_watermark("ENG-1") == "10001"
+
+    sm.set_comment_watermark("ENG-1", "10002")
+    assert sm.get_comment_watermark("ENG-1") == "10002"
+
+
+def test_project_and_project_repo_round_trip():
+    from forge.state.manager import StateManager
+
+    sm = StateManager()
+    project_id = sm.create_project("Widgets", description="The widgets project")
+
+    project = sm.get_project(project_id)
+    assert project["name"] == "Widgets"
+    assert project["description"] == "The widgets project"
+    assert project["repo_count"] == 0
+    assert project["epic_count"] == 0
+    assert project["repos"] == []
+
+    repo_id = sm.add_project_repo(project_id, "/repo/widgets", label="widgets")
+    assert sm.get_project(project_id)["repo_count"] == 1
+    assert sm.list_project_repos(project_id) == [
+        {
+            "id": repo_id, "project_id": project_id, "path": "/repo/widgets", "label": "widgets",
+            "clone_url": None, "created_at": sm.get_project_repo(repo_id)["created_at"],
+        }
+    ]
+
+    sm.create_epic("ENG-1", project_id=project_id)
+    assert sm.get_project(project_id)["epic_count"] == 1
+
+    sm.set_epic_project_repo("ENG-1", repo_id)
+    assert sm.remove_project_repo(repo_id) is False  # still referenced by ENG-1
+
+    sm.set_epic_project_repo("ENG-1", None)
+    assert sm.remove_project_repo(repo_id) is True
+    assert sm.get_project_repo(repo_id) is None
+
+
+def test_list_projects_orders_newest_first_and_counts():
+    from forge.state.manager import StateManager
+
+    sm = StateManager()
+    first = sm.create_project("First")
+    second = sm.create_project("Second")
+    sm.create_epic("ENG-1", project_id=first)
+    sm.create_epic("ENG-2", project_id=first)
+    sm.add_project_repo(second, "/repo/second")
+
+    projects = {p["id"]: p for p in sm.list_projects()}
+    assert projects[first]["epic_count"] == 2
+    assert projects[first]["repo_count"] == 0
+    assert projects[second]["repo_count"] == 1

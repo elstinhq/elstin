@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>code_forge settings</title>
+<script>
+  // Must run before the stylesheet to avoid a flash of the wrong theme on
+  // reload. globals.css defines the dark palette under both
+  // `prefers-color-scheme: dark` and `[data-theme="dark"]`, so an explicit
+  // choice wins over the OS in either direction. Keep the storage key in
+  // sync with ui-src/src/lib/theme.ts.
+  (function () {
+    try {
+      var saved = localStorage.getItem("forge-theme");
+      if (saved === "dark" || saved === "light") document.documentElement.dataset.theme = saved;
+    } catch (e) {
+      /* private mode: fall back to the OS preference */
+    }
+  })();
+</script>
+<link rel="stylesheet" href="/settings-ui/vendor/app.css" />
+</head>
+<body>
+<div id="root"></div>
+<script type="module" src="/settings-ui/vendor/app-settings.js"></script>
+</body>
+</html>

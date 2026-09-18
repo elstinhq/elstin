@@ -1,0 +1,48 @@
+[project]
+name = "code_forge"
+version = "0.1.0"
+description = "Local, single-tenant JIRA-epic-to-PR agent platform with a deterministic reconciler, Postgres-backed state, and per-story worktree isolation"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "pydantic-settings",
+    "langgraph",
+    "langgraph-checkpoint-postgres",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13,<2",
+    "psycopg[binary]>=3.1,<4",
+    "tree-sitter",
+    "tree-sitter-python",
+    "qdrant-client",
+    "openai>=3.0.0",
+    "httpx",
+    "jira",
+    "PyGithub",
+    "mcp>=1.0.0,<2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-mock",
+    "testcontainers-postgres",
+]
+
+[project.scripts]
+forge-daemon = "forge.daemon.main:main"
+forge-mcp-jira = "forge.mcp.jira_server:main"
+forge-mcp-github = "forge.mcp.github_server:main"
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["forge*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

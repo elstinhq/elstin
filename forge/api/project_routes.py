@@ -1,0 +1,286 @@
+"""Project CRUD, repo attachment (clones the given git URL into storage
+this process controls — see forge/services/repo_clone.py for why),
+project-scoped config overrides, and the project's saved JIRA ticket
+filter. Epics live under a project — see forge/api/epic_routes.py for the
+epic-facing endpoints that were adjusted to require a project_id.
+
+The ticket-filter endpoints are the standing-query counterpart to that
+module's one-key POST /api/epics/sync: `/ticket-filter` stores the query,
+`/preview` shows what it would ingest without writing anything, and
+`/sync` runs one sweep now. The unattended sweeps happen in
+forge/daemon/ticket_sync.py — these routes exist so a human can set the
+query up, test it, and not wait for the next cycle. `preview` and `sync`
+do call JIRA inline, which is the same deal POST /api/epics/sync already
+makes: a bounded, human-triggered fetch, not the long-running work the
+daemon owns."""
+from __future__ import annotations
+
+import os
+
+from fastapi import APIRouter, HTTPException
+from jira import JIRAError
+from pydantic import BaseModel
+
+from forge.config.store import (
+    PROJECT_OVERRIDABLE_KEYS,
+    clear_project_config,
+    get_config,
+    list_project_config_for_display,
+    set_project_config,
+)
+from forge.api.epic_routes import _story_with_pr
+from forge.services.jira_filter import build_jql, preview_filter, sync_project_filter
+from forge.services.repo_clone import RepoCloneError, clone_repository
+from forge.state.manager import StateManager
+
+router = APIRouter(prefix="/api/projects", tags=["projects"])
+
+
+class ProjectCreateRequest(BaseModel):
+    name: str
+    description: str = ""
+    repo_url: str | None = None
+
+
+class ProjectUpdateRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+
+class ProjectRepoCreateRequest(BaseModel):
+    url: str
+    label: str | None = None
+
+
+class ProjectConfigUpdate(BaseModel):
+    value: str | None = None
+
+
+class TicketFilterRequest(BaseModel):
+    """The whole filter, every time — see StateManager.set_project_ticket_filter
+    for why this is a replace rather than a patch."""
+
+    enabled: bool = False
+    jira_project_key: str | None = None
+    assignee: str | None = None
+    statuses: list[str] = []
+    labels: list[str] = []
+    issue_types: list[str] = []
+    extra_jql: str | None = None
+
+
+class TicketFilterRunRequest(BaseModel):
+    """An unsaved filter to preview/sync instead of the saved one, so the
+    settings dialog's "Test filter" works before the user commits to it.
+    Omit `filter` to use whatever is stored."""
+
+    filter: TicketFilterRequest | None = None
+
+
+def _clone_dest_base_dir(project_id: int) -> str:
+    base = get_config("cloned_repos_base_dir") or "/data/cloned-repos"
+    return os.path.join(base, str(project_id))
+
+
+def _clone_and_register(sm: StateManager, project_id: int, url: str, *, label: str | None = None) -> int:
+    try:
+        path = clone_repository(url, dest_base_dir=_clone_dest_base_dir(project_id))
+    except RepoCloneError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return sm.add_project_repo(project_id, path, label=label or os.path.basename(path), clone_url=url)
+
+
+@router.get("")
+def list_projects() -> list[dict]:
+    return StateManager().list_projects()
+
+
+@router.post("")
+def create_project(body: ProjectCreateRequest) -> dict:
+    sm = StateManager()
+    project_id = sm.create_project(body.name, description=body.description)
+    if body.repo_url:
+        _clone_and_register(sm, project_id, body.repo_url)
+    return sm.get_project(project_id)
+
+
+@router.get("/{project_id}")
+def get_project(project_id: int) -> dict:
+    project = StateManager().get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail=f"No such project: {project_id}")
+    return project
+
+
+@router.put("/{project_id}")
+def update_project(project_id: int, body: ProjectUpdateRequest) -> dict:
+    sm = StateManager()
+    if sm.get_project(project_id) is None:
+        raise HTTPException(status_code=404, detail=f"No such project: {project_id}")
+    sm.update_project(project_id, name=body.name, description=body.description)
+    return sm.get_project(project_id)
+
+
+@router.get("/{project_id}/repos")
+def list_project_repos(project_id: int) -> list[dict]:
+    sm = StateManager()
+    if sm.get_project(project_id) is None:
+        raise HTTPException(status_code=404, detail=f"No such project: {project_id}")
+    return sm.list_project_repos(project_id)
+
+
+@router.post("/{project_id}/repos")
+def add_project_repo(project_id: int, body: ProjectRepoCreateRequest) -> dict:
+    sm = StateManager()
+    if sm.get_project(project_id) is None:
+        raise HTTPException(status_code=404, detail=f"No such project: {project_id}")
+    repo_id = _clone_and_register(sm, project_id, body.url, label=body.label)
+    return sm.get_project_repo(repo_id)
+
+
+@router.delete("/{project_id}/repos/{repo_id}")
+def remove_project_repo(project_id: int, repo_id: int) -> dict:
+    sm = StateManager()
+    repo = sm.get_project_repo(repo_id)
+    if repo is None or repo["project_id"] != project_id:
+        raise HTTPException(status_code=404, detail=f"No such folder: {repo_id}")
+    removed = sm.remove_project_repo(repo_id)
+    if not removed:
+        raise HTTPException(status_code=400, detail="Folder is still assigned to an epic — reassign it first")
+    return {"repo_id": repo_id, "removed": True}
+
+
+@router.get("/{project_id}/config")
+def get_project_config_endpoint(project_id: int) -> list[dict]:
+    sm = StateManager()
+    if sm.get_project(project_id) is None:
+        raise HTTPException(status_code=404, detail=f"No such project: {project_id}")
+    return list_project_config_for_display(project_id)
+
+
+@router.put("/{project_id}/config/{key}")
+def set_project_config_endpoint(project_id: int, key: str, body: ProjectConfigUpdate) -> dict:
+    sm = StateManager()
+    if sm.get_project(project_id) is None:
+        raise HTTPException(status_code=404, detail=f"No such project: {project_id}")
+    if key not in PROJECT_OVERRIDABLE_KEYS:
+        raise HTTPException(status_code=400, detail=f"'{key}' is not a project-overridable setting")
+    set_project_config(project_id, key, body.value)
+    return {"key": key, "updated": True}
+
+
+@router.delete("/{project_id}/config/{key}")
+def clear_project_config_endpoint(project_id: int, key: str) -> dict:
+    sm = StateManager()
+    if sm.get_project(project_id) is None:
+        raise HTTPException(status_code=404, detail=f"No such project: {project_id}")
+    clear_project_config(project_id, key)
+    return {"key": key, "cleared": True}
+
+
+@router.get("/{project_id}/epics")
+def list_project_epics(project_id: int) -> list[dict]:
+    sm = StateManager()
+    if sm.get_project(project_id) is None:
+        raise HTTPException(status_code=404, detail=f"No such project: {project_id}")
+
+    epics = []
+    for epic_key in sm.list_all_epic_keys():
+        epic = sm.get_epic(epic_key)
+        if epic is None or epic["project_id"] != project_id:
+            continue
+        epic["stories"] = [_story_with_pr(sm, s["jira_key"]) for s in sm.list_stories_for_epic(epic_key)]
+        epics.append(epic)
+    return epics
+
+
+# -- ticket filter ---------------------------------------------------------
+# One saved JIRA query per project. See forge/services/jira_filter.py for
+# what a sweep does and does not do (it only ever adds).
+
+
+def _require_project(project_id: int) -> StateManager:
+    sm = StateManager()
+    if sm.get_project(project_id) is None:
+        raise HTTPException(status_code=404, detail=f"No such project: {project_id}")
+    return sm
+
+
+def _filter_response(ticket_filter: dict | None) -> dict | None:
+    """Adds the compiled JQL so the UI can show exactly what will be sent
+    to JIRA rather than making the user imagine it. A filter too empty to
+    compile reports `jql: null` instead of failing the read — an
+    in-progress filter is a normal thing to have saved."""
+    if ticket_filter is None:
+        return None
+    try:
+        jql = build_jql(ticket_filter)
+    except ValueError:
+        jql = None
+    return {**ticket_filter, "jql": jql}
+
+
+@router.get("/{project_id}/ticket-filter")
+def get_ticket_filter(project_id: int) -> dict:
+    """`{"filter": null}` means no filter has ever been saved — distinct
+    from a saved-but-switched-off one, which is a filter with
+    `enabled: false`."""
+    sm = _require_project(project_id)
+    return {"filter": _filter_response(sm.get_project_ticket_filter(project_id))}
+
+
+@router.put("/{project_id}/ticket-filter")
+def set_ticket_filter(project_id: int, body: TicketFilterRequest) -> dict:
+    sm = _require_project(project_id)
+    try:
+        build_jql(body.model_dump())  # reject an all-empty filter at the door
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    saved = sm.set_project_ticket_filter(
+        project_id,
+        enabled=body.enabled,
+        jira_project_key=body.jira_project_key,
+        assignee=body.assignee,
+        statuses=body.statuses,
+        labels=body.labels,
+        issue_types=body.issue_types,
+        extra_jql=body.extra_jql,
+    )
+    return {"filter": _filter_response(saved)}
+
+
+@router.delete("/{project_id}/ticket-filter")
+def delete_ticket_filter(project_id: int) -> dict:
+    """Stops all ingestion for this project. Epics already synced by it are
+    left exactly as they are — forgetting the query never unsyncs work."""
+    sm = _require_project(project_id)
+    return {"project_id": project_id, "cleared": sm.clear_project_ticket_filter(project_id)}
+
+
+def _run_filter(project_id: int, body: TicketFilterRunRequest | None, runner) -> dict:
+    _require_project(project_id)
+    unsaved = body.filter.model_dump() if body is not None and body.filter is not None else None
+    try:
+        return runner(project_id, unsaved)
+    except ValueError as exc:  # empty filter, no saved filter, or JIRA not configured
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except JIRAError as exc:
+        # 400 from JIRA here is almost always a JQL the user typed into the
+        # escape hatch, so its text goes back verbatim — that message is the
+        # only thing that makes the mistake fixable.
+        status = 400 if exc.status_code == 400 else 502
+        raise HTTPException(status_code=status, detail=(exc.text or str(exc))) from exc
+
+
+@router.post("/{project_id}/ticket-filter/preview")
+def preview_ticket_filter(project_id: int, body: TicketFilterRunRequest | None = None) -> dict:
+    """Dry run: what this filter matches and what a sweep would do with
+    each match. Writes nothing."""
+    return _run_filter(project_id, body, preview_filter)
+
+
+@router.post("/{project_id}/ticket-filter/sync")
+def run_ticket_filter_sync(project_id: int, body: TicketFilterRunRequest | None = None) -> dict:
+    """One sweep now, instead of waiting for the background loop. Works on
+    a disabled filter too — `enabled` only governs the unattended sweeps."""
+    return _run_filter(project_id, body, sync_project_filter)

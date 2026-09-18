@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+repos/
+.DS_Store
+.claude/settings.local.json
+
+# Build output, not source: `cd ui-src && npm install && npm run build`
+# regenerates settings-ui/vendor/ from ui-src/src/ in seconds, and the
+# Dockerfile's ui-build stage does the same inside the image. Every
+# frontend dependency is public, so nothing here needs credentials to
+# rebuild.
+ui-src/node_modules/
+settings-ui/vendor/

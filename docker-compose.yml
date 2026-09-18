@@ -1,0 +1,68 @@
+# code_forge — local single-process stack.
+#
+# Two services: Postgres, and the app (FastAPI settings UI/API + the daemon
+# poll loop running as a background task inside the same process — no
+# control-plane/worker split, that's a fleet-scale concern, irrelevant
+# here). Alembic runs as a one-shot init container before the app starts.
+#
+# The ONLY env var the app needs is DATABASE_URL, wired below by service
+# name — every other setting (JIRA/GitHub/LLM credentials, gate toggles) is
+# entered through the settings UI at http://localhost:8000/settings and
+# stored in Postgres. There is no .env file to create.
+#
+# The UI (settings-ui/vendor/) is a pre-built asset — see the Dockerfile's
+# comment and ui-src/README.md if you've changed settings-ui/*.html or
+# ui-src/entry.js and need to rebuild it before `docker compose up --build`.
+#
+# Usage:
+#   docker compose up
+#   open http://localhost:8000/settings
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: forge
+      POSTGRES_PASSWORD: forge
+      POSTGRES_DB: forge
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "forge"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    volumes:
+      - forge-pgdata:/var/lib/postgresql/data
+    ports:
+      - "${FORGE_PG_PORT:-5433}:5432"
+
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://forge:forge@postgres:5432/forge
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    build: .
+    command: ["uvicorn", "forge.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://forge:forge@postgres:5432/forge
+    ports:
+      - "${FORGE_APP_PORT:-8000}:8000"
+    volumes:
+      - forge-repos:/data/repos
+      - forge-cloned-repos:/data/cloned-repos
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  forge-pgdata:
+  forge-repos:
+  forge-cloned-repos:

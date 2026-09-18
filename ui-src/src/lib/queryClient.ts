@@ -1,0 +1,15 @@
+import { QueryClient } from "@tanstack/react-query";
+
+export const queryClient = new QueryClient();
+
+export const queryKeys = {
+  projects: () => ["projects"] as const,
+  project: (id: number) => ["projects", id] as const,
+  projectRepos: (id: number) => ["projects", id, "repos"] as const,
+  projectEpics: (id: number) => ["projects", id, "epics"] as const,
+  projectConfig: (id: number) => ["projects", id, "config"] as const,
+  ticketFilter: (id: number) => ["projects", id, "ticket-filter"] as const,
+  globalConfig: () => ["config"] as const,
+  epicUsage: (epicKey: string) => ["epics", epicKey, "usage"] as const,
+  storyUsage: (storyKey: string) => ["stories", storyKey, "usage"] as const,
+};
