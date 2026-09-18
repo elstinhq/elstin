@@ -8,6 +8,14 @@ AGENTS.md's StateManager-only rule for forge.db.models. get_epic_usage still
 goes through StateManager for story metadata (wave, kind, key) — that part
 IS core state and stays on the normal path.
 
+record_run_outcome() is the same idea for the *shape* of a run rather
+than its cost — gate failures, verifier rejections, dev passes and turns
+(see forge/db/models/run_outcome.py). It accumulates in place as the run
+progresses, called from forge/orchestration/graph.py's nodes, so a run
+that fails or is abandoned still leaves the counters it reached. Those are
+the runs worth studying, so recording only on success would bias the data
+in exactly the wrong direction.
+
 record_phase_usage() is called once per phase *invocation* — once per
 run_planner() call, once per run_dev() call, once per run_verifier()
 call, once per run_epic_qa() call, and once per chat_completion_json() call
@@ -22,8 +30,9 @@ from typing import Any
 
 from sqlalchemy import select
 
+from forge.config.store import get_float_config
 from forge.db.engine import session_scope
-from forge.db.models import StoryUsage
+from forge.db.models import StoryRunOutcome, StoryUsage
 from forge.llm.pricing import estimate_cost_usd
 
 logger = logging.getLogger("forge.usage")
@@ -104,6 +113,144 @@ def record_phase_usage(
         "usage run_id=%s phase=%s model=%s tokens=%d cost_source=%s",
         run_id, phase, model_key, input_tokens + output_tokens, resolved_source,
     )
+
+
+# Every accumulating counter on StoryRunOutcome. Kept as one list so a
+# new column is added in a single place rather than in the writer, the
+# reader and the empty-shape helper separately.
+_OUTCOME_COUNTERS = (
+    "planner_turns",
+    "explorer_count",
+    "dev_passes",
+    "dev_turns",
+    "dev_soft_stops",
+    "gate_runs",
+    "gate_failures",
+    "verifier_runs",
+    "verifier_rejections",
+)
+
+
+def record_run_outcome(
+    run_id: str | None,
+    *,
+    outcome: str | None = None,
+    dev_terminal_reason: str | None = None,
+    **counters: int,
+) -> None:
+    """Add to this run's work counters. Counters accumulate; `outcome` and
+    `dev_terminal_reason` overwrite, since the latest value of each is the
+    one that describes the run.
+
+    Best-effort on purpose. This is telemetry for tuning, so a failure to
+    record it must never fail a run that is otherwise fine — an unwritable
+    counter is worth a log line, not a dead story."""
+    if not run_id:
+        return
+
+    unknown = set(counters) - set(_OUTCOME_COUNTERS)
+    if unknown:
+        raise ValueError(f"unknown run-outcome counter(s): {sorted(unknown)}")
+
+    try:
+        with session_scope() as session:
+            row = session.execute(
+                select(StoryRunOutcome).where(StoryRunOutcome.run_id == run_id)
+            ).scalar_one_or_none()
+            if row is None:
+                # Explicit zeros, not column defaults: those only apply at
+                # INSERT time and the += below runs first, in memory.
+                row = StoryRunOutcome(run_id=run_id, **{name: 0 for name in _OUTCOME_COUNTERS})
+                session.add(row)
+            for name, amount in counters.items():
+                setattr(row, name, getattr(row, name) + amount)
+            if outcome is not None:
+                row.outcome = outcome
+            if dev_terminal_reason is not None:
+                row.dev_terminal_reason = dev_terminal_reason
+    except Exception as exc:  # noqa: BLE001 — telemetry must not fail a run
+        logger.warning("could not record run outcome for run_id=%s: %s", run_id, exc)
+        return
+
+    logger.info("run outcome run_id=%s %s", run_id, counters)
+
+
+def get_run_outcome(run_id: str) -> dict[str, Any] | None:
+    """This run's work counters, or None when nothing was ever recorded.
+
+    None is deliberately distinct from a dict of zeros: it means "this run
+    predates the counters, or never dispatched", which is not the same
+    claim as "it ran and needed no retries". Callers must render the two
+    differently or the first real measurement will look like a regression
+    against a fictional baseline of zero."""
+    with session_scope() as session:
+        row = session.execute(
+            select(StoryRunOutcome).where(StoryRunOutcome.run_id == run_id)
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        return {
+            "run_id": row.run_id,
+            **{name: getattr(row, name) for name in _OUTCOME_COUNTERS},
+            "dev_terminal_reason": row.dev_terminal_reason,
+            "outcome": row.outcome,
+        }
+
+
+# --- the per-story spend ceiling ---------------------------------------
+# Every cap before this one was per *loop*: the planner had one, dev had
+# one, and each explorer carved a slice out of the planner's. Nothing
+# bounded a single story end to end, so planning plus exploration plus
+# however many dev fix rounds plus a review could each stay inside their
+# own limit while the story as a whole cost an unbounded multiple of any
+# of them. This is the outer bound, enforced at every point a story can
+# reach a model.
+
+
+def story_spend_usd(run_id: str) -> float:
+    """What this story has cost so far, from the accumulated usage rows.
+
+    IMPORTANT: a (provider, model) pair with no row in
+    forge/llm/pricing.py contributes nothing, because there is no rate to
+    multiply by — so a ceiling cannot constrain a model forge has no price
+    for. That is why the pricing table has a test pinning every shipped
+    model default against it."""
+    with session_scope() as session:
+        rows = session.execute(select(StoryUsage.cost_usd).where(StoryUsage.run_id == run_id)).scalars().all()
+    return float(sum(cost for cost in rows if cost is not None))
+
+
+def remaining_story_budget_usd(run_id: str | None) -> float | None:
+    """What is left of this story's ceiling, or None when unbounded.
+
+    Zero and negative are distinct from None on purpose: None means "no
+    ceiling was configured", whereas 0.0 means "the ceiling exists and is
+    used up", and only the second should stop a phase."""
+    ceiling = get_float_config("story_max_budget_usd", 0.0)
+    if ceiling <= 0 or not run_id:
+        return None
+    return ceiling - story_spend_usd(run_id)
+
+
+def effective_budget_usd(run_id: str | None, phase_cap_usd: float) -> tuple[float, bool]:
+    """The spend cap a phase should actually run with, and whether the
+    story's ceiling is already exhausted.
+
+    Returns (cap, exhausted). `cap` follows forge's convention that zero
+    means unbounded, and is the tighter of the phase's own cap and what
+    the story has left. `exhausted` is True only when a ceiling exists and
+    nothing remains — the caller should then refuse to start rather than
+    run one more turn, because a phase given a cap of zero would read that
+    as unbounded and do the opposite of what was asked."""
+    remaining = remaining_story_budget_usd(run_id)
+    if remaining is None:
+        return phase_cap_usd, False
+    if remaining <= 0:
+        logger.warning("story %s has exhausted its spend ceiling", run_id)
+        return 0.0, True
+    if phase_cap_usd <= 0:
+        return remaining, False
+    return min(phase_cap_usd, remaining), False
 
 
 def _row_to_dict(row: StoryUsage) -> dict[str, Any]:
@@ -198,7 +345,8 @@ def get_story_usage(story_key: str) -> dict[str, Any]:
 
     run_id = story.get("thread_id") or story_key
     usage = _usage_for_run(run_id)
-    return {"story_key": story_key, **usage}
+    # None when this run predates the counters — see get_run_outcome.
+    return {"story_key": story_key, **usage, "run_outcome": get_run_outcome(run_id)}
 
 
 def get_epic_usage(epic_key: str) -> dict[str, Any]:
