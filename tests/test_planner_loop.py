@@ -53,6 +53,14 @@ def _plan_response(plan: dict | None = None) -> LlmResponse:
     )
 
 
+def _text_response(text: str) -> LlmResponse:
+    """A plain prose reply — what an explorer sub-agent returns."""
+    return LlmResponse(
+        content=[TextBlock(text=text)], stop_reason="end_turn",
+        usage=Usage(input_tokens=100, output_tokens=50), model="gpt-5.1",
+    )
+
+
 def _no_plan_response() -> LlmResponse:
     """A run that finished cleanly but produced no plan object."""
     return LlmResponse(
@@ -61,10 +69,16 @@ def _no_plan_response() -> LlmResponse:
     )
 
 
-def _configure(monkeypatch, provider) -> None:
+def _configure(monkeypatch, provider, *, explorers: bool = False) -> None:
     from forge.config.store import set_config
 
     set_config("openai_api_key", "sk-test")
+    # Explorers are on by default in production, but they add a scoping
+    # call plus one call per explorer ahead of the plan loop. Every test
+    # below scripts an exact number of provider responses to exercise the
+    # PLAN loop, so they opt out; the explorer path has its own tests at
+    # the bottom of this file and in tests/test_explorer.py.
+    set_config("planner_explorers_enabled", "true" if explorers else "false")
     monkeypatch.setattr(planner_module, "get_provider", lambda: provider)
 
 
@@ -179,3 +193,175 @@ async def test_planner_gets_read_only_tools(monkeypatch, git_repo):
 async def test_not_configured_raises_planner_error(git_repo):
     with pytest.raises(PlannerLoopError, match="No OpenAI API key"):
         await run_planner(user_request="go", project_path=git_repo)
+
+
+# --- explorer fan-out (forge/agents/roles/explorer.py) ------------------
+
+
+def _scope_response(*areas: dict) -> LlmResponse:
+    import json
+
+    payload = {"areas": list(areas)}
+    return LlmResponse(
+        content=[TextBlock(text=json.dumps(payload))], stop_reason="end_turn",
+        usage=Usage(input_tokens=20, output_tokens=5), model="gpt-5.1", structured_output=payload,
+    )
+
+
+async def test_explorer_findings_reach_the_planner_prompt(monkeypatch, git_repo):
+    """End to end through the real explorer wiring: scope, two concurrent
+    read-only agents, then the plan loop with their reports in its prompt."""
+    provider = FakeProvider(script=[
+        _scope_response(
+            {"name": "cart UI layer", "question": "How is the cart rendered?", "path_hints": []},
+            {"name": "api client", "question": "How are cart calls made?", "path_hints": ["README.md"]},
+        ),
+        _text_response("The cart renders in `cart.py:12`."),
+        _text_response("Calls go through `client.py:40`."),
+        _plan_response(),
+    ])
+    _configure(monkeypatch, provider, explorers=True)
+
+    result = await run_planner(user_request="Add a widget", project_path=git_repo)
+
+    assert result["plan"]["feature_summary"] == "Add a widget"
+    assert len(provider.calls) == 4
+
+    # The scoping call sees the ticket and asks for no tools.
+    assert provider.calls[0].tools == []
+    # Each explorer gets the read-only trio and its own standalone question.
+    explorer_calls = provider.calls[1:3]
+    for call in explorer_calls:
+        assert {t.name for t in call.tools} == {"read_file_tool", "grep_tool", "find_files_tool"}
+    questions = {call.messages[0].content[0].text for call in explorer_calls}
+    assert any("How is the cart rendered?" in q for q in questions)
+    assert any("How are cart calls made?" in q for q in questions)
+    # An explorer never learns about the plan or the other explorers.
+    assert all("Add a widget" not in q for q in questions)
+
+    # The plan loop's prompt carries the findings, not the raw file reads.
+    plan_prompt = provider.calls[3].messages[0].content[0].text
+    assert "REPOSITORY INVESTIGATION" in plan_prompt
+    assert "cart.py:12" in plan_prompt
+    assert "client.py:40" in plan_prompt
+    assert "### cart UI layer" in plan_prompt
+
+
+async def test_empty_scope_skips_the_fan_out_entirely(monkeypatch, git_repo):
+    """A ticket that names its own files should cost one scoping call and
+    nothing more — that is the whole reason scoping may return nothing."""
+    provider = FakeProvider(script=[_scope_response(), _plan_response()])
+    _configure(monkeypatch, provider, explorers=True)
+
+    result = await run_planner(user_request="Fix the typo in widget.py", project_path=git_repo)
+
+    assert result["plan"]["feature_summary"] == "Add a widget"
+    assert len(provider.calls) == 2
+    assert "REPOSITORY INVESTIGATION" not in provider.calls[1].messages[0].content[0].text
+
+
+async def test_failed_scoping_does_not_fail_the_plan(monkeypatch, git_repo):
+    """Exploration is a head start. Losing it must cost the planner a head
+    start and nothing else."""
+    provider = FakeProvider(script=[LlmBadRequestError("scope schema rejected"), _plan_response()])
+    _configure(monkeypatch, provider, explorers=True)
+
+    result = await run_planner(user_request="Add a widget", project_path=git_repo)
+
+    assert result["plan"]["feature_summary"] == "Add a widget"
+    assert "REPOSITORY INVESTIGATION" not in provider.calls[-1].messages[0].content[0].text
+
+
+async def test_explorer_tokens_are_billed_to_the_planner_phase(monkeypatch, git_repo):
+    """Sub-agent usage must roll up, or every planned story quietly
+    under-reports its cost."""
+    recorded = {}
+
+    def fake_record(run_id, **kwargs):
+        recorded.update(kwargs)
+
+    monkeypatch.setattr(planner_module, "record_phase_usage", fake_record)
+    provider = FakeProvider(script=[
+        _scope_response({"name": "ui", "question": "How is it rendered?", "path_hints": []}),
+        _text_response("Rendered in `a.py:1`."),
+        _plan_response(),
+    ])
+    _configure(monkeypatch, provider, explorers=True)
+
+    await run_planner(user_request="Add a widget", project_path=git_repo, run_id="ENG-1")
+
+    # 20 (scope) + 100 (explorer) + 100 (plan) — all three calls counted.
+    assert recorded["input_tokens"] == 220
+
+
+async def test_clarification_round_trip_skips_exploration(monkeypatch, git_repo):
+    """The codebase was already explored on the first pass; the only new
+    input is the human's answer, so re-reading the repo is pure waste."""
+    provider = FakeProvider(script=[_plan_response()])
+    _configure(monkeypatch, provider, explorers=True)
+
+    await run_planner(
+        user_request="Add a widget", project_path=git_repo,
+        clarification_answers=[{"question": "Which layer?", "option_label": "the UI"}],
+    )
+
+    assert len(provider.calls) == 1
+
+
+async def test_exploration_and_the_plan_loop_split_one_planner_cap(monkeypatch, git_repo):
+    """Regression: explorers were funded from half the cap and the plan
+    loop was then handed the full cap again, so the phase could spend
+    about 1.5x its limit and breach the story ceiling with it."""
+    from forge.config.store import set_config
+
+    provider = FakeProvider(script=[
+        _scope_response({"name": "ui", "question": "How is it rendered?", "path_hints": []}),
+        _text_response("Rendered in `a.py:1`."),
+        _plan_response(),
+    ])
+    _configure(monkeypatch, provider, explorers=True)
+    set_config("planner_sdk_max_budget_usd", "1.00")
+
+    import forge.agents.roles.planner_loop as module
+
+    budgets: list[float] = []
+    real_loop = module.run_agent_loop
+
+    async def capturing_loop(config, messages):
+        budgets.append(config.max_budget_usd)
+        return await real_loop(config, messages)
+
+    monkeypatch.setattr(module, "run_agent_loop", capturing_loop)
+
+    await run_planner(user_request="Add a widget", project_path=git_repo)
+
+    # Scope, one explorer, then the plan loop all happened.
+    assert len(provider.calls) == 3
+    # Only the plan loop is routed through this module's own reference to
+    # run_agent_loop (explorer.py imports its own), and it gets HALF the
+    # cap — the other half having funded the fan-out — rather than the
+    # whole cap a second time.
+    assert budgets == [pytest.approx(0.50)]
+
+
+async def test_the_plan_loop_keeps_the_whole_cap_when_nothing_was_explored(monkeypatch, git_repo):
+    """No fan-out means no reservation to honour, so halving would be a
+    silent, unasked-for tightening of the operator's cap."""
+    import forge.agents.roles.planner_loop as module
+    from forge.config.store import set_config
+
+    captured = {}
+    real_loop = module.run_agent_loop
+
+    async def capturing_loop(config, messages):
+        captured["budget"] = config.max_budget_usd
+        return await real_loop(config, messages)
+
+    monkeypatch.setattr(module, "run_agent_loop", capturing_loop)
+    provider = FakeProvider(script=[_plan_response()])
+    _configure(monkeypatch, provider, explorers=False)
+    set_config("planner_sdk_max_budget_usd", "1.00")
+
+    await run_planner(user_request="Add a widget", project_path=git_repo)
+
+    assert captured["budget"] == pytest.approx(1.00)

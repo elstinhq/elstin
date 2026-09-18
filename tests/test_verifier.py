@@ -185,3 +185,74 @@ def test_compare_to_plan_no_recognized_language_is_a_noop_pass(git_repo, registe
 
     assert result["passed"] is True
     assert result["profiles"] == {}
+
+
+# --- Tier 1 fast-fail feedback -------------------------------------------
+
+
+def test_format_gate_feedback_leads_with_a_count_and_the_files_then_verbatim_errors():
+    gate = {
+        "passed": False,
+        "issues": [
+            {"severity": "blocker", "file": None, "reason": "dart_flutter: analyze failed",
+             "details": "lib/auth/auth_service.dart:12:5: error: Undefined name 'foo'.\nlib/auth/auth_service.dart:30:1: error: Expected ';'."},
+            {"severity": "blocker", "file": "lib/auth/login_page.dart", "reason": "Missing planned new file: lib/auth/login_page.dart"},
+        ],
+        "required_fixes": ["dart_flutter: analyze failed", "Missing planned new file: lib/auth/login_page.dart"],
+    }
+
+    text = verifier.format_gate_feedback(gate, attempt=1, max_attempts=3)
+
+    first_line = text.splitlines()[0]
+    assert first_line.startswith("Deterministic checks FAILED with 2 problem(s) in lib/auth/auth_service.dart, lib/auth/login_page.dart")
+    assert "(fix attempt 1/3)" in first_line
+    assert "1. dart_flutter: analyze failed" in text
+    assert "   lib/auth/auth_service.dart:12:5: error: Undefined name 'foo'." in text
+    assert "2. Missing planned new file: lib/auth/login_page.dart" in text
+    assert "analyze_changed_files_tool" in text
+    assert "do not rewrite files from scratch" in text
+
+
+def test_format_gate_feedback_falls_back_to_the_profile_analyze_error_lines():
+    gate = {
+        "passed": False,
+        "issues": [{"severity": "blocker", "file": None, "reason": "alpha: analyze failed"}],
+        "required_fixes": ["alpha: analyze failed"],
+        "profiles": {"alpha": {"analyze": {"passed": False, "error_lines": ["foo.alpha:1:1: boom"]}}},
+    }
+
+    text = verifier.format_gate_feedback(gate, attempt=2, max_attempts=3)
+
+    assert "in foo.alpha" in text.splitlines()[0]
+    assert "   foo.alpha:1:1: boom" in text
+
+
+def test_format_gate_feedback_truncates_long_test_output_to_its_tail():
+    gate = {"passed": False, "issues": [{"reason": "beta: tests failed", "details": "noise\n" * 2000 + "FAILED test_x — assertion"}]}
+
+    text = verifier.format_gate_feedback(gate, attempt=1, max_attempts=3)
+
+    assert "FAILED test_x — assertion" in text
+    assert len(text) < 3_000
+
+
+async def test_run_verifier_reuses_a_precomputed_gate_instead_of_rerunning_the_toolchain(git_repo, registered_fake_profiles, monkeypatch):
+    """gate_node already ran compare_to_plan on this exact worktree —
+    run_verifier must not run the (slow) toolchain a second time."""
+    calls = registered_fake_profiles["alpha"]
+    _write(git_repo, "alpha.marker")
+    _write(git_repo, "foo.alpha", "content\n")
+    monkeypatch.setattr(verifier, "compare_to_plan", lambda *a, **k: (_ for _ in ()).throw(AssertionError("toolchain re-run")))
+    # Skip the LLM review entirely via the trivial-diff threshold — no
+    # provider, and no DB either (this file stays DB-free).
+    monkeypatch.setattr(verifier, "get_int_config", lambda key, default=0: 10**9)
+
+    gate = {"passed": True, "issues": [], "required_fixes": [], "profiles": {}, "changed_files": ["foo.alpha"], "dev_targets": ["foo.alpha"], "coverage_gap": False}
+    result = await verifier.run_verifier(
+        plan={"files_to_modify": [{"path": "foo.alpha"}]}, acceptance_criteria=[], worktree_path=git_repo,
+        file_changes=[{"path": "foo.alpha"}], precomputed_gate=gate,
+    )
+
+    assert result["verifier_report"]["passed"] is True
+    assert result["verifier_report"]["deterministic_gate"] is gate
+    assert not [c for c in calls if c[0] == "analyze"]

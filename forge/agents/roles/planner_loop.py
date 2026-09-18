@@ -5,6 +5,16 @@ own Read/Grep/Glob-equivalent tools and produces the plan in the same
 turn, schema-validated by the provider's native structured output
 (forge/llm/types.py:ResponseFormat).
 
+Before that loop starts, `gather_exploration` (forge/agents/roles/
+explorer.py) may fan out a handful of read-only recon sub-agents in
+parallel and fold their findings into the prompt. That is a pure context
+optimization: the planner could read those files itself, but each one
+would then sit in its history and be re-sent on every later turn, whereas
+a sub-agent's reads stay in its own throwaway context and only a short
+report comes back. It is opt-out (`planner_explorers_enabled`) and
+skipped entirely on a clarification round-trip, where the codebase has
+already been explored once and the only new input is the human's answer.
+
 Tool surface: forge/tools/planner_tools.py's make_planner_tools() —
 forge's own read-only tools, since no provider ships built-in ones the way
 the old Claude Agent SDK did. Planning is read-only by nature (no
@@ -37,14 +47,16 @@ from pathlib import Path
 from typing import Any
 
 from forge.agents.loop import LoopConfig, run_agent_loop, tool_defs_from_schemas
+from forge.agents.roles import explorer as explorer_defaults
+from forge.agents.roles.explorer import gather_exploration
 from forge.agents.roles.planner import _format_prior_work_block, build_planner_system
-from forge.config.store import get_config, get_float_config, get_int_config
+from forge.config.store import get_bool_config, get_config, get_float_config, get_int_config
 from forge.llm.errors import LlmError
 from forge.llm.registry import LlmNotConfiguredError, get_provider
 from forge.llm.types import ImageBlock, LlmResponse, Message, ResponseFormat, TextBlock
 from forge.services.run_activity import append_activity
-from forge.services.usage import record_phase_usage
-from forge.tools.planner_tools import make_planner_tools
+from forge.services.usage import effective_budget_usd, record_phase_usage, record_run_outcome
+from forge.tools.planner_tools import READ_ONLY_TOOLS, make_planner_tools
 
 logger = logging.getLogger("forge.planner_loop")
 
@@ -137,6 +149,7 @@ def _build_prompt_text(
     acceptance_criteria_hint: list[str] | None,
     prior_work: dict[str, Any],
     clarification_answers: list[dict[str, Any]] | None,
+    exploration: str = "",
 ) -> str:
     guide = context_bundle.get("project_guide") or {}
     text = f"User request:\n{user_request}\n\nProject path: {project_path}\n\n"
@@ -164,6 +177,12 @@ def _build_prompt_text(
     search_terms = context_bundle.get("search_terms") or []
     if search_terms:
         text += "Starting search terms for your own exploration (not exhaustive — use your grep/find/read tools to actually locate the files this ticket needs):\n" + ", ".join(search_terms) + "\n\n"
+
+    if exploration:
+        # Before the prior-work block and the closing instruction, so the
+        # findings read as context the planner already has rather than as
+        # an afterthought.
+        text += exploration + "\n"
 
     text += _format_prior_work_block(prior_work)
 
@@ -216,6 +235,16 @@ async def run_planner(
     except LlmNotConfiguredError as exc:
         raise PlannerLoopError(str(exc)) from exc
 
+    # See the equivalent in forge/agents/roles/dev_loop.py. Planning is
+    # normally the first spend on a story, so this usually only bites on a
+    # re-plan after a clarification round-trip or a retry.
+    planner_budget, budget_exhausted = effective_budget_usd(run_id, get_float_config("planner_sdk_max_budget_usd", 0.0))
+    if budget_exhausted:
+        raise PlannerLoopError(
+            "Story spend ceiling (story_max_budget_usd) is exhausted — refusing to start planning. "
+            "Raise the ceiling at /settings and retry the story to continue."
+        )
+
     phase_started_at = time.monotonic()
     resolved_model = sdk_model or get_config("planner_sdk_model")
     usage_totals = {"input_tokens": 0, "output_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 0}
@@ -256,10 +285,49 @@ async def run_planner(
         prior_work["selected_branch"] = None
         context_bundle["prior_work"] = prior_work
 
+        # Parallel read-only recon before planning (forge/agents/roles/
+        # explorer.py). Deliberately ahead of the prompt build: the whole
+        # point is that these agents' large file reads happen in their own
+        # throwaway contexts and only their compact findings reach the
+        # planner's history. Best-effort by construction — gather_exploration
+        # returns an empty block when scoping finds nothing worth a reader,
+        # when it fails, or when every explorer comes back empty, and the
+        # planner then behaves exactly as it did before this existed.
+        exploration = ""
+        # Whether the fan-out could have spent anything. gather_exploration
+        # pays for a scoping call even when it then decides no explorer is
+        # warranted, so this flags "money may have gone out", not "explorers
+        # ran" — the plan loop's share below is reduced either way, because
+        # erring conservative is the right direction for a spend cap.
+        explored = False
+        max_agents = get_int_config("planner_explorer_max_agents", explorer_defaults.DEFAULT_MAX_AGENTS)
+        if not clarification_answers and get_bool_config("planner_explorers_enabled") and max_agents > 0:
+            explored = True
+            exploration, explore_api_ms = await gather_exploration(
+                provider=provider,
+                # A cheaper model is usually enough to read code and report
+                # back; falls back to the planner's own model when unset.
+                model=get_config("planner_explorer_model") or resolved_model,
+                project_path=project_path,
+                user_request=user_request,
+                max_agents=max_agents,
+                max_turns=get_int_config("planner_explorer_max_turns", explorer_defaults.DEFAULT_MAX_TURNS),
+                # Already clamped to what the story has left, so the
+                # explorers' own slices come out of the real remainder.
+                planner_budget_usd=planner_budget,
+                effort=sdk_effort or get_config("planner_sdk_effort"),
+                # Same hook the plan loop uses, so explorer tokens land in
+                # this phase's story_usage row instead of going unbilled.
+                on_turn=_on_turn,
+                run_id=run_id,
+            )
+            api_duration_ms += explore_api_ms
+
         text = _build_prompt_text(
             user_request=user_request, project_path=project_path, context_bundle=context_bundle,
             linked_issues_context=linked_issues_context, acceptance_criteria_hint=acceptance_criteria_hint,
             prior_work=prior_work, clarification_answers=clarification_answers,
+            exploration=exploration,
         )
 
         content_blocks: list[Any] = [TextBlock(text=text)]
@@ -279,8 +347,20 @@ async def run_planner(
             response_format=ResponseFormat(name="dev_plan", schema=_PLAN_JSON_SCHEMA),
             effort=sdk_effort or get_config("planner_sdk_effort"),
             max_turns=get_int_config("planner_sdk_max_turns", 40),
-            max_budget_usd=get_float_config("planner_sdk_max_budget_usd", 0.0),
+            # The other half of the cap. explorer._explorer_budget funds the
+            # fan-out from half of planner_budget and reserves the rest for
+            # this loop, but that reservation only holds if it is applied
+            # here: handing over the full cap again would let the phase spend
+            # about 1.5x its configured limit, and breach the story ceiling
+            # by the same margin. This phase's usage only reaches the DB in
+            # the finally block below, so effective_budget_usd cannot see the
+            # explorers' spend and the split has to be arithmetic.
+            max_budget_usd=(planner_budget / 2 if explored and planner_budget > 0 else planner_budget),
             compaction_token_threshold=get_int_config("agent_compaction_token_threshold", 120_000),
+            # Every planner tool is read-only, so a whole turn's calls run
+            # concurrently. No progress_tools/max_idle_turns: planning
+            # never modifies files, so an idle-turn budget is meaningless.
+            read_only_tools=READ_ONLY_TOOLS,
             on_block=_on_block,
             on_turn=_on_turn,
         )
@@ -296,6 +376,7 @@ async def run_planner(
                 raise PlannerLoopError(f"Planner agent loop failed: {exc}") from exc
 
             api_duration_ms += result.api_duration_ms
+            record_run_outcome(run_id, planner_turns=result.turns_used)
             logger.info(
                 "Planner result run_id=%s attempt=%d/%d terminal_reason=%s is_error=%s has_plan=%s",
                 run_id, attempt, max_attempts, result.terminal_reason, result.is_error, result.structured_output is not None,

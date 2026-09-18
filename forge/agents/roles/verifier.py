@@ -1,9 +1,20 @@
 """Unlike dev/planner, the verifier runs no tool-driven agent loop — it
-always runs a deterministic gate followed by a single-shot LLM review, via
+is a deterministic gate followed by a single-shot LLM review, via
 forge/services/generation.py's chat_completion_json (which goes through
 forge/llm/registry.py's configured provider, same as every other role —
 see that module's docstring for why it doesn't route through
 forge/agents/loop.py).
+
+The two halves are separately callable on purpose. `run_deterministic_gate`
+is the **Tier 1** check forge/orchestration/graph.py's gate_node runs
+straight after every dev pass, before the verifier node is ever entered:
+compile/lint + the planned tests, all via subprocess, no model. If it
+fails, the graph never pays for an LLM review of code that doesn't build
+— `format_gate_feedback` turns the failure into one targeted user
+message ("analyze failed with 2 errors in auth_service.dart — fix these")
+and the graph routes straight back to dev. Only a worktree that clears
+Tier 1 reaches `run_verifier`, which then reuses that same gate result
+(`precomputed_gate`) rather than running the toolchain a second time.
 
 The deterministic gate itself is a thin per-language dispatcher: for every
 `LanguageProfile` forge/tools/language_hooks.py detects in the worktree,
@@ -21,6 +32,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -162,6 +174,109 @@ _MAX_DIFF_FILES = 20
 _MAX_DIFF_CHARS = 6_000
 _FAILED_OUTPUT_TAIL = 1_500
 
+# Per-issue detail carried into the Tier 1 fix message. The analyzer's
+# own error lines are the useful part and are short; a test runner's
+# stdout tail is where this cap bites.
+_GATE_FEEDBACK_DETAIL_CHARS = 1_500
+_GATE_FEEDBACK_MAX_ISSUES = 8
+_GATE_FEEDBACK_MAX_ERROR_LINES = 25
+
+# `path:line` / `path:line:col` in analyzer/test output — every toolchain
+# forge supports prints one of these shapes for a real failure.
+_PATH_LINE_RE = re.compile(r"(?<![\w/])((?:[\w.-]+/)*[\w.-]+\.[A-Za-z]{1,6}):\d+")
+
+
+async def run_deterministic_gate(
+    *,
+    plan: dict[str, Any],
+    worktree_path: str,
+    file_changes: list[dict[str, Any]],
+    project_path: str | None = None,
+    run_id: str | None = None,
+    prior_build_runner: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Tier 1: compare_to_plan (planned-file presence, per-language
+    analyze/compile and the plan's tests — subprocesses, no model) run
+    off-thread. Returns the gate report; `passed` is the routing key."""
+    logger.info("Deterministic gate starting worktree=%s dev_targets=%s", worktree_path, sorted(_dev_target_paths(file_changes)))
+    if run_id:
+        append_activity(run_id, type="status", phase="verifier", title="Running deterministic gate (build + planned tests)")
+    gate = await asyncio.to_thread(
+        compare_to_plan, plan, worktree_path, file_changes,
+        project_path=project_path, run_id=run_id, prior_verify_state=prior_build_runner,
+    )
+    if run_id:
+        blockers = gate.get("required_fixes") or []
+        append_activity(
+            run_id, type="status", phase="verifier",
+            title="Deterministic gate passed" if gate.get("passed") else f"Deterministic gate failed: {len(blockers)} blocker(s)",
+            detail="; ".join(str(b) for b in blockers[:5]) or None,
+        )
+    return gate
+
+
+def _gate_issue_details(gate: dict[str, Any], issue: dict[str, Any]) -> str:
+    """The most specific text available for one gate issue: the issue's
+    own `details` (analyzer error lines, test output tail), else the
+    matching profile report's analyzer error lines."""
+    details = str(issue.get("details") or "").strip()
+    if details:
+        return details
+    reason = str(issue.get("reason") or "")
+    profile_key = reason.split(":", 1)[0] if ":" in reason else ""
+    report = (gate.get("profiles") or {}).get(profile_key) or {}
+    analyze = report.get("analyze") if isinstance(report, dict) else None
+    if isinstance(analyze, dict) and analyze.get("error_lines"):
+        return "\n".join(str(line) for line in analyze["error_lines"][:_GATE_FEEDBACK_MAX_ERROR_LINES])
+    return ""
+
+
+def format_gate_feedback(gate: dict[str, Any], *, attempt: int, max_attempts: int) -> str:
+    """The user message the graph sends dev when Tier 1 fails — one
+    targeted fix brief in place of a verifier review. Leads with a
+    headline a weak model can act on ("2 problem(s) in auth_service.dart,
+    login_page.dart"), then each blocker with its verbatim toolchain
+    output, then exactly what to do next."""
+    issues = [i for i in (gate.get("issues") or []) if isinstance(i, dict)]
+    if not issues:
+        issues = [{"reason": str(fix)} for fix in (gate.get("required_fixes") or [])]
+
+    files: list[str] = []
+    numbered: list[str] = []
+    for idx, issue in enumerate(issues[:_GATE_FEEDBACK_MAX_ISSUES], 1):
+        reason = str(issue.get("reason") or "unspecified failure").strip()
+        details = _gate_issue_details(gate, issue)
+        if issue.get("file"):
+            files.append(str(issue["file"]))
+        for match in _PATH_LINE_RE.findall(details):
+            files.append(match)
+        if len(details) > _GATE_FEEDBACK_DETAIL_CHARS:
+            details = "...\n" + details[-_GATE_FEEDBACK_DETAIL_CHARS:]
+        block = f"{idx}. {reason}"
+        if details:
+            block += "\n" + "\n".join(f"   {line}" for line in details.splitlines() if line.strip())
+        numbered.append(block)
+
+    seen: set[str] = set()
+    unique_files = [f for f in files if not (f in seen or seen.add(f))]
+    where = f" in {', '.join(unique_files[:6])}" if unique_files else ""
+    omitted = len(issues) - len(numbered)
+
+    lines = [
+        f"Deterministic checks FAILED with {len(issues)} problem(s){where} (fix attempt {attempt}/{max_attempts}).",
+        "The analyzer/test runner ran on your worktree before any review. Fix these specific failures — nothing else:",
+        "",
+        *numbered,
+    ]
+    if omitted > 0:
+        lines.append(f"... and {omitted} more problem(s); run analyze_changed_files_tool to see them all.")
+    lines.extend([
+        "",
+        "Apply the fixes with edit_file_tool/apply_edits_tool (do not rewrite files from scratch; do not touch files outside the plan), "
+        "then run analyze_changed_files_tool. When it passes for your files, respond with a plain-text summary.",
+    ])
+    return "\n".join(lines)
+
 
 def _build_llm_payload(plan: dict[str, Any], acceptance_criteria: list[str], file_changes: list[dict[str, Any]], diffs: list[dict[str, Any]], gate: dict[str, Any]) -> dict[str, Any]:
     plan = {k: v for k, v in plan.items() if k != "plan_markdown"}
@@ -191,6 +306,52 @@ def _build_llm_payload(plan: dict[str, Any], acceptance_criteria: list[str], fil
     }
 
 
+# A nullable-string leaf. Strict json_schema mode requires every property
+# to appear in `required` at every level, so "the model may omit this" is
+# expressed as a nullable type rather than as absence from `required` —
+# same constraint and same workaround as the plan schema in
+# forge/agents/roles/planner_loop.py.
+_NULLABLE_STRING = {"type": ["string", "null"]}
+
+# The review's shape, enforced by the provider instead of hoped for.
+#
+# Until this existed the verifier asked for JSON in prose and relied on
+# forge/services/generation.py's tolerant extraction to find an object in
+# whatever came back. That is the weakest link in the pipeline on a cheap
+# model: an unparseable reply raises, and the run fails having already paid
+# for the deterministic gate. Constraining the shape moves that failure
+# from "sometimes, at runtime" to "never, by construction" wherever the
+# provider honours json_schema.
+_VERIFIER_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "passed": {"type": "boolean"},
+        "reasoning": _NULLABLE_STRING,
+        "required_fixes": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "One imperative sentence per fix the dev agent must apply",
+        },
+        "issues": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "severity": {"type": "string", "enum": ["blocker", "major", "minor"]},
+                    # Nullable because a finding can be about the change as a
+                    # whole rather than one file.
+                    "file": _NULLABLE_STRING,
+                    "reason": {"type": "string"},
+                },
+                "required": ["severity", "file", "reason"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["passed", "reasoning", "required_fixes", "issues"],
+    "additionalProperties": False,
+}
+
 _VERIFIER_REVIEW_CORE = """You verify a software feature implementation against a plan.
 Deterministic checks already passed.
 Return JSON: {passed: bool, issues: [], required_fixes: [], reasoning: string optional}.
@@ -215,18 +376,27 @@ async def run_verifier(
     project_path: str | None = None,
     run_id: str | None = None,
     prior_build_runner: dict[str, Any] | None = None,
+    precomputed_gate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """prior_build_runner: kept as the historical param/field name for
     minimal churn to the LangGraph state schema (FeatureRunState.dev_build_runner) —
     its shape is now generic: `{profile_key: state}`, e.g.
-    {"dart_flutter": {"passed": True, "signature": "..."}}."""
+    {"dart_flutter": {"passed": True, "signature": "..."}}.
+
+    precomputed_gate: the Tier 1 report gate_node already produced for
+    this exact worktree state (nothing runs between the gate and this
+    node). Passing it skips a second, identical toolchain run — on a
+    Flutter or Maven repo that is most of the verifier's wall-clock."""
     logger.info("Verifier starting worktree=%s dev_targets=%s", worktree_path, sorted(_dev_target_paths(file_changes)))
     phase_started_at = time.monotonic()
     llm_usage: dict[str, Any] | None = None
     try:
         if run_id:
             append_activity(run_id, type="status", phase="verifier", title="Verification started")
-        gate = await asyncio.to_thread(compare_to_plan, plan, worktree_path, file_changes, project_path=project_path, run_id=run_id, prior_verify_state=prior_build_runner)
+        if precomputed_gate:
+            gate = precomputed_gate
+        else:
+            gate = await asyncio.to_thread(compare_to_plan, plan, worktree_path, file_changes, project_path=project_path, run_id=run_id, prior_verify_state=prior_build_runner)
         diffs = await asyncio.to_thread(get_all_diffs, worktree_path)
 
         if not gate["passed"]:
@@ -245,6 +415,8 @@ async def run_verifier(
                 {"role": "system", "content": _verifier_review_system_prompt(worktree_path)},
                 {"role": "user", "content": json.dumps(_build_llm_payload(plan, acceptance_criteria, file_changes, diffs, gate), indent=2)[:120000]},
             ],
+            response_schema=_VERIFIER_JSON_SCHEMA,
+            response_schema_name="verifier_review",
             run_id=run_id, phase="verifier", label="verifier",
         )
         if run_id and llm_report.get("reasoning"):

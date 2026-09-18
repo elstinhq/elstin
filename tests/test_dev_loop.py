@@ -184,3 +184,127 @@ async def test_run_dev_resumes_from_prior_history(git_repo: str, monkeypatch: py
 
     assert len(captured_requests[0].messages) == 3  # 2 prior turns + this iteration's brief
     assert captured_requests[0].messages[0].content[0].text == "earlier turn"
+
+
+async def test_run_dev_uses_gate_feedback_as_the_brief_on_top_of_prior_history(git_repo: str, monkeypatch: pytest.MonkeyPatch):
+    """The Tier 1 gate's fix message is appended to the existing history
+    as the next user turn — no fresh FIX MODE brief, no re-injected file
+    contents — so the model keeps its context and the prompt prefix
+    stays cacheable."""
+    import forge.agents.roles.dev_loop as dev_loop_module
+    from forge.config.store import set_config
+    from forge.llm.types import history_to_json, text_message
+
+    set_config("openai_api_key", "sk-test")
+    prior_history = history_to_json([text_message("user", "the plan"), text_message("assistant", "wrote a.py")])
+    captured_requests = []
+
+    @dataclass
+    class CapturingProvider(FakeProvider):
+        async def complete(self, request: LlmRequest) -> LlmResponse:
+            captured_requests.append(request)
+            return await super().complete(request)
+
+    monkeypatch.setattr(dev_loop_module, "get_provider", lambda: CapturingProvider(script=[_text_response("fixed")]))
+
+    await run_dev(
+        plan={}, context_bundle={}, worktree_path=git_repo, project_path=git_repo,
+        prior_history=prior_history, verifier_report={"required_fixes": ["stale review finding"]},
+        gate_feedback="Deterministic checks FAILED with 1 problem(s) in a.py (fix attempt 1/3).\n1. analyze failed",
+    )
+
+    messages = captured_requests[0].messages
+    assert len(messages) == 3
+    assert messages[2].role == "user"
+    assert messages[2].content[0].text.startswith("Deterministic checks FAILED with 1 problem(s) in a.py")
+    assert "FIX MODE" not in messages[2].content[0].text
+    assert "stale review finding" not in messages[2].content[0].text
+
+
+async def test_run_dev_no_progress_stop_is_a_soft_stop(git_repo: str, monkeypatch: pytest.MonkeyPatch):
+    """The idle-turn budget ends the loop like a turn cap does: truncated,
+    history kept for the next round, no DevLoopError."""
+    import forge.agents.roles.dev_loop as dev_loop_module
+    from forge.config.store import set_config
+
+    set_config("openai_api_key", "sk-test")
+    set_config("dev_sdk_max_idle_turns", "2")
+    monkeypatch.setattr(
+        dev_loop_module, "get_provider",
+        lambda: FakeProvider(script=[
+            _tool_call_response("search_codebase_tool", {"query": "foo"}, call_id="c1"),
+            _tool_call_response("search_codebase_tool", {"query": "bar"}, call_id="c2"),
+            _text_response("never reached"),
+        ]),
+    )
+
+    result = await run_dev(plan={}, context_bundle={}, worktree_path=git_repo, project_path=git_repo)
+
+    assert result["truncated"] is True
+    assert result["dev_history"]
+
+
+async def test_dev_run_seeds_the_checklist_from_the_plan_and_reshows_it_each_turn(
+    git_repo: str, monkeypatch: pytest.MonkeyPatch
+):
+    import forge.agents.roles.dev_loop as dev_loop_module
+    from forge.config.store import set_config
+
+    set_config("openai_api_key", "sk-test")
+    captured = []
+
+    @dataclass
+    class CapturingProvider(FakeProvider):
+        async def complete(self, request: LlmRequest) -> LlmResponse:
+            captured.append(request)
+            return await super().complete(request)
+
+    monkeypatch.setattr(
+        dev_loop_module, "get_provider",
+        lambda: CapturingProvider(script=[
+            _tool_call_response("update_progress_tool", {"updates": [{"path": "widget.py", "status": "doing"}]}, call_id="c1"),
+            _text_response("all done"),
+        ]),
+    )
+
+    plan = {"files_to_create": [{"path": "widget.py"}], "files_to_modify": [{"path": "README.md"}]}
+    result = await run_dev(plan=plan, context_bundle={}, worktree_path=git_repo, project_path=git_repo)
+
+    # Turn one sees the seeded board, turn two sees the model's own update.
+    assert "[ ] create widget.py" in captured[0].messages[-1].content[0].text
+    assert "[>] create widget.py" in captured[1].messages[-1].content[0].text
+    # And it comes back out for the next fix round.
+    assert result["dev_progress"] == [
+        {"path": "widget.py", "action": "create", "status": "doing"},
+        {"path": "README.md", "action": "modify", "status": "pending"},
+    ]
+
+
+async def test_dev_run_resumes_a_prior_checklist_instead_of_reseeding(git_repo: str, monkeypatch: pytest.MonkeyPatch):
+    """A fix round must not report already-written files as pending."""
+    import forge.agents.roles.dev_loop as dev_loop_module
+    from forge.config.store import set_config
+
+    set_config("openai_api_key", "sk-test")
+    captured = []
+
+    @dataclass
+    class CapturingProvider(FakeProvider):
+        async def complete(self, request: LlmRequest) -> LlmResponse:
+            captured.append(request)
+            return await super().complete(request)
+
+    monkeypatch.setattr(dev_loop_module, "get_provider", lambda: CapturingProvider(script=[_text_response("fixed")]))
+
+    prior = [{"path": "widget.py", "action": "create", "status": "done"}]
+    result = await run_dev(
+        plan={"files_to_create": [{"path": "widget.py"}]}, context_bundle={},
+        worktree_path=git_repo, project_path=git_repo,
+        prior_history=[{"role": "user", "content": [{"type": "text", "text": "earlier"}]}],
+        prior_progress=prior,
+    )
+
+    assert "[x] create widget.py" in captured[0].messages[-1].content[0].text
+    assert result["dev_progress"][0]["status"] == "done"
+    # The caller's list is not mutated in place across runs.
+    assert prior[0]["status"] == "done"

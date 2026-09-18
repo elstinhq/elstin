@@ -12,9 +12,11 @@ ONLY tools the model can call, since the loop only ever offers what's in
 permission-callback layer the way the old Claude Agent SDK needed one,
 because there are no provider-builtin tools to deny in the first place).
 
-Soft stop vs hard failure: a turn/budget cap ends the loop with
-terminal_reason in {TERMINAL_MAX_TURNS, TERMINAL_MAX_BUDGET} — real work
-happened, so the caller proceeds to verification, and the next retry
+Soft stop vs hard failure: a turn/budget cap, or the loop's idle-turn
+budget (no file-modifying tool call for N consecutive turns — see
+forge/agents/loop.py's TERMINAL_NO_PROGRESS), ends the loop with a
+terminal_reason in _SOFT_STOP_REASONS — real work may have happened, so
+the caller proceeds to the deterministic gate/verification, and the next retry
 resumes from this run's persisted `dev_history` (forge/orchestration/
 state.py's FeatureRunState field, durably checkpointed by LangGraph's
 AsyncPostgresSaver alongside every other piece of run state — see
@@ -43,6 +45,7 @@ from typing import Any, Literal
 from forge.agents.loop import (
     TERMINAL_MAX_BUDGET,
     TERMINAL_MAX_TURNS,
+    TERMINAL_NO_PROGRESS,
     LoopConfig,
     run_agent_loop,
     tool_defs_from_schemas,
@@ -60,16 +63,17 @@ from forge.llm.errors import LlmError
 from forge.llm.registry import LlmNotConfiguredError, get_provider
 from forge.llm.types import ContentBlock, LlmResponse, history_from_json, history_to_json, text_message
 from forge.services.run_activity import append_activity
-from forge.services.usage import record_phase_usage
+from forge.services.usage import effective_budget_usd, record_phase_usage, record_run_outcome
 from forge.tools import language_hooks
-from forge.tools.dev_tools import make_dev_tools
+from forge.tools.dev_tools import BOOKKEEPING_TOOLS, PROGRESS_TOOLS, READ_ONLY_TOOLS, make_dev_tools
+from forge.tools.progress import render_progress, seed_progress_items
 from forge.tools.worktree_sync import sync_planned_files_from_project
 
 logger = logging.getLogger("forge.dev_loop")
 
 DevLoopOutcome = Literal["success", "soft_stop", "hard_failure"]
 
-_SOFT_STOP_REASONS = frozenset({TERMINAL_MAX_TURNS, TERMINAL_MAX_BUDGET})
+_SOFT_STOP_REASONS = frozenset({TERMINAL_MAX_TURNS, TERMINAL_MAX_BUDGET, TERMINAL_NO_PROGRESS})
 
 
 class DevLoopError(RuntimeError):
@@ -122,9 +126,23 @@ async def run_dev(
     verifier_report: dict[str, Any] | None = None,
     run_id: str | None = None,
     prior_history: list[dict[str, Any]] | None = None,
+    prior_progress: list[dict[str, str]] | None = None,
+    gate_feedback: str | None = None,
     sdk_model: str | None = None,
     sdk_effort: str | None = None,
 ) -> dict[str, Any]:
+    """gate_feedback: the Tier 1 deterministic gate's own fix message
+    (forge/orchestration/graph.py's gate_node, formatted by
+    forge/agents/roles/verifier.py's format_gate_feedback). When set it IS
+    this iteration's brief — a ready-made "tests failed with N errors in
+    X, fix these" user message appended onto `prior_history`, so the model
+    keeps every file it already read (and the prompt prefix stays cached)
+    instead of re-deriving the task from a fresh FIX MODE brief.
+
+    prior_progress: the checklist this story's earlier dev pass left behind
+    (forge/tools/progress.py). Carried forward so a fix round resumes the
+    same bookkeeping rather than re-deriving it from the plan and
+    reporting every already-written file as pending."""
     continuing = bool(prior_history)
     resolved_model = sdk_model or get_config("dev_sdk_model")
     logger.info("Dev starting worktree=%s model=%s resume=%s", worktree_path, resolved_model, continuing)
@@ -135,6 +153,19 @@ async def run_dev(
         provider = get_provider()
     except LlmNotConfiguredError as exc:
         raise DevLoopError(str(exc)) from exc
+
+    # The story-wide ceiling (forge/services/usage.py) bounds planning +
+    # investigation + every dev fix round + review together, so dev's own
+    # cap is only the inner of the two. Refuse to start rather than run one
+    # more turn when nothing is left: a cap of zero means "unbounded"
+    # everywhere in forge, so passing the exhausted remainder through would
+    # do the exact opposite of what was asked.
+    dev_budget, budget_exhausted = effective_budget_usd(run_id, get_float_config("dev_sdk_max_budget_usd", 0.0))
+    if budget_exhausted:
+        raise DevLoopError(
+            "Story spend ceiling (story_max_budget_usd) is exhausted — refusing to start another dev pass. "
+            "Raise the ceiling at /settings and retry the story to continue."
+        )
 
     phase_started_at = time.monotonic()
     usage_totals = {"input_tokens": 0, "output_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 0}
@@ -191,15 +222,25 @@ async def run_dev(
         analyze_targets, planned_test_files = language_hooks.classify_targets(worktree_path, allowed_paths)
         allow_test_run = bool(planned_test_files)
 
-        required_fixes, analyze_errors = _collect_required_fixes(verifier_report)
-        brief = _build_iteration_brief(worktree_path, allowed_paths, required_fixes, analyze_errors, continuing=continuing)
-        if run_id and (required_fixes or analyze_errors):
-            append_activity(run_id, type="status", phase="dev", title=f"Fix mode: {len(required_fixes)} required fix(es), {len(analyze_errors)} analyzer error(s) carried into dev loop")
+        if gate_feedback:
+            brief = gate_feedback
+            if run_id:
+                append_activity(run_id, type="status", phase="dev", title="Fix mode: deterministic gate feedback carried into dev loop", detail=gate_feedback[:1000])
+        else:
+            required_fixes, analyze_errors = _collect_required_fixes(verifier_report)
+            brief = _build_iteration_brief(worktree_path, allowed_paths, required_fixes, analyze_errors, continuing=continuing)
+            if run_id and (required_fixes or analyze_errors):
+                append_activity(run_id, type="status", phase="dev", title=f"Fix mode: {len(required_fixes)} required fix(es), {len(analyze_errors)} analyzer error(s) carried into dev loop")
 
         prompt = _build_prompt(continuing=continuing, plan=plan, context_bundle=context_bundle, brief=brief)
 
         data_dir = get_config("data_dir") or "/data"
         baseline_dir = f"{data_dir}/baselines/{run_id}" if run_id else None
+        # Seeded from the plan on a first pass; carried forward verbatim on
+        # a fix round. Mutated in place by update_progress_tool, read back
+        # out below for the next round.
+        progress_items = [dict(item) for item in prior_progress] if prior_progress else seed_progress_items(plan)
+
         tool_fns, tool_schemas = make_dev_tools(
             worktree_path=worktree_path,
             allowed_paths=allowed_paths,
@@ -207,6 +248,7 @@ async def run_dev(
             allow_test_run=allow_test_run,
             planned_test_files=planned_test_files,
             baseline_dir=baseline_dir,
+            progress_items=progress_items,
         )
 
         initial_messages = (history_from_json(prior_history) if prior_history else []) + [text_message("user", prompt)]
@@ -219,8 +261,15 @@ async def run_dev(
             tool_fns=tool_fns,
             effort=sdk_effort or get_config("dev_sdk_effort"),
             max_turns=get_int_config("dev_sdk_max_turns", 80),
-            max_budget_usd=get_float_config("dev_sdk_max_budget_usd", 0.0),
+            max_budget_usd=dev_budget,
             compaction_token_threshold=get_int_config("agent_compaction_token_threshold", 120_000),
+            read_only_tools=READ_ONLY_TOOLS,
+            progress_tools=PROGRESS_TOOLS,
+            bookkeeping_tools=BOOKKEEPING_TOOLS,
+            max_idle_turns=get_int_config("dev_sdk_max_idle_turns", 4),
+            # Re-shown at the end of every request, never stored in
+            # history — see forge/agents/loop.py's trailing_reminder.
+            trailing_reminder=lambda: render_progress(progress_items),
             on_block=_on_block,
             on_turn=_on_turn,
         )
@@ -232,6 +281,16 @@ async def run_dev(
 
         api_duration_ms = result.api_duration_ms
         outcome = classify_loop_result(result.terminal_reason, result.is_error)
+        # Recorded before the hard-failure raise below: a run that died is
+        # precisely the run whose shape is worth having (see
+        # forge/db/models/run_outcome.py).
+        record_run_outcome(
+            run_id,
+            dev_passes=1,
+            dev_turns=result.turns_used,
+            dev_soft_stops=1 if outcome == "soft_stop" else 0,
+            dev_terminal_reason=result.terminal_reason,
+        )
         logger.info(
             "Dev result run_id=%s terminal_reason=%s outcome=%s turns=%d",
             run_id, result.terminal_reason, outcome, result.turns_used,
@@ -248,9 +307,14 @@ async def run_dev(
         if truncated:
             if not dev_summary_holder["text"] or dev_summary_holder["text"] == "Development finished.":
                 dev_summary_holder["text"] = "Development paused at the turn limit — will resume on retry."
-            logger.warning("Dev soft stop (turn/budget limit) run_id=%s turns=%d", run_id, result.turns_used)
+            logger.warning("Dev soft stop (%s) run_id=%s turns=%d", result.terminal_reason, run_id, result.turns_used)
             if run_id:
-                append_activity(run_id, type="status", phase="dev", title="Turn limit reached — resuming this session on the next retry", meta={"truncated": True, "soft_stop": True})
+                title = (
+                    "No file changes for several turns — stopping early; the deterministic gate decides what happens next"
+                    if result.terminal_reason == TERMINAL_NO_PROGRESS
+                    else "Turn limit reached — resuming this session on the next retry"
+                )
+                append_activity(run_id, type="status", phase="dev", title=title, meta={"truncated": True, "soft_stop": True, "terminal_reason": result.terminal_reason})
 
         logger.info("Dev loop finished run_id=%s truncated=%s turns=%d", run_id, truncated, result.turns_used)
 
@@ -271,6 +335,7 @@ async def run_dev(
         "synced_from_project": synced,
         "messages": [{"role": "dev", "content": dev_summary_holder["text"]}],
         "dev_history": history_to_json(result.history),
+        "dev_progress": progress_items,
         # {profile_key: state} — e.g. Dart's build_runner signature. Fed
         # back into the verifier as VerifyContext.prior_state per profile.
         "dev_build_runner": dev_verify_state,

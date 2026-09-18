@@ -41,7 +41,16 @@ Rules:
 - Ensure "target_content" matches a block in the file. Whitespace differences (trailing spaces, indentation) are tolerated, but the block must be unique unless you pass allow_multiple.
 - Verify your code compiles with the "analyze_changed_files" tool after a batch of changes — you do NOT need to analyze after every single edit.
 - If compile errors are found, fix them iteratively or rollback files to undo mistakes using "roll_back_file".
-- For a large file where you only need to see one method/widget/class, pass "offset"/"limit" to "read_file" to read just that range instead of the whole file.
+- "read_file" serves at most 250 lines per call. Use "search_codebase" to find the line you need, then pass "offset"/"limit" to read just that range; page with the offset the response header gives you.
+- Never re-issue a tool call with the same arguments as your previous turn — the repeated call is rejected. If the last result was not enough, change what you ask for.
+- Every turn should move the implementation forward. After a few turns of only reading and searching, start editing; a run that keeps reading without editing is stopped early.
+
+CRITICAL — the progress checklist:
+- A PROGRESS CHECKLIST appears at the end of every message you receive. It is the authoritative record of what remains, and it is yours to maintain.
+- Call "update_progress" the moment a file's state changes: to "doing" when you start on it, to "done" once it is written AND analyze passes for it. Batch several files into one call.
+- Do NOT mark a file done because you intend to write it. Done means the edit landed.
+- Updating the checklist is bookkeeping, not progress. It does not substitute for editing files, and a run that only updates its checklist is still treated as making no progress.
+- When every entry is done and analyze passes, stop calling tools and reply with your plain-text summary.
 
 CRITICAL — Scope discipline (ENFORCED: the tool layer rejects out-of-scope writes/edits and blocked commands):
 - ONLY create or modify files that are listed in the approved plan (files_to_create, files_to_modify).
@@ -85,7 +94,6 @@ def _format_skills_block(skills: list[dict[str, str]] | None) -> str:
 
 _FIX_MODE_FILE_CAP = 8_000
 _FIX_MODE_MAX_FILES = 4
-
 
 def _norm_rel(path: str) -> str:
     return os.path.normpath(str(path).strip().lstrip("/")).replace("\\", "/")
