@@ -99,6 +99,15 @@ class Story(Base):
     # whole sync. `epic_key` is the real integrity anchor.
     parent_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
 
+    # Which repo THIS story writes to, when the epic's default is not the
+    # right one. NULL means "use the epic's", which is the common case; a
+    # value only appears on a project whose repos are split by concern, so
+    # that one epic can carry an API story and a UI story that land in
+    # different repos. The story's repo is what gets the worktree, the
+    # branch, the commit and the pull request — see
+    # forge/tools/workspace.py.
+    project_repo_id: Mapped[int | None] = mapped_column(ForeignKey("project_repos.id"), nullable=True)
+
     wave: Mapped[int] = mapped_column(Integer, nullable=False)  # index into epic.levels
     status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
 

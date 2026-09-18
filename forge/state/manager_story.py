@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from forge.db.engine import session_scope
-from forge.db.models import Story
+from forge.db.models import Epic, ProjectRepo, Story
 
 
 class _StoryMixin:
@@ -37,12 +37,12 @@ class _StoryMixin:
 
         with session_scope() as session:
             rows = session.execute(select(Story).where(Story.parent_key == parent_key)).scalars().all()
-            return sorted((_story_to_dict(row) for row in rows), key=lambda s: issue_key_sort_key(s["jira_key"]))
+            return sorted((_story_to_dict(session, row) for row in rows), key=lambda s: issue_key_sort_key(s["jira_key"]))
 
     def get_story(self, jira_key: str) -> dict | None:
         with session_scope() as session:
             story = session.get(Story, jira_key)
-            return _story_to_dict(story) if story is not None else None
+            return _story_to_dict(session, story) if story is not None else None
 
     def update_story_jira_fields(
         self, jira_key: str, *, summary: str, description: str | None
@@ -59,7 +59,18 @@ class _StoryMixin:
     def list_stories_for_epic(self, epic_key: str) -> list[dict]:
         with session_scope() as session:
             rows = session.execute(select(Story).where(Story.epic_key == epic_key)).scalars().all()
-            return [_story_to_dict(row) for row in rows]
+            return [_story_to_dict(session, row) for row in rows]
+
+    def set_story_project_repo(self, jira_key: str, project_repo_id: int | None) -> bool:
+        """Point one story at a specific repo, or None to inherit the
+        epic's. Returns False for an unknown story so the API layer can
+        answer 404 rather than silently succeeding."""
+        with session_scope() as session:
+            story = session.get(Story, jira_key)
+            if story is None:
+                return False
+            story.project_repo_id = project_repo_id
+            return True
 
     def set_story_status(
         self, jira_key: str, status: str, *, parked_reason: str | None = None, failure_stage: str | None = None
@@ -173,8 +184,35 @@ class _StoryMixin:
             return frozenset(rows)
 
 
-def _story_to_dict(story: Story) -> dict:
+def _resolve_story_repo(session, story: Story) -> tuple[int | None, str | None]:
+    """(effective project_repo_id, filesystem path) for the repo this story
+    writes to.
+
+    Falls back to the epic's repo when the story has no override, which is
+    the normal case — a per-story repo only appears on a project whose
+    repos are split by concern. Resolved here rather than in the daemon so
+    every caller of get_story/list_stories_for_epic sees one answer and
+    cannot accidentally use the epic's repo for a story that overrode it."""
+    repo_id = story.project_repo_id
+    if repo_id is None:
+        epic = session.get(Epic, story.epic_key)
+        repo_id = epic.project_repo_id if epic is not None else None
+    if repo_id is None:
+        return None, None
+    project_repo = session.get(ProjectRepo, repo_id)
+    return repo_id, (project_repo.path if project_repo is not None else None)
+
+
+def _story_to_dict(session, story: Story) -> dict:
+    effective_repo_id, repo_path = _resolve_story_repo(session, story)
     return {
+        # The story's own override, or None when it inherits the epic's.
+        "project_repo_id": story.project_repo_id,
+        # The repo this story actually writes to, override or inherited.
+        # Every story-scoped git operation in forge/daemon/main.py keys off
+        # this rather than epic["repo"].
+        "effective_project_repo_id": effective_repo_id,
+        "repo": repo_path,
         "jira_key": story.jira_key,
         "epic_key": story.epic_key,
         "parent_key": story.parent_key,

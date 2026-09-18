@@ -50,7 +50,7 @@ from forge.services.jira_service import JiraService
 from forge.services.usage import record_run_outcome
 from forge.state.manager import StateManager
 from forge.tools.codebase_skeleton import build_workspace_skeleton
-from forge.tools.git_tools import GitMergeError, commit_all, get_branch_diff_summary
+from forge.tools.git_tools import GitMergeError, branch_exists, commit_all, get_branch_diff_summary
 from forge.tools.workspace import build_reference_roots
 from forge.tools.worktree import create_worktree
 
@@ -123,18 +123,19 @@ def build_context(sm: StateManager, epic: dict) -> OrchestratorContext:
     )
 
 
-def _reference_roots(sm: StateManager, epic: dict) -> dict[str, str]:
-    """{label: path} for every repo on this epic's project except the one
-    the epic is assigned to.
+def _reference_roots(sm: StateManager, epic: dict, story_repo: str | None) -> dict[str, str]:
+    """{label: path} for every repo on this project except the one THIS
+    story writes to.
 
-    The daemon assembles this because it owns the DB, the same separation
-    the QA context already follows. The epic's own repo stays the single
-    writable root — see forge/tools/workspace.py for why reads span the
-    project while writes do not."""
+    Keyed on the story's repo rather than the epic's, because they differ
+    exactly when multi-repo support matters: an epic carrying an API story
+    and a UI story has each of them writing to its own repo and reading
+    the other. Assembled here because the daemon owns the DB, the same
+    separation the QA context follows."""
     if not epic.get("project_id"):
         return {}
     repos = sm.list_project_repos(epic["project_id"])
-    return build_reference_roots(repos, epic.get("repo"))
+    return build_reference_roots(repos, story_repo)
 
 
 def _build_story_brief(
@@ -211,14 +212,36 @@ def _build_qa_context(sm: StateManager, epic: dict, qa_story: dict) -> dict:
     )
 
     branch = epic.get("integration_branch")
-    if branch:
-        branch_diff = get_branch_diff_summary(epic["repo"], branch, max_chars=_QA_DIFF_MAX_CHARS)
-    else:
+    # Every repo any of this epic's stories actually wrote to. An epic
+    # split across an API repo and a UI repo has the same integration
+    # branch name in each, so reviewing only the epic's default repo would
+    # hide half the epic from the reviewer.
+    story_repos: list[str] = []
+    for candidate in [epic.get("repo"), *(s.get("repo") for s in stories)]:
+        if candidate and candidate not in story_repos:
+            story_repos.append(candidate)
+
+    branch_diff: dict = {"base": None, "branch": None, "changed_files": [], "diff": "", "diff_truncated": False}
+    other_repo_diffs: list[dict] = []
+    if branch and story_repos:
+        # The budget is split across repos so a two-repo epic does not
+        # double the QA payload.
+        per_repo = max(_QA_DIFF_MAX_CHARS // len(story_repos), 4_000)
+        for index, repo_path in enumerate(story_repos):
+            if not branch_exists(repo_path, branch):
+                # Normal, not an error: a repo only grows the integration
+                # branch once a story in it merges.
+                continue
+            diff = get_branch_diff_summary(repo_path, branch, max_chars=per_repo)
+            if index == 0:
+                branch_diff = diff
+            else:
+                other_repo_diffs.append({**diff, "repo": repo_path})
+    if not branch:
         # No integration branch means nothing has merged yet. QA runs in the
         # last wave so this should not happen, but an epic consisting only
         # of QA tickets would hit it — report the absence rather than
         # fabricating an empty diff that reads as "no changes were made".
-        branch_diff = {"base": None, "branch": None, "changed_files": [], "diff": "", "diff_truncated": False}
         logger.warning("epic %s has no integration branch — QA will review an empty diff", epic["jira_key"])
 
     return {
@@ -235,6 +258,8 @@ def _build_qa_context(sm: StateManager, epic: dict, qa_story: dict) -> dict:
             for s in dev_stories
         ],
         "branch_diff": branch_diff,
+        # Empty for a single-repo epic, so the QA payload is unchanged there.
+        "other_repo_diffs": other_repo_diffs,
     }
 
 
@@ -263,12 +288,19 @@ async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, res
     story_key = story["jira_key"]
     story_kind = story.get("kind") or "dev"
     worktree_path = story.get("worktree_path")
+    # The repo THIS story writes to: its own override, or the epic's
+    # default (resolved in forge/state/manager_story.py). Every git
+    # operation below is story-scoped, so none of them may use
+    # epic["repo"] — an epic whose stories span repos would otherwise
+    # branch, commit and open PRs against whichever repo the epic happened
+    # to default to.
+    story_repo = story.get("repo") or epic["repo"]
 
     if not resume:
         worktrees_base_dir = get_config("worktrees_base_dir") or "/data/repos"
         wt = await asyncio.to_thread(
             create_worktree,
-            epic["repo"],
+            story_repo,
             story_key=story_key,
             summary=story["summary"] or story_key,
             worktrees_base_dir=worktrees_base_dir,
@@ -282,7 +314,7 @@ async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, res
     # Read-only sibling repos for this project, so a UI story can read the
     # API repo it talks to (forge/tools/workspace.py). Empty for a
     # single-repo project, which leaves every path below unchanged.
-    reference_roots = await asyncio.to_thread(_reference_roots, sm, epic)
+    reference_roots = await asyncio.to_thread(_reference_roots, sm, epic, story_repo)
 
     config = {"configurable": {"thread_id": story_key}}
     async with checkpointer_from_url(get_database_url()) as checkpointer:
@@ -302,8 +334,8 @@ async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, res
             await graph.aupdate_state(config, patch)
             result = await graph.ainvoke(None, config)
         else:
-            brief = await asyncio.to_thread(_build_story_brief, sm, story, epic["repo"], reference_roots)
-            state = initial_state(story_key, brief, epic["repo"])
+            brief = await asyncio.to_thread(_build_story_brief, sm, story, story_repo, reference_roots)
+            state = initial_state(story_key, brief, story_repo)
             state["worktree_path"] = worktree_path
             state["reference_roots"] = reference_roots
             state["story_kind"] = story_kind
@@ -371,7 +403,7 @@ def _extract_coverage_gap(result: dict) -> tuple[bool, str | None]:
 
 def _maybe_open_pull_request(
     sm: StateManager, epic: dict, story_key: str, branch: str | None,
-    *, coverage_gap: bool = False, coverage_gap_detail: str | None = None,
+    *, story_repo: str, coverage_gap: bool = False, coverage_gap_detail: str | None = None,
 ) -> None:
     """Push the story branch and open a real GitHub PR once the pr_open_gate
     has cleared (see handle_intent's OpenPullRequest branch), when GitHub is
@@ -383,7 +415,7 @@ def _maybe_open_pull_request(
     process's logs."""
     if not branch or not GitHubService.is_configured():
         return
-    remote = parse_github_remote(epic["repo"])
+    remote = parse_github_remote(story_repo)
     if not remote:
         msg = "origin is not a GitHub remote — PR not opened"
         logger.info("story %s: %s", story_key, msg)
@@ -391,7 +423,7 @@ def _maybe_open_pull_request(
         return
     owner, repo_name = remote
 
-    pushed, push_error = push_branch(epic["repo"], branch)
+    pushed, push_error = push_branch(story_repo, branch)
     if not pushed:
         sm.set_story_pr_open_error(story_key, f"git push failed: {push_error}")
         return
@@ -444,6 +476,7 @@ async def handle_intent(sm: StateManager, epic: dict, intent) -> None:
         await asyncio.to_thread(
             _maybe_open_pull_request,
             sm, epic, intent.story_key, story["branch"],
+            story_repo=story.get("repo") or epic["repo"],
             coverage_gap=story["coverage_gap"], coverage_gap_detail=story["coverage_gap_detail"],
         )
         sm.set_story_status(intent.story_key, "awaiting_pr_review")
@@ -457,7 +490,11 @@ async def handle_intent(sm: StateManager, epic: dict, intent) -> None:
             return
         worktrees_base_dir = get_config("worktrees_base_dir") or "/data/repos"
         result = await asyncio.to_thread(
-            merge_story_into_integration, epic["repo"], epic_key, story["branch"], worktrees_base_dir
+            # Merged inside the story's own repo. The integration branch
+            # NAME is per epic, so an epic spanning two repos gets a
+            # same-named branch in each — which is what makes a cross-repo
+            # epic reviewable as one unit.
+            merge_story_into_integration, story.get("repo") or epic["repo"], epic_key, story["branch"], worktrees_base_dir
         )
         if result["applied"]:
             sm.set_story_status(intent.story_key, "merged")
@@ -522,7 +559,8 @@ def _ci_checks_block_merge(sm: StateManager, epic: dict, story_key: str) -> bool
     pr = sm.get_pull_request(story_key)
     if not pr or not pr.get("number") or not GitHubService.is_configured():
         return False
-    remote = parse_github_remote(epic["repo"])
+    story = sm.get_story(story_key)
+    remote = parse_github_remote((story or {}).get("repo") or epic["repo"])
     if not remote:
         return False
     owner, repo_name = remote
@@ -556,7 +594,8 @@ def _maybe_merge_pull_request(sm: StateManager, epic: dict, story_key: str) -> N
         sm.upsert_pull_request(story_key, state="merged")
         return
 
-    remote = parse_github_remote(epic["repo"])
+    story = sm.get_story(story_key)
+    remote = parse_github_remote((story or {}).get("repo") or epic["repo"])
     if not remote:
         sm.upsert_pull_request(story_key, state="merged")
         return

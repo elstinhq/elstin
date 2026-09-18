@@ -343,6 +343,7 @@ async def qa_node(state: FeatureRunState) -> dict:
             epic=qa_context["epic"],
             dev_stories=qa_context.get("dev_stories", []),
             branch_diff=qa_context.get("branch_diff", {}),
+            other_repo_diffs=qa_context.get("other_repo_diffs") or None,
             worktree_path=worktree_path,
             project_path=state["project_path"],
             run_id=run_id or None,

@@ -159,7 +159,8 @@ async def run_epic_qa(
     epic: dict[str, Any],
     dev_stories: list[dict[str, Any]],
     branch_diff: dict[str, Any],
-    worktree_path: str,
+    other_repo_diffs: list[dict[str, Any]] | None = None,
+    worktree_path: str = "",
     project_path: str,
     run_id: str | None = None,
 ) -> dict[str, Any]:
@@ -209,6 +210,22 @@ async def run_epic_qa(
                 "diff_truncated": branch_diff.get("diff_truncated", False),
             },
         }
+
+        # A cross-repo epic: the same integration branch in each repo its
+        # stories wrote to. Present only when there is more than one, so a
+        # single-repo epic's payload is byte-identical to before.
+        if other_repo_diffs:
+            payload["other_repo_diffs"] = [
+                {
+                    "repo": d.get("repo"),
+                    "base": d.get("base"),
+                    "branch": d.get("branch"),
+                    "changed_files": d.get("changed_files", []),
+                    "diff": (d.get("diff") or "")[:_MAX_DIFF_CHARS],
+                    "diff_truncated": d.get("diff_truncated", False),
+                }
+                for d in other_repo_diffs
+            ]
 
         qa_report, llm_usage = await chat_completion_json(
             messages=[

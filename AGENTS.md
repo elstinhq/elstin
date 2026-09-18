@@ -94,28 +94,42 @@ Entry points (`pyproject.toml`): `forge-daemon`, `forge-mcp-jira`,
 
 ## Multi-repo projects
 
-A project may have several repos (`ProjectRepo` is one-to-many). An epic
-is still assigned exactly **one**, and that one is the only writable root:
-worktree, branch, commit, PR and integration branch all belong to it.
-Every *other* repo on the project is mounted **read-only** for that
-epic's stories, addressed by an `@label/` prefix — `@api/src/auth.py`.
+A project may have several repos (`ProjectRepo` is one-to-many). The
+writable repo belongs to the **story**, not the epic: one epic routinely
+carries an API story and a UI story that must land in different repos.
 
-- `tools/workspace.py` owns the root set and its resolution. Labels come
-  from `ProjectRepo.label` (else the directory name), slugified, with
-  colliding labels suffixed.
+- `Story.project_repo_id` is the override; NULL inherits
+  `Epic.project_repo_id`, which is the common case. `manager_story`
+  resolves both into `story["repo"]`, so no caller can accidentally use
+  the epic's repo for a story that overrode it. Human override:
+  `PUT /api/stories/{key}/repo` (pending, non-sub-task stories only —
+  the worktree, branch and PR already live in the old repo otherwise).
+- **Every story-scoped git operation keys off `story["repo"]`**: worktree,
+  `project_path`, commit, push, PR open/merge, CI lookup, and the merge
+  into the integration branch. `epic["repo"]` survives only as the
+  default and as the "no folder assigned yet" dispatch gate.
+- The integration branch **name** stays per epic, so a cross-repo epic
+  gets a same-named branch in each repo its stories wrote to. That is
+  what keeps it reviewable as one unit; epic QA diffs every such repo
+  (`other_repo_diffs`) rather than only the epic's default.
+- Every repo on the project *other than the story's own* mounts
+  **read-only**, addressed by an `@label/` prefix (`@api/src/auth.py`).
+  `tools/workspace.py` owns the root set. Labels come from
+  `ProjectRepo.label` (else the directory name), slugified, colliding
+  labels suffixed.
 - **Reads span the project, writes do not.** `read_file_tool`,
   `grep_tool`/`search_codebase_tool` and `find_files_tool` cover every
-  root and label their hits so a result can be read back verbatim. Every
-  write tool keeps using the worktree path directly, and plan scope only
-  ever admits unprefixed relative paths, so a prefixed path cannot reach a
-  write even if a plan names one.
+  root and label their hits so a result reads back verbatim. Write tools
+  keep using the worktree path, and plan scope only admits unprefixed
+  relative paths, so a prefixed path cannot reach a write even if a plan
+  names one.
 - The prefix is required, not optional: a bare `api/...` would be
-  ambiguous the moment the primary repo has a top-level `api/` directory,
-  and an unknown label is an error rather than a silent primary read.
+  ambiguous the moment the story's own repo has a top-level `api/`
+  directory, and an unknown label is an error rather than a silent read
+  of a different file under the name the model asked for.
 - The daemon assembles `{label: path}` (it owns the DB) into
   `FeatureRunState.reference_roots`, re-supplied on every resume so a repo
-  added or removed since dispatch doesn't leave a stale absolute path in a
-  checkpoint.
+  added or removed since dispatch leaves no stale path in a checkpoint.
 - Reference repos are read at their **clone path, not a worktree**, so
   they show whatever branch that checkout is on. That is why they are
   read-only.
@@ -123,10 +137,12 @@ epic's stories, addressed by an `@label/` prefix — `@api/src/auth.py`.
   description, and `make_dev_tools` returns the shared `TOOL_SCHEMAS`
   object rather than a patched copy, so a cached prompt prefix stays valid.
 
-**Work that must change both repos is two stories in one epic**, which
-the existing wave ordering already sequences. Forge deliberately does not
-open two branches for one story: there is no cross-repo transaction, so a
-story half-landing across two repos would have nothing to undo it.
+**Still one repo per story.** Forge does not open two branches for one
+story: there is no cross-repo transaction, so a story half-landing across
+two repos would have nothing to undo it. Work that must change both repos
+is two stories in one epic, which wave ordering already sequences.
+
+Migrations: `alembic/versions/20260919_0018_story_project_repo.py`.
 
 ## Story kinds and hierarchy
 

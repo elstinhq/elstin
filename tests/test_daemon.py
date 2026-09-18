@@ -444,13 +444,13 @@ async def test_pr_open_failure_is_recorded_and_cleared_on_retry(project_id, monk
     monkeypatch.setattr(daemon_main, "parse_github_remote", lambda project_path: ("acme", "repo"))
     monkeypatch.setattr(daemon_main, "push_branch", lambda project_path, branch: (False, "permission denied"))
 
-    daemon_main._maybe_open_pull_request(sm, epic, "ENG-10", "ENG-10-branch")
+    daemon_main._maybe_open_pull_request(sm, epic, "ENG-10", "ENG-10-branch", story_repo=epic["repo"])
     story = sm.get_story("ENG-10")
     assert story["pr_open_error"] == "git push failed: permission denied"
     assert sm.get_pull_request("ENG-10") is None
 
     monkeypatch.setattr(daemon_main, "push_branch", lambda project_path, branch: (True, None))
-    daemon_main._maybe_open_pull_request(sm, epic, "ENG-10", "ENG-10-branch")
+    daemon_main._maybe_open_pull_request(sm, epic, "ENG-10", "ENG-10-branch", story_repo=epic["repo"])
     story = sm.get_story("ENG-10")
     assert story["pr_open_error"] is None
     assert sm.get_pull_request("ENG-10")["number"] == 1

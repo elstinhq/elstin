@@ -23,6 +23,12 @@ that replays the run's history, then pushes each new event the moment it
 is written (forge/services/activity_stream.py) instead of leaving the UI a
 poll interval behind the agent.
 
+Repo override: an epic is assigned one repo as its default, but a
+project whose repos are split by concern can carry an API story and a UI
+story under one epic. This is how a human points one story at a different
+repo — the one that gets its worktree, branch, commit and pull request.
+See forge/tools/workspace.py.
+
 Ticket refresh: epic re-sync deliberately leaves existing summary/
 description alone (progress must not be rewritten by a tree walk). This
 endpoint is the explicit escape hatch — pull latest JIRA prose for one
@@ -51,6 +57,11 @@ from forge.state.manager import StateManager
 router = APIRouter(prefix="/api/stories", tags=["stories"])
 
 _VALID_KINDS = ("dev", "qa")
+
+
+class StoryRepoRequest(BaseModel):
+    # Null clears the override, so the story goes back to the epic's repo.
+    project_repo_id: int | None = None
 
 
 class StoryKindRequest(BaseModel):
@@ -163,6 +174,42 @@ def set_story_kind(story_key: str, body: StoryKindRequest) -> dict:
     sm.set_story_kind(story_key, body.kind)
     levels = relevel_epic(story["epic_key"])
     return {"story_key": story_key, "kind": body.kind, "epic_key": story["epic_key"], "levels": levels}
+
+
+@router.put("/{story_key}/repo")
+def set_story_repo(story_key: str, body: StoryRepoRequest) -> dict:
+    """Point one story at a specific repo on its project, or clear the
+    override with a null so it inherits the epic's."""
+    sm = StateManager()
+    story = sm.get_story(story_key)
+    if story is None:
+        raise HTTPException(status_code=404, detail=f"No such story: {story_key}")
+    if story["parent_key"]:
+        # A sub-task is never dispatched, so it has no worktree of its own
+        # to place — it rides along with its parent's.
+        raise HTTPException(
+            status_code=409,
+            detail=f"{story_key} is a sub-task of {story['parent_key']} — set the repo on the parent story instead",
+        )
+    if story["status"] != "pending":
+        # The worktree, branch and any open PR already live in the old
+        # repo. Moving the target underneath them would orphan all three.
+        raise HTTPException(
+            status_code=409,
+            detail=f"{story_key} is already {story['status']} — only a pending story can change repo",
+        )
+
+    epic = sm.get_epic(story["epic_key"])
+    if body.project_repo_id is not None:
+        project_repo = sm.get_project_repo(body.project_repo_id)
+        if project_repo is None or project_repo["project_id"] != epic["project_id"]:
+            raise HTTPException(
+                status_code=400,
+                detail="project_repo_id must be a repo belonging to this story's project",
+            )
+
+    sm.set_story_project_repo(story_key, body.project_repo_id)
+    return {"story_key": story_key, **{k: sm.get_story(story_key)[k] for k in ("project_repo_id", "repo")}}
 
 
 @router.post("/{story_key}/sync")

@@ -278,7 +278,7 @@ def _add_reference_repo(sm, project_id: int, tmp_path, name: str, rel: str, cont
     return str(root)
 
 
-async def test_reference_roots_are_every_project_repo_except_the_epics_own(
+async def test_reference_roots_are_every_project_repo_except_the_storys_own(
     git_repo: str, tmp_path, project_id, monkeypatch
 ):
     monkeypatch.setenv("DATABASE_URL", os.environ["DATABASE_URL"])
@@ -290,10 +290,13 @@ async def test_reference_roots_are_every_project_repo_except_the_epics_own(
     sm.set_epic_project_repo("ENG-1", repo_id)
     api = _add_reference_repo(sm, project_id, tmp_path, "api", "models/cart.py", "class Cart:\n    pass\n")
 
-    roots = daemon._reference_roots(sm, sm.get_epic("ENG-1"))
+    epic = sm.get_epic("ENG-1")
 
-    # The writable repo is not among its own references.
-    assert roots == {"api": api}
+    # A story writing to the epic's default repo reads the API repo.
+    assert daemon._reference_roots(sm, epic, git_repo) == {"api": api}
+    # And a story overridden onto the API repo reads the UI one instead —
+    # the writable repo is never among its own references.
+    assert daemon._reference_roots(sm, epic, api) == {"web-ui": git_repo}
 
 
 async def test_story_brief_maps_the_reference_repo_with_its_prefix(
