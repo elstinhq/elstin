@@ -17,6 +17,7 @@ import os
 
 from forge.tools.grep import DEFAULT_EXCLUDES, MAX_READ_LINES, grep_codebase, read_file
 from forge.tools.path_guard import PathGuardError
+from forge.tools.workspace import Workspace
 
 _MAX_GREP_RESULTS = 50
 _MAX_FIND_RESULTS = 200
@@ -32,11 +33,21 @@ def _numbered(text: str, *, start_line: int = 1) -> str:
     return "\n".join(f"{str(start_line + i).rjust(width)}\t{line}" for i, line in enumerate(lines))
 
 
-def make_planner_tools(*, project_path: str) -> tuple[dict[str, object], list[dict[str, object]]]:
+def make_planner_tools(
+    *, project_path: str, reference_roots: dict[str, str] | None = None
+) -> tuple[dict[str, object], list[dict[str, object]]]:
     """Return (functions_dict, tool_schemas) pre-bound to this run's
     project root — same (functions, schemas) shape as
     forge/tools/dev_tools.py's make_dev_tools(), so both roles hand
-    forge/agents/loop.py the same kind of pair."""
+    forge/agents/loop.py the same kind of pair.
+
+    reference_roots: {label: path} for the project's other repos
+    (forge/tools/workspace.py). Every tool here reads across them, since
+    planning a UI change usually requires reading the API repo it talks
+    to. With none supplied the behaviour and the prompts are byte-identical
+    to the single-repo case."""
+    workspace = Workspace(primary=project_path, references=dict(reference_roots or {}))
+    workspace_note = workspace.describe()
 
     def read_file_tool(path: str, offset: int | None = None, limit: int | None = None) -> str:
         if limit is not None and limit > MAX_READ_LINES:
@@ -45,7 +56,9 @@ def make_planner_tools(*, project_path: str) -> tuple[dict[str, object], list[di
                 f"Read the range you actually need (limit <= {MAX_READ_LINES}), or page through the file with offset."
             )
         try:
-            content = read_file(project_path, path, offset=offset or 0, limit=limit, max_lines=MAX_READ_LINES)
+            label, relative = workspace.split_reference(path)
+            root = project_path if label is None else workspace.references[label]
+            content = read_file(root, relative, offset=offset or 0, limit=limit, max_lines=MAX_READ_LINES)
         except FileNotFoundError:
             return f"File not found: {path}"
         except PathGuardError as exc:
@@ -61,34 +74,53 @@ def make_planner_tools(*, project_path: str) -> tuple[dict[str, object], list[di
         return _numbered(content)
 
     def grep_tool(pattern: str, max_results: int = _MAX_GREP_RESULTS) -> str:
-        try:
-            matches = grep_codebase(project_path, pattern, max_results=min(max_results, _MAX_GREP_RESULTS))
-        except Exception as exc:  # noqa: BLE001 - a bad regex or missing rg is data, not a crash
-            return f"Search failed: {exc}"
-        if not matches:
-            return "No matches."
-        lines = [f"{m.file_path}:{m.line_number}: {m.line_text}" for m in matches]
-        suffix = "\n... [truncated — narrow your pattern]" if len(matches) >= min(max_results, _MAX_GREP_RESULTS) else ""
+        cap = min(max_results, _MAX_GREP_RESULTS)
+        lines: list[str] = []
+        failures: list[str] = []
+        # Per root rather than one search over several paths: each root
+        # needs its own relative paths and its own label prefix, and the
+        # primary repo's hits lead because that is the one being changed.
+        for label, root in workspace.read_roots():
+            if len(lines) >= cap:
+                break
+            try:
+                matches = grep_codebase(root, pattern, max_results=cap - len(lines))
+            except Exception as exc:  # noqa: BLE001 - a bad regex or missing rg is data, not a crash
+                failures.append(f"{workspace.display_path(label, '')or 'this repo'}: {exc}")
+                continue
+            lines.extend(
+                f"{workspace.display_path(label, m.file_path)}:{m.line_number}: {m.line_text}" for m in matches
+            )
+        if not lines:
+            return "Search failed: " + "; ".join(failures) if failures else "No matches."
+        suffix = "\n... [truncated — narrow your pattern]" if len(lines) >= cap else ""
         return "\n".join(lines) + suffix
 
     def find_files_tool(glob_pattern: str, max_results: int = _MAX_FIND_RESULTS) -> str:
-        root = os.path.realpath(project_path)
         matches: list[str] = []
-        for dirpath, dirnames, filenames in os.walk(root):
-            rel_dir = os.path.relpath(dirpath, root)
-            dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in DEFAULT_EXCLUDES]
-            for name in filenames:
-                rel_path = name if rel_dir == "." else f"{rel_dir}/{name}"
-                if fnmatch.fnmatch(rel_path, glob_pattern) or fnmatch.fnmatch(name, glob_pattern):
-                    matches.append(rel_path)
-                    if len(matches) >= max_results:
-                        break
+        for label, repo_root in workspace.read_roots():
+            root = os.path.realpath(repo_root)
+            found: list[str] = []
+            for dirpath, dirnames, filenames in os.walk(root):
+                rel_dir = os.path.relpath(dirpath, root)
+                dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in DEFAULT_EXCLUDES]
+                for name in filenames:
+                    rel_path = name if rel_dir == "." else f"{rel_dir}/{name}"
+                    if fnmatch.fnmatch(rel_path, glob_pattern) or fnmatch.fnmatch(name, glob_pattern):
+                        found.append(workspace.display_path(label, rel_path))
+                        if len(found) + len(matches) >= max_results:
+                            break
+                if len(found) + len(matches) >= max_results:
+                    break
+            # Sorted per root so the primary repo's files stay grouped
+            # ahead of each reference repo's.
+            matches.extend(sorted(found))
             if len(matches) >= max_results:
                 break
         if not matches:
             return "No files matched."
         suffix = "\n... [truncated — narrow your pattern]" if len(matches) >= max_results else ""
-        return "\n".join(sorted(matches)) + suffix
+        return "\n".join(matches) + suffix
 
     functions = {"read_file_tool": read_file_tool, "grep_tool": grep_tool, "find_files_tool": find_files_tool}
     schemas = [
@@ -122,7 +154,7 @@ def make_planner_tools(*, project_path: str) -> tuple[dict[str, object], list[di
                 "description": (
                     "Search the codebase for a regex pattern (ripgrep syntax). Returns matching "
                     f"lines as 'path:line: text', up to {_MAX_GREP_RESULTS} results. Use this to "
-                    "find where a symbol, string, or pattern is used before reading whole files."
+                    "find where a symbol, string, or pattern is used before reading whole files." + workspace_note
                 ),
                 "parameters": {
                     "type": "object",
@@ -142,7 +174,7 @@ def make_planner_tools(*, project_path: str) -> tuple[dict[str, object], list[di
                 "description": (
                     "Find files by name/path glob pattern (e.g. '*.py', '**/test_*.py', "
                     "'lib/**/*.dart'). Use this to discover what exists before reading or "
-                    "searching it."
+                    "searching it." + workspace_note
                 ),
                 "parameters": {
                     "type": "object",

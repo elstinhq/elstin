@@ -224,6 +224,7 @@ async def run_planner(
     linked_issues_context: str | None = None,
     acceptance_criteria_hint: list[str] | None = None,
     clarification_answers: list[dict[str, Any]] | None = None,
+    reference_roots: dict[str, str] | None = None,
     sdk_model: str | None = None,
     sdk_effort: str | None = None,
 ) -> dict[str, Any]:
@@ -310,6 +311,7 @@ async def run_planner(
                 model=get_config("planner_explorer_model") or resolved_model,
                 project_path=project_path,
                 user_request=user_request,
+                reference_roots=reference_roots,
                 max_agents=max_agents,
                 max_turns=get_int_config("planner_explorer_max_turns", explorer_defaults.DEFAULT_MAX_TURNS),
                 # Already clamped to what the story has left, so the
@@ -336,7 +338,7 @@ async def run_planner(
             if block:
                 content_blocks.append(block)
 
-        tool_fns, tool_schemas = make_planner_tools(project_path=project_path)
+        tool_fns, tool_schemas = make_planner_tools(project_path=project_path, reference_roots=reference_roots)
 
         config = LoopConfig(
             provider=provider,

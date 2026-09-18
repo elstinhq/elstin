@@ -127,6 +127,7 @@ async def run_dev(
     run_id: str | None = None,
     prior_history: list[dict[str, Any]] | None = None,
     prior_progress: list[dict[str, str]] | None = None,
+    reference_roots: dict[str, str] | None = None,
     gate_feedback: str | None = None,
     sdk_model: str | None = None,
     sdk_effort: str | None = None,
@@ -249,6 +250,9 @@ async def run_dev(
             planned_test_files=planned_test_files,
             baseline_dir=baseline_dir,
             progress_items=progress_items,
+            # Reads may span the project's other repos; writes stay in this
+            # worktree (forge/tools/workspace.py).
+            reference_roots=reference_roots,
         )
 
         initial_messages = (history_from_json(prior_history) if prior_history else []) + [text_message("user", prompt)]

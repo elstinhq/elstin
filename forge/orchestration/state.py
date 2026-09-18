@@ -37,6 +37,12 @@ class FeatureRunState(TypedDict, total=False):
     project_path: str
     ticket_id: int | None
     worktree_path: str | None
+    # {label: path} for the project's OTHER repos, read-only
+    # (forge/tools/workspace.py). Assembled by the daemon, which owns the
+    # DB, and carried here as a plain dict because this state is JSON in a
+    # LangGraph checkpoint. Empty for a single-repo project, which is the
+    # case every path through the system still behaves identically for.
+    reference_roots: dict[str, str]
     workspace_mode: WorkspaceMode
     iteration: int
     max_iterations: int
@@ -108,6 +114,7 @@ def initial_state(run_id: str, user_request: str, project_path: str) -> FeatureR
         user_request=user_request,
         project_path=project_path,
         worktree_path=None,
+        reference_roots={},
         workspace_mode="worktree",
         iteration=0,
         max_iterations=3,

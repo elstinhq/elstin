@@ -28,6 +28,7 @@ from collections import defaultdict
 
 from forge.tools import language_hooks
 from forge.tools.grep import DEFAULT_EXCLUDES
+from forge.tools.workspace import REFERENCE_SIGIL
 
 # Output cap. Roughly 3k tokens — large enough to cover a mid-sized app's
 # source tree, small enough that it never crowds out the ticket text.
@@ -140,6 +141,43 @@ def render_skeleton(files: dict[str, list[str]], *, max_chars: int = DEFAULT_MAX
     if omitted > 0:
         lines.append(f"... ({omitted} more source file(s) omitted — use find_files_tool/grep_tool for the rest)")
     return "\n".join(lines)
+
+
+def build_workspace_skeleton(
+    primary_path: str,
+    reference_roots: dict[str, str] | None = None,
+    *,
+    max_chars: int = DEFAULT_MAX_CHARS,
+) -> str:
+    """A skeleton per repo in the workspace, primary first.
+
+    The budget is split rather than granted per repo: a project with four
+    repos would otherwise quadruple the brief. The primary repo gets the
+    larger share because it is the one the story changes, and each
+    reference repo's section is labelled with the `@label/` prefix its
+    paths must carry, so the map doubles as documentation of how to
+    address them."""
+    references = dict(reference_roots or {})
+    primary = build_codebase_skeleton(primary_path, max_chars=max_chars if not references else max_chars // 2)
+    if not references:
+        return primary
+
+    # Whatever the primary did not use stays available to the references,
+    # so a small primary repo does not waste half the budget.
+    remaining = max(max_chars - len(primary), max_chars // 4)
+    per_reference = max(remaining // len(references), 600)
+
+    sections = [primary] if primary else []
+    for label in sorted(references):
+        body = build_codebase_skeleton(references[label], max_chars=per_reference)
+        if not body:
+            continue
+        sections.append(
+            f"### Reference repo {REFERENCE_SIGIL}{label} (read-only)\n"
+            f"Address these files as {REFERENCE_SIGIL}{label}/<path>. You cannot modify this repo.\n"
+            + body
+        )
+    return "\n\n".join(sections)
 
 
 def build_codebase_skeleton(project_path: str, *, max_chars: int = DEFAULT_MAX_CHARS) -> str:

@@ -24,6 +24,7 @@ from forge.tools.grep import MAX_READ_LINES, grep_codebase, read_file
 from forge.tools.language_hooks import run_analyze
 from forge.tools.progress import PROGRESS_STATUSES, merge_progress_update, render_progress
 from forge.tools.safe_shell import run_safe_command
+from forge.tools.workspace import Workspace
 
 _RUN_COMMAND_STDOUT_TAIL = 2000
 _RUN_COMMAND_STDERR_TAIL = 1000
@@ -309,6 +310,30 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 ]
 
 
+# The tools that can reach a reference repo. Everything else is
+# primary-only by construction, so naming them here keeps the schema
+# patch below honest about which descriptions may claim otherwise.
+_WORKSPACE_AWARE_TOOLS = ("read_file_tool", "search_codebase_tool")
+
+
+def _schemas_with_workspace_note(note: str) -> list[dict[str, Any]]:
+    """TOOL_SCHEMAS with the reference-repo note appended to the two tools
+    that can actually read one. Returns the module-level list untouched
+    when there is no note, so a single-repo run sends exactly the bytes it
+    sent before this existed — the prompt prefix a provider caches."""
+    if not note:
+        return TOOL_SCHEMAS
+    patched: list[dict[str, Any]] = []
+    for schema in TOOL_SCHEMAS:
+        if schema["function"]["name"] not in _WORKSPACE_AWARE_TOOLS:
+            patched.append(schema)
+            continue
+        function = dict(schema["function"])
+        function["description"] = function["description"] + note
+        patched.append({**schema, "function": function})
+    return patched
+
+
 def make_dev_tools(
     *,
     worktree_path: str,
@@ -318,6 +343,7 @@ def make_dev_tools(
     planned_test_files: list[str],
     baseline_dir: str | None = None,
     progress_items: list[dict[str, str]] | None = None,
+    reference_roots: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Return (functions_dict, tool_schemas) pre-bound to this run's
     worktree and plan scope.
@@ -327,7 +353,16 @@ def make_dev_tools(
     in place, so the caller can render it as the loop's trailing reminder
     and persist it for the next fix round. None disables the tool's
     effect but still offers it, so the model never gets an unknown-tool
-    error for calling something the prompt told it to call."""
+    error for calling something the prompt told it to call.
+
+    reference_roots: {label: path} for the project's other repos
+    (forge/tools/workspace.py). READS span them; every write tool keeps
+    using worktree_path directly and `_scope_error` only ever admits
+    plan-scoped relative paths, so a prefixed path can never reach a
+    write. That asymmetry is the point: the story's branch, commit and
+    pull request all belong to one repo."""
+    workspace = Workspace(primary=worktree_path, references=dict(reference_roots or {}))
+    workspace_note = workspace.describe()
 
     def _scope_error(path: str) -> str | None:
         if _norm_rel(path) in allowed_paths:
@@ -344,7 +379,9 @@ def make_dev_tools(
                 f"Read the range you actually need (limit <= {MAX_READ_LINES}), or page through the file with offset."
             )
         try:
-            return read_file(worktree_path, path, offset=offset or 0, limit=limit, max_lines=MAX_READ_LINES)
+            label, relative = workspace.split_reference(path)
+            root = worktree_path if label is None else workspace.references[label]
+            return read_file(root, relative, offset=offset or 0, limit=limit, max_lines=MAX_READ_LINES)
         except Exception as exc:
             return f"Error reading file {path}: {exc}"
 
@@ -408,9 +445,18 @@ def make_dev_tools(
             return f"Error rolling back {path}: {exc}"
 
     def search_codebase_tool(query: str) -> str:
+        hits: list[dict[str, Any]] = []
         try:
-            results = grep_codebase(worktree_path, query)
-            return json.dumps([{"file": m.file_path, "line": m.line_number, "text": m.line_text} for m in results[:15]])
+            for label, root in workspace.read_roots():
+                if len(hits) >= 15:
+                    break
+                for match in grep_codebase(root, query, max_results=15 - len(hits)):
+                    hits.append({
+                        "file": workspace.display_path(label, match.file_path),
+                        "line": match.line_number,
+                        "text": match.line_text,
+                    })
+            return json.dumps(hits)
         except Exception as exc:
             return f"Error searching codebase: {exc}"
 
@@ -460,4 +506,4 @@ def make_dev_tools(
         "run_command_tool": run_command_tool,
     }
 
-    return functions, TOOL_SCHEMAS
+    return functions, _schemas_with_workspace_note(workspace_note)

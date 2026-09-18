@@ -49,8 +49,9 @@ from forge.services.github_service import GitHubService, parse_github_remote, pu
 from forge.services.jira_service import JiraService
 from forge.services.usage import record_run_outcome
 from forge.state.manager import StateManager
-from forge.tools.codebase_skeleton import build_codebase_skeleton
+from forge.tools.codebase_skeleton import build_workspace_skeleton
 from forge.tools.git_tools import GitMergeError, commit_all, get_branch_diff_summary
+from forge.tools.workspace import build_reference_roots
 from forge.tools.worktree import create_worktree
 
 logger = logging.getLogger("forge.daemon")
@@ -122,7 +123,23 @@ def build_context(sm: StateManager, epic: dict) -> OrchestratorContext:
     )
 
 
-def _build_story_brief(sm: StateManager, story: dict, repo_path: str | None = None) -> str:
+def _reference_roots(sm: StateManager, epic: dict) -> dict[str, str]:
+    """{label: path} for every repo on this epic's project except the one
+    the epic is assigned to.
+
+    The daemon assembles this because it owns the DB, the same separation
+    the QA context already follows. The epic's own repo stays the single
+    writable root — see forge/tools/workspace.py for why reads span the
+    project while writes do not."""
+    if not epic.get("project_id"):
+        return {}
+    repos = sm.list_project_repos(epic["project_id"])
+    return build_reference_roots(repos, epic.get("repo"))
+
+
+def _build_story_brief(
+    sm: StateManager, story: dict, repo_path: str | None = None, reference_roots: dict[str, str] | None = None
+) -> str:
     """The `user_request` handed to the planner.
 
     Previously this was the story's one-line summary and nothing else — the
@@ -162,7 +179,7 @@ def _build_story_brief(sm: StateManager, story: dict, repo_path: str | None = No
 
     if repo_path:
         try:
-            skeleton = build_codebase_skeleton(repo_path, max_chars=_MAX_SKELETON_CHARS)
+            skeleton = build_workspace_skeleton(repo_path, reference_roots, max_chars=_MAX_SKELETON_CHARS)
         except Exception as exc:  # noqa: BLE001 — a map is a head start, never a reason not to plan
             logger.warning("story %s: could not build codebase skeleton for %s: %s", story["jira_key"], repo_path, exc)
             skeleton = ""
@@ -262,11 +279,20 @@ async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, res
 
     # thread_id == story_key by construction — one LangGraph run per story,
     # named for exactly the thing it implements.
+    # Read-only sibling repos for this project, so a UI story can read the
+    # API repo it talks to (forge/tools/workspace.py). Empty for a
+    # single-repo project, which leaves every path below unchanged.
+    reference_roots = await asyncio.to_thread(_reference_roots, sm, epic)
+
     config = {"configurable": {"thread_id": story_key}}
     async with checkpointer_from_url(get_database_url()) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=resolve_bool_config("require_plan_approval", epic["project_id"]))
         if resume:
-            patch = {"worktree_path": worktree_path, "story_kind": story_kind}
+            # Re-supplied on every resume rather than trusted from the
+            # checkpoint: a repo may have been added to or removed from the
+            # project since this run was first dispatched, and a stale
+            # absolute path would fail the path guard rather than degrade.
+            patch = {"worktree_path": worktree_path, "story_kind": story_kind, "reference_roots": reference_roots}
             if story_kind == "qa":
                 # Rebuilt rather than reused from the checkpoint: more
                 # stories may have merged since this run was first
@@ -276,9 +302,10 @@ async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, res
             await graph.aupdate_state(config, patch)
             result = await graph.ainvoke(None, config)
         else:
-            brief = await asyncio.to_thread(_build_story_brief, sm, story, epic["repo"])
+            brief = await asyncio.to_thread(_build_story_brief, sm, story, epic["repo"], reference_roots)
             state = initial_state(story_key, brief, epic["repo"])
             state["worktree_path"] = worktree_path
+            state["reference_roots"] = reference_roots
             state["story_kind"] = story_kind
             if story_kind == "qa":
                 state["qa_context"] = await asyncio.to_thread(_build_qa_context, sm, epic, story)

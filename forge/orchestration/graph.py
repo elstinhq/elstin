@@ -86,6 +86,7 @@ async def planner_node(state: FeatureRunState) -> dict:
         linked_issues_context=state.get("linked_issues_context"),
         acceptance_criteria_hint=state.get("acceptance_criteria_hint") or None,
         clarification_answers=state.get("clarification_answers") or None,
+        reference_roots=state.get("reference_roots") or None,
         sdk_model=state.get("sdk_model"),
         sdk_effort=state.get("sdk_effort"),
     )
@@ -144,6 +145,7 @@ async def dev_node(state: FeatureRunState) -> dict:
             # module docstring). Takes precedence over verifier_report,
             # which may be stale from an earlier review round.
             gate_feedback=gate_feedback,
+            reference_roots=state.get("reference_roots") or None,
             sdk_model=state.get("sdk_model"),
             sdk_effort=state.get("sdk_effort"),
         )

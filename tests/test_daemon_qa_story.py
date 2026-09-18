@@ -262,3 +262,86 @@ async def test_qa_context_nests_subtasks_under_their_story(git_repo: str, tmp_pa
     # One deliverable, not two — QA must see the epic the way the team scoped it.
     assert [s["jira_key"] for s in context["dev_stories"]] == ["ENG-2"]
     assert [t["jira_key"] for t in context["dev_stories"][0]["subtasks"]] == ["ENG-20"]
+
+
+# --- multi-repo workspace (forge/tools/workspace.py) -------------------
+
+
+def _add_reference_repo(sm, project_id: int, tmp_path, name: str, rel: str, content: str) -> str:
+    """A sibling repo on the same project. Only ever read, so it needs no
+    git history — just files on disk."""
+    root = tmp_path / name
+    target = root / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
+    sm.add_project_repo(project_id, str(root), label=name)
+    return str(root)
+
+
+async def test_reference_roots_are_every_project_repo_except_the_epics_own(
+    git_repo: str, tmp_path, project_id, monkeypatch
+):
+    monkeypatch.setenv("DATABASE_URL", os.environ["DATABASE_URL"])
+    _configure(str(tmp_path / "worktrees"))
+
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id, manual_gate=False, levels=[["ENG-2"]])
+    repo_id = sm.add_project_repo(project_id, git_repo, label="web-ui")
+    sm.set_epic_project_repo("ENG-1", repo_id)
+    api = _add_reference_repo(sm, project_id, tmp_path, "api", "models/cart.py", "class Cart:\n    pass\n")
+
+    roots = daemon._reference_roots(sm, sm.get_epic("ENG-1"))
+
+    # The writable repo is not among its own references.
+    assert roots == {"api": api}
+
+
+async def test_story_brief_maps_the_reference_repo_with_its_prefix(
+    git_repo: str, tmp_path, project_id, monkeypatch
+):
+    """The skeleton doubles as documentation of how to address the other
+    repo, so the label has to appear with the prefix its paths need."""
+    monkeypatch.setenv("DATABASE_URL", os.environ["DATABASE_URL"])
+    _configure(str(tmp_path / "worktrees"))
+
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id, manual_gate=False, levels=[["ENG-2"]])
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0, summary="Show the cart total")
+    api = _add_reference_repo(sm, project_id, tmp_path, "api", "models/cart.py", "class Cart:\n    pass\n")
+
+    brief = daemon._build_story_brief(sm, sm.get_story("ENG-2"), git_repo, {"api": api})
+
+    assert "### Reference repo @api (read-only)" in brief
+    assert "Address these files as @api/<path>" in brief
+    assert "models/: cart.py [Cart]" in brief
+
+
+async def test_dispatch_hands_the_reference_roots_to_the_planner(
+    git_repo: str, tmp_path, project_id, monkeypatch
+):
+    """End-to-end plumbing: daemon assembles the roots, the graph state
+    carries them, and the role receives them."""
+    monkeypatch.setenv("DATABASE_URL", os.environ["DATABASE_URL"])
+    _configure(str(tmp_path / "worktrees"))
+
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id, manual_gate=False, levels=[["ENG-2"]])
+    repo_id = sm.add_project_repo(project_id, git_repo, label="web-ui")
+    sm.set_epic_project_repo("ENG-1", repo_id)
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0, summary="Show the cart total")
+    api = _add_reference_repo(sm, project_id, tmp_path, "api", "models/cart.py", "class Cart:\n    pass\n")
+
+    import forge.orchestration.graph as graph_module
+    from tests.conftest import fake_run_planner
+
+    seen: dict = {}
+
+    async def capturing_planner(**kwargs):
+        seen.update(kwargs)
+        return await fake_run_planner(**kwargs)
+
+    monkeypatch.setattr(graph_module, "run_planner", capturing_planner)
+
+    await poll_once(sm)
+
+    assert seen["reference_roots"] == {"api": api}

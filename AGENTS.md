@@ -83,7 +83,7 @@ state only (status, kind, worktree, gates, levels).
 | `state/` | **Only** DB access for epics/stories/PRs/projects | Import `forge.db.models` outside the allow-list in hard constraint #1 |
 | `db/` | SQLAlchemy models + engine | Business logic here |
 | `services/` | JIRA/GitHub clients, epic sync, ticket filters, story_kind, generation (verifier/QA's single-shot LLM call), repo cloning, run activity + its live fan-out, run telemetry (cost **and** run shape) | Bypass StateManager for persistence |
-| `tools/` | Dev-agent tools, planner's read-only tools, language profiles, worktree, path guard | Hardcode language names — use `language_hooks` |
+| `tools/` | Dev-agent tools, planner's read-only tools, language profiles, worktree, path guard, workspace (multi-repo read roots) | Hardcode language names — use `language_hooks`; give a reference repo a write path |
 | `mcp/` | MCP servers (jira/github standalone) | Assume agents already use JIRA/GitHub MCP — daemon calls services directly today |
 | `api/` | FastAPI routers | Long-running work — daemon owns that |
 | `config/` | Postgres config store | Read secrets from env (except `DATABASE_URL`) |
@@ -91,6 +91,42 @@ state only (status, kind, worktree, gates, levels).
 Entry points (`pyproject.toml`): `forge-daemon`, `forge-mcp-jira`,
 `forge-mcp-github`. Production serves via
 `uvicorn forge.app:create_app --factory`.
+
+## Multi-repo projects
+
+A project may have several repos (`ProjectRepo` is one-to-many). An epic
+is still assigned exactly **one**, and that one is the only writable root:
+worktree, branch, commit, PR and integration branch all belong to it.
+Every *other* repo on the project is mounted **read-only** for that
+epic's stories, addressed by an `@label/` prefix — `@api/src/auth.py`.
+
+- `tools/workspace.py` owns the root set and its resolution. Labels come
+  from `ProjectRepo.label` (else the directory name), slugified, with
+  colliding labels suffixed.
+- **Reads span the project, writes do not.** `read_file_tool`,
+  `grep_tool`/`search_codebase_tool` and `find_files_tool` cover every
+  root and label their hits so a result can be read back verbatim. Every
+  write tool keeps using the worktree path directly, and plan scope only
+  ever admits unprefixed relative paths, so a prefixed path cannot reach a
+  write even if a plan names one.
+- The prefix is required, not optional: a bare `api/...` would be
+  ambiguous the moment the primary repo has a top-level `api/` directory,
+  and an unknown label is an error rather than a silent primary read.
+- The daemon assembles `{label: path}` (it owns the DB) into
+  `FeatureRunState.reference_roots`, re-supplied on every resume so a repo
+  added or removed since dispatch doesn't leave a stale absolute path in a
+  checkpoint.
+- Reference repos are read at their **clone path, not a worktree**, so
+  they show whatever branch that checkout is on. That is why they are
+  read-only.
+- A single-repo project is byte-identical to before: no note in any tool
+  description, and `make_dev_tools` returns the shared `TOOL_SCHEMAS`
+  object rather than a patched copy, so a cached prompt prefix stays valid.
+
+**Work that must change both repos is two stories in one epic**, which
+the existing wave ordering already sequences. Forge deliberately does not
+open two branches for one story: there is no cross-repo transaction, so a
+story half-landing across two repos would have nothing to undo it.
 
 ## Story kinds and hierarchy
 
