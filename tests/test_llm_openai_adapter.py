@@ -185,3 +185,74 @@ def _fake_http_response(status_code: int):
 
     request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
     return httpx.Response(status_code, request=request)
+
+
+# --- reasoning_effort routing ------------------------------------------
+# Sending the field to a model that rejects it, or sending a LEVEL a model
+# rejects, is a 400 -> LlmBadRequestError, which the agent loop never
+# retries. So the adapter decides per model, and drops the field rather
+# than gamble. See forge/llm/openai_compat.py's _EFFORT_SUPPORT.
+
+
+@pytest.mark.parametrize(
+    "model,effort,expected",
+    [
+        # OpenAI's own families: unchanged, any configured level passes through.
+        ("gpt-5.1", "medium", "medium"),
+        ("gpt-5.1-mini", "xhigh", "xhigh"),
+        ("o3", "low", "low"),
+        # A gateway that namespaces the vendor must match the same rules.
+        ("openai/gpt-5.1", "medium", "medium"),
+        # Documented levels for these two OpenRouter reasoning models.
+        ("z-ai/glm-5.3", "max", "max"),
+        ("z-ai/glm-5.3", "high", "high"),
+        ("moonshotai/kimi-k3", "low", "low"),
+        # GLM accepts low/high/max but NOT medium — which happens to be
+        # forge's default dev_sdk_effort, so forwarding it would 400 every
+        # single call. Dropped instead.
+        ("z-ai/glm-5.3", "medium", None),
+        ("moonshotai/kimi-k3", "high", None),
+        # Non-reasoning / unknown models never get the field.
+        ("deepseek/deepseek-v4-pro-0813", "medium", None),
+        ("some-future-model", "high", None),
+        # No effort configured means nothing to send.
+        ("gpt-5.1", None, None),
+        ("z-ai/glm-5.3", "", None),
+    ],
+)
+def test_resolve_reasoning_effort(model, effort, expected):
+    from forge.llm.openai_compat import resolve_reasoning_effort
+
+    assert resolve_reasoning_effort(model, effort) == expected
+
+
+async def test_reasoning_effort_is_sent_for_a_supported_model(provider, monkeypatch):
+    captured = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _fake_completion(content="{}", model="z-ai/glm-5.3")
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", fake_create)
+
+    await provider.complete(LlmRequest(model="z-ai/glm-5.3", messages=[text_message("user", "hi")], effort="max"))
+
+    assert captured["reasoning_effort"] == "max"
+
+
+async def test_unsupported_effort_level_is_omitted_from_the_request(provider, monkeypatch):
+    """The whole point: the request still goes out, just without the field."""
+    captured = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _fake_completion(content="{}", model="z-ai/glm-5.3")
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", fake_create)
+
+    response = await provider.complete(
+        LlmRequest(model="z-ai/glm-5.3", messages=[text_message("user", "hi")], effort="medium")
+    )
+
+    assert "reasoning_effort" not in captured
+    assert response.stop_reason == "end_turn"

@@ -57,16 +57,65 @@ from forge.llm.types import (
 
 logger = logging.getLogger("forge.llm.openai")
 
-# Reasoning-effort-capable model families as of this adapter's writing —
-# gpt-5.x and o-series. A model outside this list simply never gets
-# reasoning_effort sent (see _build_kwargs), so this list erring on the
-# side of "too narrow" costs nothing; erring "too broad" would 400 on a
-# model that doesn't support the field.
-_REASONING_MODEL_PREFIXES = ("gpt-5", "gpt-6", "o1", "o3", "o4")
+# Which models accept `reasoning_effort`, and which levels each one takes.
+#
+# Both halves matter, because both mistakes fail the same way: sending the
+# field to a model that doesn't accept it is a 400, and sending a LEVEL a
+# model doesn't accept is also a 400 — and a 400 maps to
+# LlmBadRequestError, which forge/agents/loop.py deliberately never
+# retries, so it kills the whole run rather than one turn. A model
+# matching nothing here simply never gets the field, which costs only the
+# configured effort's effect, so erring narrow stays the safe direction.
+#
+# An empty level set means "accepts whatever forge is configured with" —
+# used for OpenAI's own families, whose behavior is unchanged from this
+# adapter's original prefix check.
+#
+# The namespaced entries are OpenRouter model ids. Their level sets were
+# read off each model's OpenRouter page on 2026-09-18, NOT recalled:
+#   z-ai/glm-5.3        reasoning always on, levels low/high/max (max is
+#                       the provider default, so omitting the field bills
+#                       every call at max reasoning)
+#   moonshotai/kimi-k3  levels low/max
+# Re-check a model's own page before adding or changing a row here.
+_ANY_LEVEL: frozenset[str] = frozenset()
+
+_EFFORT_SUPPORT: tuple[tuple[tuple[str, ...], frozenset[str]], ...] = (
+    (("gpt-5", "gpt-6", "o1", "o3", "o4"), _ANY_LEVEL),
+    (("z-ai/glm-5.3",), frozenset({"low", "high", "max"})),
+    (("moonshotai/kimi-k3",), frozenset({"low", "max"})),
+)
 
 
-def _supports_reasoning_effort(model: str) -> bool:
-    return model.startswith(_REASONING_MODEL_PREFIXES)
+def _model_variants(model: str) -> tuple[str, ...]:
+    """The model id, plus its bare name when the id is namespaced
+    ("openai/gpt-5.1" -> also "gpt-5.1"). A gateway that prefixes the
+    vendor onto an otherwise-identical model should match the same rules
+    as that vendor's own API."""
+    bare = model.rsplit("/", 1)[-1]
+    return (model,) if bare == model else (model, bare)
+
+
+def resolve_reasoning_effort(model: str, effort: str | None) -> str | None:
+    """The `reasoning_effort` value to send for this (model, effort) pair,
+    or None to omit the field entirely. Dropping an unsupported level
+    rather than forwarding it is deliberate: a request that runs at the
+    model's default effort is worse than one that runs at the configured
+    effort, but far better than a 400 that fails the story."""
+    if not effort:
+        return None
+    variants = _model_variants(model)
+    for prefixes, allowed_levels in _EFFORT_SUPPORT:
+        if not any(variant.startswith(prefixes) for variant in variants):
+            continue
+        if not allowed_levels or effort in allowed_levels:
+            return effort
+        logger.warning(
+            "Model %s does not accept reasoning effort %r (accepts: %s) — sending this request without the field",
+            model, effort, ", ".join(sorted(allowed_levels)),
+        )
+        return None
+    return None
 
 
 class OpenAiCompatProvider:
@@ -130,8 +179,9 @@ class OpenAiCompatProvider:
             ]
         # No max_completion_tokens: forge deliberately never caps a single
         # response — see forge/llm/types.py's LlmRequest.
-        if request.effort and _supports_reasoning_effort(request.model):
-            kwargs["reasoning_effort"] = request.effort
+        reasoning_effort = resolve_reasoning_effort(request.model, request.effort)
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
         if request.response_format:
             kwargs["response_format"] = {
                 "type": "json_schema",

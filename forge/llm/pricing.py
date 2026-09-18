@@ -10,13 +10,17 @@ serve a same-named model (e.g. an OpenAI-compatible self-hosted endpoint
 proxying "gpt-4.1") at different rates; collapsing the key to just the
 model id would silently misattribute cost between them.
 
-*** PRICING BELOW IS A BEST-EFFORT PLACEHOLDER, NOT VERIFIED AGAINST A
-*** LIVE SOURCE. OpenAI's price list changes independently of this
-*** codebase and this module has no live pricing API to read from.
+*** THE "gpt-*" RATES BELOW ARE BEST-EFFORT PLACEHOLDERS, NOT VERIFIED
+*** AGAINST A LIVE SOURCE. OpenAI's price list changes independently of
+*** this codebase and this module has no live pricing API to read from.
 *** Verify every rate against https://openai.com/api/pricing (or your
 *** provider's own price list, for a non-OpenAI base_url) before relying
 *** on these figures for budget alerts or cost dashboards. Update this
 *** table — and this notice's "verified as of" date — whenever you do.
+***
+*** The OpenRouter rows were read off each model's own OpenRouter page on
+*** 2026-09-18. See the note above those rows on why they are not the
+*** cheapest figure each page advertises.
 """
 from __future__ import annotations
 
@@ -30,16 +34,38 @@ class ModelPricing:
     cached_input_per_mtok: float
 
 
-# provider name -> model id -> pricing. "openai" entries are placeholders
-# (see module docstring) — NOT verified as of any date. Add a row per
-# (provider, model) your deployment actually uses; an unlisted pair falls
-# back to cost_source="unknown" rather than a silently wrong number.
+# provider name -> model id -> pricing. The "gpt-*" rows are unverified
+# placeholders (see module docstring); the namespaced rows were read off
+# OpenRouter on 2026-09-18. Add a row per (provider, model) your
+# deployment actually uses; an unlisted pair falls back to
+# cost_source="unknown" rather than a silently wrong number — which also
+# means max_budget_usd never trips for it, so a model you rely on a
+# budget cap for MUST have a row here.
 MODEL_PRICING: dict[str, dict[str, ModelPricing]] = {
+    # Every OpenAI-compatible endpoint lands under "openai" today, because
+    # forge/llm/registry.py names the provider after the adapter it picked
+    # rather than after the base_url it points at. So an OpenRouter model
+    # id belongs in THIS dict, not a sibling one — a second key here would
+    # simply never be looked up.
     "openai": {
         "gpt-5.1": ModelPricing(input_per_mtok=1.25, output_per_mtok=10.00, cached_input_per_mtok=0.125),
         "gpt-5.1-mini": ModelPricing(input_per_mtok=0.25, output_per_mtok=2.00, cached_input_per_mtok=0.025),
         "gpt-4.1": ModelPricing(input_per_mtok=2.00, output_per_mtok=8.00, cached_input_per_mtok=0.50),
         "gpt-4.1-mini": ModelPricing(input_per_mtok=0.40, output_per_mtok=1.60, cached_input_per_mtok=0.10),
+        # --- OpenRouter model ids, read off each model page 2026-09-18 ---
+        #
+        # Each of these is served by 17-23 competing hosts whose rates
+        # differ by up to threefold, and OpenRouter's default routing does
+        # not promise you the cheapest. These rows therefore carry the
+        # MODAL LISTED rate rather than the discounted headline each page
+        # advertises: the only consumer is max_budget_usd (forge/agents/
+        # loop.py), and a budget cap that under-estimates is a cap that
+        # doesn't stop a runaway run. Cost dashboards read the same figures,
+        # so treat them as an upper bound, not an invoice.
+        "moonshotai/kimi-k3": ModelPricing(input_per_mtok=3.00, output_per_mtok=15.00, cached_input_per_mtok=0.30),
+        "z-ai/glm-5.3": ModelPricing(input_per_mtok=1.40, output_per_mtok=4.40, cached_input_per_mtok=0.26),
+        "deepseek/deepseek-v4-pro-0813": ModelPricing(input_per_mtok=1.32, output_per_mtok=3.96, cached_input_per_mtok=0.044),
+        "deepseek/deepseek-v4.1-flash": ModelPricing(input_per_mtok=0.30, output_per_mtok=1.20, cached_input_per_mtok=0.03),
     },
 }
 
