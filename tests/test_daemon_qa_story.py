@@ -201,6 +201,25 @@ async def test_story_brief_without_subtasks_is_just_the_ticket(git_repo: str, tm
     assert brief == "Add a widget\n\nDo it well."
 
 
+async def test_story_brief_appends_a_codebase_skeleton_when_given_the_repo(git_repo: str, tmp_path, project_id, monkeypatch):
+    """The planner's brief carries a pre-computed map of the repo so the
+    model starts at the right files instead of exploring the tree."""
+    monkeypatch.setenv("DATABASE_URL", os.environ["DATABASE_URL"])
+    _configure(str(tmp_path / "worktrees"))
+    os.makedirs(os.path.join(git_repo, "app"), exist_ok=True)
+    with open(os.path.join(git_repo, "app", "service.py"), "w") as f:
+        f.write("class WidgetService:\n    pass\n")
+
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id, manual_gate=False, levels=[["ENG-2"]])
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0, summary="Add a widget", description="Do it well.")
+
+    brief = daemon._build_story_brief(sm, sm.get_story("ENG-2"), git_repo)
+
+    assert brief.startswith("Add a widget\n\nDo it well.\n\n## Codebase skeleton (")
+    assert "app/: service.py [WidgetService]" in brief
+
+
 async def test_subtasks_are_never_dispatched(git_repo: str, tmp_path, project_id, monkeypatch):
     """End-to-end guard: a sub-task row present in the DB must not get a
     worktree, a branch, or a status change when the daemon polls."""

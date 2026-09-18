@@ -207,3 +207,256 @@ async def test_verifier_failure_retries_dev_up_to_max_iterations(postgres_url: s
         assert result["status"] == "failed"
         assert result["error"] == "Verifier retries exhausted"
         assert result["iteration"] == 2
+
+
+# --- Tier 1 deterministic gate -------------------------------------------
+
+
+def _failing_gate(*, blockers: list[str]) -> dict:
+    return {
+        "passed": False,
+        "issues": [{"severity": "blocker", "file": None, "reason": b, "details": f"{b} detail"} for b in blockers],
+        "required_fixes": blockers,
+    }
+
+
+async def test_gate_failure_routes_back_to_dev_with_feedback_and_never_enters_the_verifier(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+):
+    """Tier 1 fails once (code doesn't compile), dev gets one targeted
+    fix message on top of its existing history, Tier 1 then passes, and
+    only THEN does the verifier run — exactly once."""
+    import forge.orchestration.graph as graph_module
+
+    gate_results = [_failing_gate(blockers=["alpha: analyze failed"]), {"passed": True, "issues": [], "required_fixes": []}]
+    dev_calls: list[dict] = []
+    verifier_calls: list[dict] = []
+
+    async def scripted_gate(**kwargs) -> dict:
+        return gate_results.pop(0)
+
+    async def recording_dev(**kwargs) -> dict:
+        dev_calls.append(kwargs)
+        return {"file_changes": [{"path": "a.py"}], "truncated": False, "messages": [], "dev_history": [{"role": "user", "content": [{"type": "text", "text": "earlier"}]}], "dev_build_runner": {}}
+
+    async def recording_verifier(**kwargs) -> dict:
+        verifier_calls.append(kwargs)
+        return {"verifier_report": {"passed": True}, "diffs": [], "messages": []}
+
+    monkeypatch.setattr(graph_module, "run_deterministic_gate", scripted_gate)
+    monkeypatch.setattr(graph_module, "run_dev", recording_dev)
+    monkeypatch.setattr(graph_module, "run_verifier", recording_verifier)
+
+    thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}}
+    state = initial_state(thread_id, "Add a widget to the cart", "/repo")
+    state["worktree_path"] = "/repo-worktrees/eng-1"
+
+    async with checkpointer_from_url(postgres_url) as checkpointer:
+        graph = compile_graph(checkpointer, require_plan_approval=False)
+        result = await graph.ainvoke(state, config)
+
+    assert result["status"] == "completed"
+    assert len(dev_calls) == 2
+    assert dev_calls[0]["gate_feedback"] is None
+    feedback = dev_calls[1]["gate_feedback"]
+    assert feedback.startswith("Deterministic checks FAILED with 1 problem(s)")
+    assert "alpha: analyze failed" in feedback
+    assert "(fix attempt 1/3)" in feedback
+    # The fix round continues the same conversation rather than starting cold.
+    assert dev_calls[1]["prior_history"] == [{"role": "user", "content": [{"type": "text", "text": "earlier"}]}]
+    # The verifier ran once, after the gate passed, and got the gate's report to reuse.
+    assert len(verifier_calls) == 1
+    assert verifier_calls[0]["precomputed_gate"] == {"passed": True, "issues": [], "required_fixes": []}
+    assert result["gate_feedback"] is None  # consumed
+    assert result["gate_attempts"] == 0  # reset by the pass
+
+
+async def test_gate_failing_every_time_fails_the_run_without_a_verifier_call(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+):
+    import forge.orchestration.graph as graph_module
+
+    verifier_calls: list[dict] = []
+
+    async def always_failing_gate(**kwargs) -> dict:
+        return _failing_gate(blockers=["Missing planned new file: lib/x.dart"])
+
+    async def recording_verifier(**kwargs) -> dict:
+        verifier_calls.append(kwargs)
+        return {"verifier_report": {"passed": True}, "diffs": [], "messages": []}
+
+    monkeypatch.setattr(graph_module, "run_deterministic_gate", always_failing_gate)
+    monkeypatch.setattr(graph_module, "run_verifier", recording_verifier)
+
+    thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}}
+    state = initial_state(thread_id, "Add a widget to the cart", "/repo")
+    state["worktree_path"] = "/repo-worktrees/eng-1"
+    state["max_gate_attempts"] = 2
+
+    async with checkpointer_from_url(postgres_url) as checkpointer:
+        graph = compile_graph(checkpointer, require_plan_approval=False)
+        result = await graph.ainvoke(state, config)
+
+    assert result["status"] == "failed"
+    assert result["gate_attempts"] == 2
+    assert result["error"].startswith("Deterministic gate failed after 2 fix attempt(s)")
+    assert "Missing planned new file: lib/x.dart" in result["error"]
+    assert result["verifier_report"]["passed"] is False  # the gate report, for the daemon's readers
+    assert verifier_calls == []  # never paid for a review of code that doesn't build
+    assert result["iteration"] == 0  # the verifier's own budget was never touched
+
+
+async def test_gate_runs_after_every_dev_pass_including_verifier_retries(postgres_url: str, monkeypatch: pytest.MonkeyPatch):
+    """dev -> gate -> verifier(fail) -> dev -> gate -> verifier(pass)."""
+    import forge.orchestration.graph as graph_module
+
+    gate_calls = {"n": 0}
+    verdicts = [False, True]
+
+    async def counting_gate(**kwargs) -> dict:
+        gate_calls["n"] += 1
+        return {"passed": True, "issues": [], "required_fixes": []}
+
+    async def scripted_verifier(**kwargs) -> dict:
+        passed = verdicts.pop(0)
+        return {"verifier_report": {"passed": passed, "required_fixes": [] if passed else ["nope"]}, "diffs": [], "messages": []}
+
+    monkeypatch.setattr(graph_module, "run_deterministic_gate", counting_gate)
+    monkeypatch.setattr(graph_module, "run_verifier", scripted_verifier)
+
+    thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}}
+    state = initial_state(thread_id, "Add a widget to the cart", "/repo")
+    state["worktree_path"] = "/repo-worktrees/eng-1"
+
+    async with checkpointer_from_url(postgres_url) as checkpointer:
+        graph = compile_graph(checkpointer, require_plan_approval=False)
+        result = await graph.ainvoke(state, config)
+
+    assert result["status"] == "completed"
+    assert gate_calls["n"] == 2
+    assert result["iteration"] == 1
+
+
+# --- a bad model reply fails the story, not the poll cycle -------------
+
+
+async def test_verifier_generation_error_fails_the_story_instead_of_escaping(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+):
+    """The verifier and QA nodes used to catch nothing. Since the daemon's
+    poll loop has no per-story handler, an unparseable model reply escaped
+    all the way to run_forever's blanket except, abandoning every epic
+    queued behind this one for the rest of the cycle."""
+    import forge.orchestration.graph as graph_module
+    from forge.services.generation import GenerationError
+
+    async def verifier_gets_prose(**kwargs) -> dict:
+        raise GenerationError("model reply contained no JSON object")
+
+    monkeypatch.setattr(graph_module, "run_verifier", verifier_gets_prose)
+
+    thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}}
+    state = initial_state(thread_id, "Add a widget to the cart", "/repo")
+    state["worktree_path"] = "/repo-worktrees/eng-1"
+
+    async with checkpointer_from_url(postgres_url) as checkpointer:
+        graph = compile_graph(checkpointer, require_plan_approval=False)
+        result = await graph.ainvoke(state, config)  # must not raise
+
+    assert result["status"] == "failed"
+    assert "Verifier review could not be completed" in result["error"]
+
+
+async def test_qa_generation_error_fails_the_story_instead_of_escaping(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+):
+    import forge.orchestration.graph as graph_module
+    from forge.services.generation import GenerationError
+
+    async def qa_provider_down(**kwargs) -> dict:
+        raise GenerationError("epic QA failed via openai: service unavailable")
+
+    monkeypatch.setattr(graph_module, "run_epic_qa", qa_provider_down)
+
+    thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}}
+
+    async with checkpointer_from_url(postgres_url) as checkpointer:
+        graph = compile_graph(checkpointer, require_plan_approval=False)
+        result = await graph.ainvoke(_qa_state(thread_id), config)  # must not raise
+
+    assert result["status"] == "failed"
+    assert "Epic QA review could not be completed" in result["error"]
+
+
+async def test_gate_and_verifier_populate_the_run_outcome_counters(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+):
+    """The counters that answer "is the Tier 1 gate earning its keep":
+    a high gate_failures with a low verifier_rejections means it is
+    catching broken builds before the expensive reviewer sees them.
+    Recorded by the graph nodes themselves, so this proves the wiring, not
+    just the service (see forge/db/models/run_outcome.py)."""
+    import forge.orchestration.graph as graph_module
+    from forge.services.usage import get_run_outcome
+
+    gate_results = [_failing_gate(blockers=["alpha: analyze failed"]), {"passed": True, "issues": [], "required_fixes": []}]
+
+    async def scripted_gate(**kwargs) -> dict:
+        return gate_results.pop(0)
+
+    monkeypatch.setattr(graph_module, "run_deterministic_gate", scripted_gate)
+
+    thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}}
+    state = initial_state(thread_id, "Add a widget to the cart", "/repo")
+    state["worktree_path"] = "/repo-worktrees/eng-1"
+
+    async with checkpointer_from_url(postgres_url) as checkpointer:
+        graph = compile_graph(checkpointer, require_plan_approval=False)
+        result = await graph.ainvoke(state, config)
+
+    assert result["status"] == "completed"
+
+    outcome = get_run_outcome(thread_id)
+    assert outcome is not None
+    # Gate ran twice: failed, then passed after the fix round.
+    assert outcome["gate_runs"] == 2
+    assert outcome["gate_failures"] == 1
+    # The reviewer only ever saw the build that had already cleared Tier 1.
+    assert outcome["verifier_runs"] == 1
+    assert outcome["verifier_rejections"] == 0
+
+
+async def test_a_failed_verifier_is_still_counted_as_a_run(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+):
+    """Regression: the counter sat after the error handler returned, so the
+    one case worth measuring — how often a cheap model fails to return
+    usable JSON — was the case the table omitted."""
+    import forge.orchestration.graph as graph_module
+    from forge.services.generation import GenerationError
+    from forge.services.usage import get_run_outcome
+
+    async def verifier_gets_prose(**kwargs) -> dict:
+        raise GenerationError("model reply contained no JSON object")
+
+    monkeypatch.setattr(graph_module, "run_verifier", verifier_gets_prose)
+
+    thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}}
+    state = initial_state(thread_id, "Add a widget to the cart", "/repo")
+    state["worktree_path"] = "/repo-worktrees/eng-1"
+
+    async with checkpointer_from_url(postgres_url) as checkpointer:
+        graph = compile_graph(checkpointer, require_plan_approval=False)
+        result = await graph.ainvoke(state, config)
+
+    assert result["status"] == "failed"
+    outcome = get_run_outcome(thread_id)
+    assert outcome["verifier_runs"] == 1
+    assert outcome["verifier_rejections"] == 0  # it never got to judge

@@ -47,7 +47,9 @@ from forge.agents.roles.qa import format_qa_report_comment
 from forge.orchestration.state import initial_state
 from forge.services.github_service import GitHubService, parse_github_remote, push_branch
 from forge.services.jira_service import JiraService
+from forge.services.usage import record_run_outcome
 from forge.state.manager import StateManager
+from forge.tools.codebase_skeleton import build_codebase_skeleton
 from forge.tools.git_tools import GitMergeError, commit_all, get_branch_diff_summary
 from forge.tools.worktree import create_worktree
 
@@ -86,6 +88,10 @@ _QA_DIFF_MAX_CHARS = 60_000
 # truncating the breakdown would silently drop scope the team agreed on.
 _MAX_BRIEF_CHARS = 40_000
 
+# Cap on the codebase skeleton appended after the ticket text — its own
+# budget, so a big repo's map can never eat into the ticket's 40k.
+_MAX_SKELETON_CHARS = 12_000
+
 
 def build_snapshot(sm: StateManager, epic_key: str) -> EpicSnapshot:
     epic = sm.get_epic(epic_key)
@@ -116,7 +122,7 @@ def build_context(sm: StateManager, epic: dict) -> OrchestratorContext:
     )
 
 
-def _build_story_brief(sm: StateManager, story: dict) -> str:
+def _build_story_brief(sm: StateManager, story: dict, repo_path: str | None = None) -> str:
     """The `user_request` handed to the planner.
 
     Previously this was the story's one-line summary and nothing else — the
@@ -126,6 +132,13 @@ def _build_story_brief(sm: StateManager, story: dict) -> str:
     names the exact file to create, while its parent story only states the
     user-facing acceptance criteria. Both matter, and the sub-tasks are the
     reason forge doesn't need to dispatch them separately.
+
+    When `repo_path` is given, a pre-computed codebase skeleton (every
+    source file's path and top-level declarations —
+    forge/tools/codebase_skeleton.py) is appended after the ticket text, so
+    the planner starts from a map of the repo instead of spending its
+    first turns discovering the directory tree. Walks the repo, so call it
+    off the event loop (asyncio.to_thread) from async code.
     """
     parts = [story.get("summary") or story["jira_key"]]
     if story.get("description"):
@@ -145,8 +158,17 @@ def _build_story_brief(sm: StateManager, story: dict) -> str:
                 block += "\n" + subtask["description"].strip()
             parts.append(block)
 
-    brief = "\n\n".join(parts)
-    return brief[:_MAX_BRIEF_CHARS]
+    brief = "\n\n".join(parts)[:_MAX_BRIEF_CHARS]
+
+    if repo_path:
+        try:
+            skeleton = build_codebase_skeleton(repo_path, max_chars=_MAX_SKELETON_CHARS)
+        except Exception as exc:  # noqa: BLE001 — a map is a head start, never a reason not to plan
+            logger.warning("story %s: could not build codebase skeleton for %s: %s", story["jira_key"], repo_path, exc)
+            skeleton = ""
+        if skeleton:
+            brief = f"{brief}\n\n{skeleton}"
+    return brief
 
 
 def _build_qa_context(sm: StateManager, epic: dict, qa_story: dict) -> dict:
@@ -254,7 +276,8 @@ async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, res
             await graph.aupdate_state(config, patch)
             result = await graph.ainvoke(None, config)
         else:
-            state = initial_state(story_key, _build_story_brief(sm, story), epic["repo"])
+            brief = await asyncio.to_thread(_build_story_brief, sm, story, epic["repo"])
+            state = initial_state(story_key, brief, epic["repo"])
             state["worktree_path"] = worktree_path
             state["story_kind"] = story_kind
             if story_kind == "qa":
@@ -262,6 +285,10 @@ async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, res
             result = await graph.ainvoke(state, config)
 
     sm.set_story_thread_id(story_key, story_key)
+    # The graph's own terminal status, not the coarser story status below:
+    # "completed" vs "qa_completed" vs "awaiting_approval" are different
+    # run shapes, and the mapping would flatten them.
+    record_run_outcome(story_key, outcome=result.get("status"))
     new_status = _GRAPH_STATUS_TO_STORY_STATUS.get(result.get("status"), "dispatched")
     # "run" — no PR exists yet at this point (a run only reaches
     # "awaiting_pr_open" on success), so retry_story's recovery for this

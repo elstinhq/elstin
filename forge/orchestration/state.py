@@ -68,6 +68,22 @@ class FeatureRunState(TypedDict, total=False):
     # so forge owns this instead.
     dev_history: list[dict[str, Any]]
     dev_build_runner: dict[str, Any]
+    # Tier 1 deterministic gate (forge/orchestration/graph.py's gate_node):
+    # the compare_to_plan report from the most recent gate run, the count
+    # of consecutive gate failures (reset to 0 on a pass; the run fails
+    # once it reaches max_gate_attempts), and — when the gate just failed
+    # — the targeted fix message dev_node hands run_dev as this
+    # iteration's brief instead of a verifier report. Cleared by dev_node
+    # once consumed.
+    # The dev agent's live progress checklist (forge/tools/progress.py),
+    # seeded from the plan on the first pass and carried across gate/
+    # verifier fix rounds so a second pass resumes the same bookkeeping
+    # instead of starting from "nothing done".
+    dev_progress: list[dict[str, str]]
+    tier1_gate: dict[str, Any]
+    gate_attempts: int
+    max_gate_attempts: int
+    gate_feedback: str | None
     error: str | None
     approved: bool
     rejected: bool
@@ -106,6 +122,11 @@ def initial_state(run_id: str, user_request: str, project_path: str) -> FeatureR
         qa_context={},
         messages=[],
         dev_history=[],
+        dev_progress=[],
+        tier1_gate={},
+        gate_attempts=0,
+        max_gate_attempts=3,
+        gate_feedback=None,
         error=None,
         approved=False,
         rejected=False,

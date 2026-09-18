@@ -454,3 +454,52 @@ async def test_pr_open_failure_is_recorded_and_cleared_on_retry(project_id, monk
     story = sm.get_story("ENG-10")
     assert story["pr_open_error"] is None
     assert sm.get_pull_request("ENG-10")["number"] == 1
+
+
+async def test_a_bad_verifier_reply_fails_one_story_without_abandoning_the_poll_cycle(
+    git_repo: str, tmp_path, project_id, monkeypatch: pytest.MonkeyPatch
+):
+    """The liveness bug behind the verifier-node fix. verifier_node used to
+    catch nothing, poll_once has no per-story handler, and run_forever's
+    only net abandons the whole cycle — so one model reply that wasn't
+    JSON silently starved every epic queued behind it.
+
+    Epic order is pinned here because list_active_epic_keys has no ORDER BY:
+    the failing epic must go first for this to prove anything.
+    """
+    _configure(str(tmp_path / "worktrees"))
+
+    sm = StateManager()
+    _create_epic_with_repo(sm, "ENG-1", project_id=project_id, repo_path=git_repo, levels=[["ENG-2"]])
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0, summary="Story whose verifier misbehaves")
+    _create_epic_with_repo(sm, "ENG-10", project_id=project_id, repo_path=git_repo, levels=[["ENG-11"]])
+    sm.create_story("ENG-11", epic_key="ENG-10", wave=0, summary="Story queued behind it")
+
+    monkeypatch.setattr(sm, "list_active_epic_keys", lambda: ["ENG-1", "ENG-10"])
+
+    import forge.orchestration.graph as graph_module
+    from forge.services.generation import GenerationError
+
+    async def verifier_answers_with_prose(**kwargs) -> dict:
+        # Only the first epic's story gets the bad reply; run_id is the
+        # story key by construction (see _run_or_resume_story).
+        if kwargs.get("run_id") == "ENG-2":
+            raise GenerationError("model reply contained no JSON object")
+        return {"verifier_report": {"passed": True}, "diffs": [], "messages": []}
+
+    monkeypatch.setattr(graph_module, "run_verifier", verifier_answers_with_prose)
+
+    await poll_once(sm)  # both epics plan
+    assert sm.get_story("ENG-2")["status"] == "awaiting_plan_approval"
+    assert sm.get_story("ENG-11")["status"] == "awaiting_plan_approval"
+
+    sm.set_story_gate_approved("ENG-2")
+    sm.set_story_gate_approved("ENG-11")
+
+    await poll_once(sm)  # must not raise, and must not stop at ENG-1
+
+    failed = sm.get_story("ENG-2")
+    assert failed["status"] == "failed"
+    assert failed["failure_stage"] == "run"
+    # The real assertion: the epic behind the failure still got its turn.
+    assert sm.get_story("ENG-11")["status"] == "awaiting_pr_open"

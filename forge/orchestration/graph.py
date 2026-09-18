@@ -1,7 +1,9 @@
 """The LangGraph workflow. There are two paths through it, chosen at START
 by the story's kind (see forge/services/story_kind.py):
 
-    dev story:  planner -> [interrupt] -> dev -> verifier <-> dev -> END
+    dev story:  planner -> [interrupt] -> dev -> gate -> verifier -> END
+                                           ^______|  (gate failed)
+                                           ^_______________|  (review failed)
     qa story:   qa -> END
 
 They are disjoint on purpose. A QA story is a validation ticket: it has
@@ -22,6 +24,21 @@ Notable design points:
 2. `interrupt_after=["planner"]` is not hardcoded at compile time — it's
    conditional on the `require_plan_approval` app_config gate (see
    forge/config/store.py), read once per compile.
+3. **Tier 1 fast-fail (`gate_node`).** Every dev pass is followed by the
+   deterministic gate — planned-file presence, compile/lint, the plan's
+   tests, all subprocesses, no model (forge/agents/roles/verifier.py's
+   run_deterministic_gate) — *before* the verifier node. A worktree that
+   doesn't build never reaches the LLM reviewer: the gate's toolchain
+   output is formatted into one targeted user message (format_gate_feedback)
+   and the graph routes straight back to dev, which appends it to the
+   run's existing history so the model keeps everything it already read.
+   Three consecutive gate failures fail the run (max_gate_attempts).
+   Only a worktree that clears Tier 1 reaches verifier_node, which then
+   reuses the gate report instead of re-running the toolchain. This is
+   what makes cheap/non-frontier models workable: their most common
+   failure is code that doesn't compile, and the old path spent a full
+   verifier iteration (and, on the LLM-review half, real money) finding
+   that out.
 
 The referenced-ticket enrichment planner_node could do via JiraService is
 dropped here — Phase 1 doesn't wire that up yet (that lands with the JIRA
@@ -42,13 +59,19 @@ from langgraph.graph import END, START, StateGraph
 from forge.agents.roles.dev_loop import DevLoopError, run_dev
 from forge.agents.roles.planner_loop import run_planner
 from forge.agents.roles.qa import run_epic_qa
-from forge.agents.roles.verifier import run_verifier
+from forge.agents.roles.verifier import format_gate_feedback, run_deterministic_gate, run_verifier
 from forge.orchestration.state import FeatureRunState
+from forge.services.generation import GenerationError
 from forge.services.run_activity import append_activity
+from forge.services.usage import record_run_outcome
 
 logger = logging.getLogger("forge.graph")
 
 DEFAULT_MAX_VERIFIER_ITERATIONS = 3
+# Consecutive Tier 1 gate failures before the run fails outright. Separate
+# from the verifier's iteration budget: a gate retry costs no model call
+# for review, so it gets its own, and a gate pass resets it.
+DEFAULT_MAX_GATE_ATTEMPTS = 3
 
 
 async def planner_node(state: FeatureRunState) -> dict:
@@ -94,8 +117,12 @@ async def dev_node(state: FeatureRunState) -> dict:
         return {"status": "failed", "error": "Worktree not created", "messages": []}
 
     iteration = state.get("iteration", 0)
+    gate_feedback = state.get("gate_feedback") or None
     if run_id:
-        append_activity(run_id, type="status", phase="dev", title=f"Entering development (iteration {iteration})")
+        append_activity(
+            run_id, type="status", phase="dev",
+            title=f"Entering development (iteration {iteration}" + (", fixing deterministic-gate failures)" if gate_feedback else ")"),
+        )
 
     try:
         result = await run_dev(
@@ -111,6 +138,12 @@ async def dev_node(state: FeatureRunState) -> dict:
             # where it stopped on the next retry. See forge/orchestration/
             # state.py's field docstring.
             prior_history=state.get("dev_history") or None,
+            prior_progress=state.get("dev_progress") or None,
+            # Set by gate_node when Tier 1 just failed: the targeted fix
+            # message becomes this iteration's brief (see point 3 in the
+            # module docstring). Takes precedence over verifier_report,
+            # which may be stale from an earlier review round.
+            gate_feedback=gate_feedback,
             sdk_model=state.get("sdk_model"),
             sdk_effort=state.get("sdk_effort"),
         )
@@ -126,7 +159,7 @@ async def dev_node(state: FeatureRunState) -> dict:
         logger.error("dev failed run_id=%s reason=provider_error: %s", run_id, exc)
         if run_id:
             append_activity(run_id, type="status", phase="dev", title="Development failed", detail=str(exc))
-        return {"status": "failed", "error": str(exc), "messages": []}
+        return {"status": "failed", "error": str(exc), "messages": [], "gate_feedback": None}
     logger.info("dev success run_id=%s file_changes=%d", run_id, len(result.get("file_changes", [])))
     return {
         "status": "verifying",
@@ -134,7 +167,68 @@ async def dev_node(state: FeatureRunState) -> dict:
         "truncated": result.get("truncated", False),
         "messages": result.get("messages", []),
         "dev_history": result.get("dev_history", []),
+        "dev_progress": result.get("dev_progress", []),
         "dev_build_runner": result.get("dev_build_runner", {}),
+        # Consumed — a later gate failure produces a fresh one.
+        "gate_feedback": None,
+    }
+
+
+async def gate_node(state: FeatureRunState) -> dict:
+    """Tier 1 deterministic gate — see point 3 in the module docstring.
+    Never calls a model: pass -> verifier, fail -> back to dev with a
+    targeted fix message, too many consecutive fails -> the run fails."""
+    run_id = state.get("run_id", "")
+    worktree_path = state.get("worktree_path")
+    if not worktree_path:
+        logger.error("gate failed run_id=%s reason=no_worktree", run_id)
+        return {"status": "failed", "error": "Worktree not created", "messages": []}
+
+    attempts = state.get("gate_attempts", 0)
+    max_attempts = state.get("max_gate_attempts") or DEFAULT_MAX_GATE_ATTEMPTS
+
+    gate = await run_deterministic_gate(
+        plan=state.get("plan", {}),
+        worktree_path=worktree_path,
+        file_changes=state.get("file_changes", []),
+        project_path=state.get("project_path"),
+        run_id=run_id or None,
+        prior_build_runner=state.get("dev_build_runner") or None,
+    )
+
+    record_run_outcome(run_id, gate_runs=1, gate_failures=0 if gate.get("passed") else 1)
+
+    if gate.get("passed"):
+        logger.info("gate passed run_id=%s -> verifier", run_id)
+        return {"status": "verifying", "tier1_gate": gate, "gate_attempts": 0, "gate_feedback": None}
+
+    attempts += 1
+    blockers = gate.get("required_fixes") or [i.get("reason", "") for i in gate.get("issues", []) if isinstance(i, dict)]
+    if attempts >= max_attempts:
+        logger.error("gate exhausted run_id=%s attempts=%d/%d: %s", run_id, attempts, max_attempts, "; ".join(map(str, blockers[:5])))
+        if run_id:
+            append_activity(run_id, type="status", phase="verifier", title=f"Deterministic gate failed {attempts} time(s) in a row — giving up", detail="; ".join(map(str, blockers[:5])))
+        return {
+            "status": "failed",
+            "tier1_gate": gate,
+            "gate_attempts": attempts,
+            # Same shape run_verifier used to return when its own gate
+            # failed, so the daemon's coverage-gap/report readers see a
+            # familiar verifier_report on this failure path too.
+            "verifier_report": gate,
+            "gate_feedback": None,
+            "error": f"Deterministic gate failed after {attempts} fix attempt(s): " + "; ".join(map(str, blockers[:3])),
+            "messages": [{"role": "gate", "content": "Deterministic gate failed; retries exhausted."}],
+        }
+
+    feedback = format_gate_feedback(gate, attempt=attempts, max_attempts=max_attempts)
+    logger.warning("gate failed run_id=%s attempt=%d/%d -> dev: %s", run_id, attempts, max_attempts, "; ".join(map(str, blockers[:5])))
+    return {
+        "status": "developing",
+        "tier1_gate": gate,
+        "gate_attempts": attempts,
+        "gate_feedback": feedback,
+        "messages": [{"role": "gate", "content": f"Deterministic gate failed ({len(blockers)} blocker(s)); sent back to dev."}],
     }
 
 
@@ -153,16 +247,43 @@ async def verifier_node(state: FeatureRunState) -> dict:
             title=f"Entering verification (iteration {iteration + 1}/{max_iterations})",
         )
 
-    result = await run_verifier(
-        plan=state.get("plan", {}),
-        acceptance_criteria=state.get("acceptance_criteria", []),
-        worktree_path=worktree_path,
-        file_changes=state.get("file_changes", []),
-        project_path=state.get("project_path"),
-        run_id=run_id or None,
-        prior_build_runner=state.get("dev_build_runner") or None,
-    )
+    # Counted before the call, so an invocation that fails to produce a
+    # usable answer still appears — that rate is exactly what judges a
+    # cheap model in this slot, and it is the one case a post-call record
+    # would omit (see forge/db/models/run_outcome.py).
+    record_run_outcome(run_id, verifier_runs=1)
+
+    try:
+        result = await run_verifier(
+            plan=state.get("plan", {}),
+            acceptance_criteria=state.get("acceptance_criteria", []),
+            worktree_path=worktree_path,
+            file_changes=state.get("file_changes", []),
+            project_path=state.get("project_path"),
+            run_id=run_id or None,
+            prior_build_runner=state.get("dev_build_runner") or None,
+            # gate_node already ran the toolchain on this exact worktree state
+            # — reuse its report rather than paying for a second run.
+            precomputed_gate=state.get("tier1_gate") or None,
+        )
+    except GenerationError as exc:
+        # Same reasoning as dev_node's DevLoopError catch: an exception
+        # escaping this node reaches the daemon's poll loop, which has no
+        # per-story handler, so it abandons every epic queued behind this
+        # one for the rest of the cycle. A model that answered with prose
+        # instead of JSON, or a provider that was down for this one call,
+        # is a failed story a human can retry — not a reason to stall the
+        # queue. The Tier 1 gate has already passed at this point, so the
+        # worktree does build; only the subjective review is missing.
+        logger.error("verifier failed run_id=%s reason=generation_error: %s", run_id, exc)
+        if run_id:
+            append_activity(run_id, type="status", phase="verifier", title="Verification failed", detail=str(exc)[:1000])
+        return {"status": "failed", "error": f"Verifier review could not be completed: {exc}", "messages": []}
     report = result["verifier_report"]
+    # A rejection here is a build that cleared Tier 1 and the reviewer
+    # still judged incomplete — the counter that says whether the gate is
+    # checking the right things.
+    record_run_outcome(run_id, verifier_rejections=0 if report.get("passed") else 1)
 
     if report.get("passed"):
         logger.info("verifier success run_id=%s -> completed", run_id)
@@ -214,15 +335,22 @@ async def qa_node(state: FeatureRunState) -> dict:
     if run_id:
         append_activity(run_id, type="status", phase="qa", title="Entering epic QA")
 
-    result = await run_epic_qa(
-        qa_story=qa_context.get("qa_story", {}),
-        epic=qa_context["epic"],
-        dev_stories=qa_context.get("dev_stories", []),
-        branch_diff=qa_context.get("branch_diff", {}),
-        worktree_path=worktree_path,
-        project_path=state["project_path"],
-        run_id=run_id or None,
-    )
+    try:
+        result = await run_epic_qa(
+            qa_story=qa_context.get("qa_story", {}),
+            epic=qa_context["epic"],
+            dev_stories=qa_context.get("dev_stories", []),
+            branch_diff=qa_context.get("branch_diff", {}),
+            worktree_path=worktree_path,
+            project_path=state["project_path"],
+            run_id=run_id or None,
+        )
+    except GenerationError as exc:
+        # Same reasoning as verifier_node's catch above.
+        logger.error("qa failed run_id=%s reason=generation_error: %s", run_id, exc)
+        if run_id:
+            append_activity(run_id, type="status", phase="qa", title="Epic QA failed", detail=str(exc)[:1000])
+        return {"status": "failed", "error": f"Epic QA review could not be completed: {exc}", "messages": []}
     report = result.get("qa_report", {})
 
     # A failing full test suite on the merged branch is deterministic
@@ -257,13 +385,19 @@ def route_entry(state: FeatureRunState) -> str:
 def route_after_dev(state: FeatureRunState) -> str:
     # dev_node returns status="failed" both for its pre-existing defensive
     # checks (no worktree) and for a caught DevLoopError — either
-    # way, sending that state into verifier_node anyway would silently
-    # overwrite it with whatever the verifier decides about an untouched or
-    # partial worktree, discarding the real failure reason. This was
-    # previously unreachable in practice: a dev provider error used to
-    # propagate as an uncaught exception rather than a "failed" status, so
-    # the graph itself never actually got a chance to route on it.
+    # way, sending that state on anyway would silently overwrite it with
+    # whatever the gate/verifier decides about an untouched or partial
+    # worktree, discarding the real failure reason.
     if state.get("status") == "failed":
+        return END
+    return "gate"
+
+
+def route_after_gate(state: FeatureRunState) -> str:
+    status = state.get("status")
+    if status == "developing":
+        return "dev"
+    if status == "failed":
         return END
     return "verifier"
 
@@ -278,12 +412,14 @@ def build_graph() -> StateGraph:
     graph = StateGraph(FeatureRunState)
     graph.add_node("planner", planner_node)
     graph.add_node("dev", dev_node)
+    graph.add_node("gate", gate_node)
     graph.add_node("verifier", verifier_node)
     graph.add_node("qa", qa_node)
 
     graph.add_conditional_edges(START, route_entry, {"planner": "planner", "qa": "qa"})
     graph.add_edge("planner", "dev")
-    graph.add_conditional_edges("dev", route_after_dev, {"verifier": "verifier", END: END})
+    graph.add_conditional_edges("dev", route_after_dev, {"gate": "gate", END: END})
+    graph.add_conditional_edges("gate", route_after_gate, {"verifier": "verifier", "dev": "dev", END: END})
     graph.add_conditional_edges("verifier", route_after_verifier, {"dev": "dev", END: END})
     graph.add_edge("qa", END)
     return graph
