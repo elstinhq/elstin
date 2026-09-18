@@ -95,8 +95,9 @@ stylesheet `<link>`, both of which must run before the JS bundle.
 ## Testing conventions specific to this repo
 
 - Never call a real LLM provider / GitHub / live JIRA in tests.
-  `tests/conftest.py`'s `fake_agents` fixture monkeypatches the four
-  agent entry points on `forge.orchestration.graph` (imported by name at
+  `tests/conftest.py`'s `fake_agents` fixture monkeypatches the five
+  graph entry points (planner, dev, the Tier 1 deterministic gate,
+  verifier, epic QA) on `forge.orchestration.graph` (imported by name at
   module load, so patch them there, not at their definition site); a role
   module tested directly instead fakes `forge.llm.registry.get_provider`.
 - `git_repo` fixture (`tests/conftest.py`) gives a real repo with an

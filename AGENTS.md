@@ -53,7 +53,9 @@ Settings UI ──HTTP──► FastAPI (forge/app.py)
                                           └── handle_intent
                                                 ├── DispatchStory / ResumeStory
                                                 │     → LangGraph (thread_id = JIRA key)
-                                                │           ├── kind=dev: planner → [gate] → dev ↔ verifier
+                                                │           ├── kind=dev: planner → [approval] → dev → tier-1 gate → verifier
+                                                │           │                          ^_________|  (gate fail)  |
+                                                │           │                          ^______________________|  (review fail)
                                                 │           └── kind=qa:  epic QA → END
                                                 ├── ParkForGate
                                                 └── MergeIntegrationBranch / PR + CI
@@ -80,7 +82,7 @@ state only (status, kind, worktree, gates, levels).
 | `daemon/` | Poll loop, ticket-filter sweep, worktree create, intent handling, PR/CI/merge, QA brief assembly | Call agents without going through the graph |
 | `state/` | **Only** DB access for epics/stories/PRs/projects | Import `forge.db.models` outside the allow-list in hard constraint #1 |
 | `db/` | SQLAlchemy models + engine | Business logic here |
-| `services/` | JIRA/GitHub clients, epic sync, ticket filters, story_kind, generation (verifier/QA's single-shot LLM call), repo cloning, run activity + its live fan-out | Bypass StateManager for persistence |
+| `services/` | JIRA/GitHub clients, epic sync, ticket filters, story_kind, generation (verifier/QA's single-shot LLM call), repo cloning, run activity + its live fan-out, run telemetry (cost **and** run shape) | Bypass StateManager for persistence |
 | `tools/` | Dev-agent tools, planner's read-only tools, language profiles, worktree, path guard | Hardcode language names — use `language_hooks` |
 | `mcp/` | MCP servers (jira/github standalone) | Assume agents already use JIRA/GitHub MCP — daemon calls services directly today |
 | `api/` | FastAPI routers | Long-running work — daemon owns that |
@@ -138,9 +140,76 @@ together; a level advances when all members are terminal
 | Role | Module | Runtime | Notes |
 |------|--------|---------|-------|
 | Planner | `planner.py` + `planner_loop.py` | `agents/loop.py` (tool-driven) | `tools/planner_tools.py`'s read-only tools only; structured JSON plan via the provider's native structured output |
+| Explorer | `explorer.py` | `agents/loop.py`, N concurrent sub-loops | Read-only recon *inside* the planner step, not a graph node. Scope -> fan out -> fold findings into the plan prompt. Prompt adapted from Aster's `scout` agent (Apache-2.0) |
 | Dev | `dev.py` + `dev_loop.py` | `agents/loop.py` (tool-driven) | **Only** tools from `tools/dev_tools.py`'s `make_dev_tools()` — handed to the loop directly, no MCP layer |
-| Verifier | `verifier.py` | Deterministic gate + `generation.chat_completion_json` | Language-specific `compare_to_plan` via hooks |
-| QA | `qa.py` (`run_epic_qa`) | `generation` + full test suite | Epic-level validation ticket; suite failure fails the run, subjective LLM verdict does not |
+| Verifier | `verifier.py` | Tier 1 deterministic gate (`run_deterministic_gate`, run by the graph's own `gate` node before the verifier is ever entered) + `generation.chat_completion_json` review | Language-specific `compare_to_plan` via hooks; `format_gate_feedback` turns a gate failure into dev's next user message; `_VERIFIER_JSON_SCHEMA` constrains the review |
+| QA | `qa.py` (`run_epic_qa`) | `generation` + full test suite | Epic-level validation ticket; suite failure fails the run, subjective LLM verdict does not. `QA_JSON_SCHEMA` constrains the report, since `format_qa_report_comment` is its only consumer and reads specific keys |
+
+**Planner exploration** (`agents/roles/explorer.py`): before the plan
+loop, a scoping call picks up to `planner_explorer_max_agents` independent
+investigation areas and one read-only sub-agent answers each, concurrently.
+The point is context isolation, not speed: a file the planner reads itself
+stays in its history and is re-sent every later turn, whereas a sub-agent's
+reads die with its throwaway context and only a short report comes back.
+Everything about it is best-effort — an empty scope, a failed scope, or
+every explorer returning nothing all degrade to "plan without a head
+start". Sub-agents get the read-only trio only, so there is no write path
+and no way to spawn another one. Skipped on a clarification round-trip.
+Their tokens roll up into the planner's `story_usage` row via the same
+`on_turn` hook, and their spend caps are carved out of
+`planner_sdk_max_budget_usd` rather than each inheriting the whole cap.
+
+**Agent loop mechanics** (`forge/agents/loop.py`, model-agnostic — the
+same loop drives GPT, DeepSeek, or a local vLLM/Ollama endpoint):
+
+- Compaction is **tombstoning, not summarization**: tool results older
+  than the last N turns are replaced in place with a fixed string; no
+  message is removed or reordered, no LLM call is made, and the prompt
+  prefix stays byte-stable for provider prefix caching.
+- Consecutive **read-only** tool calls (`tools/dev_tools.py` /
+  `tools/planner_tools.py`'s `READ_ONLY_TOOLS`) run concurrently; every
+  other tool runs alone, in order. A new tool is mutating until declared
+  otherwise.
+- **Repeat-call guard**: an identical (name, args) call in the consecutive
+  turn is intercepted and answered with an is_error nudge; resets after any
+  mutating call.
+- **Idle-turn budget** (dev only, `dev_sdk_max_idle_turns`): N consecutive
+  tool turns with no `PROGRESS_TOOLS` call end the run as a soft stop
+  (`no_progress`), same handling as a turn cap.
+- **Trailing reminder** (`LoopConfig.trailing_reminder`): a callable
+  re-evaluated each turn whose text is appended to the *request* as a
+  final user message and never stored in `history`. That is what keeps it
+  cheap — it sits after every cached byte, so it costs one short message
+  per turn instead of bloating history and breaking the prefix. Dev uses
+  it to re-show the **progress checklist** (`tools/progress.py`): one
+  entry per planned file, seeded from the plan, updated by the model via
+  `update_progress_tool`, carried across fix rounds in
+  `FeatureRunState.dev_progress`. It is what turns the idle-turn budget
+  from a silent stop into a correction the model can act on. Ticking a box
+  is **not** in `PROGRESS_TOOLS` — counting it would hand the model a way
+  to reset the idle budget forever without touching a file.
+- `read_file_tool` serves at most 250 lines per call (`tools/grep.py`'s
+  `MAX_READ_LINES`); a larger `limit` is rejected, an unwindowed read of a
+  longer file returns the first 250 with a continue-from offset.
+
+**Pointing forge at a non-OpenAI model** (any OpenAI-compatible endpoint
+via `llm_base_url` — OpenRouter, vLLM, Ollama, Azure):
+
+- `reasoning_effort` is gated per model by `llm/openai_compat.py`'s
+  `_EFFORT_SUPPORT`, which records both *which* models take the field and
+  *which levels* each one takes. Both mistakes are a 400, and a 400 is a
+  non-retryable `LlmBadRequestError` that kills the run — so an
+  unsupported level is dropped (with a warning) rather than forwarded, and
+  an unlisted model never gets the field at all. Adding a model means one
+  row, with its levels read off that model's own docs.
+- `llm/pricing.py` needs a row per model you actually run. Every
+  OpenAI-compatible endpoint resolves as provider `"openai"` (the registry
+  names the adapter, not the base_url), so third-party model ids go in
+  *that* dict. A missing row makes `estimate_cost_usd` return None, which
+  silently disables `max_budget_usd` for that model — a test pins every
+  config default against the table for this reason.
+- Raise/lower `agent_compaction_token_threshold` to suit the context
+  window; the default assumes roughly 1M tokens.
 
 Every role reaches the LLM through `forge/llm/registry.py`'s configured
 provider — never a provider SDK directly. `dev`/`planner`'s multi-turn,
@@ -155,7 +224,22 @@ state, not a bespoke table.
 
 **Graph paths** (`forge/orchestration/graph.py`):
 
-- `dev` → `planner` → (optional interrupt) → `dev` ↔ `verifier` → `END`
+- `dev` → `planner` → (optional interrupt) → `dev` → `gate` → `verifier` → `END`
+  - `gate` is the Tier 1 fast-fail: compare_to_plan (planned files present,
+    compile/lint, planned tests — subprocesses, no model). Fail → straight
+    back to `dev` with a targeted fix message (`gate_feedback`, appended to
+    the run's existing `dev_history`); three consecutive fails →
+    `failed`. Pass → `verifier`, which reuses the gate report
+    (`tier1_gate`) instead of re-running the toolchain. Review fail →
+    `dev` (verifier iteration budget, separate from the gate's).
+  - `verifier` and `qa` catch `services/generation.py`'s `GenerationError`
+    (provider call failed, or the reply carried no JSON object) and return
+    `status="failed"`, for the same reason `dev` catches `DevLoopError`:
+    nothing upstream catches a per-story exception, so one unusable model
+    reply used to abandon every epic queued behind it for the rest of the
+    poll cycle. Neither role asks for a strict schema — both rely on a
+    prompt plus `_parse_json_content`'s tolerant extraction — so this is
+    the normal failure mode for a chatty model, not an exotic one.
 - `qa` → `qa` → `END`
 
 Checkpointer: Postgres (`langgraph-checkpoint-postgres`). `thread_id` =
@@ -202,6 +286,62 @@ own analyze, test, verify, safe command prefixes, and prompt conventions.
   pr_open_gate on regardless of `require_pr_open_approval`: a story that
   didn't fully verify always needs a human before its PR opens, even on a
   project that has that gate turned off.
+
+## Spend caps
+
+Three nested levels, all in USD and all treating **0 as unbounded**:
+
+1. `story_max_budget_usd` — the outer bound on one story across planning,
+   investigation, development and review. Enforced by
+   `services/usage.py:effective_budget_usd`, which clamps each phase's own
+   cap to what the story has left, and by a refusal to start a phase at
+   all once nothing remains (`exhausted`) — a phase handed a cap of zero
+   would read it as unbounded and do the opposite.
+2. `planner_sdk_max_budget_usd` / `dev_sdk_max_budget_usd` — per loop.
+3. Each explorer gets half the planner's effective remainder, split across
+   the fan-out (`explorer.py:_explorer_budget`).
+
+The four places a story reaches a model are all covered: planner and dev
+raise their own role errors, and verifier/QA go through
+`generation.chat_completion_json`, whose `GenerationError` the graph
+already turns into a failed story a human can retry after raising the
+ceiling.
+
+**Limitation worth knowing:** spend is summed from `story_usage.cost_usd`,
+which is None for any (provider, model) pair missing from
+`llm/pricing.py`. A model with no price row therefore cannot be bounded at
+all. That is why a test pins every shipped model default against the
+pricing table.
+
+## Run telemetry
+
+Two tables, both written as a run progresses and both keyed on `run_id`
+(== story key == `thread_id`), both owned by `services/` rather than
+StateManager (hard constraint #1's documented exception):
+
+- `story_usage` — what a run **cost**: tokens, cache reads, cost and
+  duration per (run, phase, model, provider).
+- `story_run_outcomes` — how much work it **took**: gate runs and
+  failures, verifier runs and rejections, dev passes/turns/terminal
+  reason, planner turns, explorer count, final graph status. Written by
+  the graph nodes and role modules themselves, incrementally, so a run
+  that failed or was abandoned still leaves the counters it reached —
+  those are the runs worth studying. `get_run_outcome` returns **None**,
+  not zeros, for a run that predates the table: "not measured" and
+  "measured as zero" are different claims and the UI must not conflate
+  them.
+
+`gate_failures` vs `verifier_rejections` is the pair to watch. Tier 1
+exists to catch a broken build before the LLM reviewer is paid for one, so
+it is working when the first is high and the second is low. If neither
+ever fires for your repo and model, the retry apparatus is dead weight;
+if the reviewer keeps rejecting builds the gate passed, the gate is
+checking the wrong things.
+
+There is **no eval harness** — nothing re-runs a fixed task set to score a
+prompt or threshold change. These counters exist so that a real task set
+and a real baseline can be assembled from merged stories later, instead of
+tuning against invented tasks now.
 
 ## Config and migrations
 
@@ -280,7 +420,8 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 ## Testing conventions
 
 - `tests/conftest.py`: `postgres_url` (testcontainers), `forge_db`,
-  `git_repo`, `fake_agents`.
+  `git_repo`, `fake_agents` (patches all five graph entry points:
+  planner, dev, deterministic gate, verifier, epic QA).
 - **Never** call a real LLM provider / GitHub / live JIRA in
   unit/integration tests. Patch agent entry points on
   `forge.orchestration.graph` (names imported at module load), or fake
@@ -339,7 +480,10 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 
 ## Not built yet (do not assume)
 
-- Qdrant / RAG pre-seeding for planner context
+- Qdrant / RAG pre-seeding for planner context (the daemon does fold a
+  cheap **codebase skeleton** — every source file's path and top-level
+  declarations, `tools/codebase_skeleton.py` — into the planner brief
+  via `_build_story_brief`, but that is a filesystem walk, not retrieval)
 - Concurrent per-story LangGraph dispatch in the daemon
 - JIRA/GitHub MCP wired into agent roles (servers exist; daemon uses
   services)
