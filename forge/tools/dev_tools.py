@@ -20,12 +20,34 @@ from forge.tools import language_hooks
 from forge.tools.docs_tool import lookup_sdk_symbol
 from forge.tools.edit_file import EditFileError, edit_file
 from forge.tools.filesystem import roll_back_file, snapshot_baseline, write_file
-from forge.tools.grep import grep_codebase, read_file
+from forge.tools.grep import MAX_READ_LINES, grep_codebase, read_file
 from forge.tools.language_hooks import run_analyze
+from forge.tools.progress import PROGRESS_STATUSES, merge_progress_update, render_progress
 from forge.tools.safe_shell import run_safe_command
 
 _RUN_COMMAND_STDOUT_TAIL = 2000
 _RUN_COMMAND_STDERR_TAIL = 1000
+
+# Tools that neither write to the worktree nor run anything that does —
+# forge/agents/loop.py runs consecutive calls to these concurrently.
+# analyze_changed_files_tool is deliberately NOT here: a compiler check
+# can write build output (Java's target/, Dart's .dart_tool/), so two
+# overlapping runs could trip over each other.
+READ_ONLY_TOOLS: frozenset[str] = frozenset({"read_file_tool", "search_codebase_tool", "lookup_sdk_symbol_tool"})
+
+# Tools whose execution counts as implementation progress for the loop's
+# idle-turn budget (forge/agents/loop.py's LoopConfig.progress_tools).
+#
+# update_progress_tool is deliberately absent: ticking a box is bookkeeping,
+# not implementation, and counting it would hand the model a way to reset
+# the idle-turn budget forever without touching a file.
+PROGRESS_TOOLS: frozenset[str] = frozenset({"write_file_tool", "edit_file_tool", "apply_edits_tool"})
+
+# Tools that touch nothing on disk — they update only the run's own
+# checklist, so an identical read after one is still a repeat and the
+# loop's repeat-call guard must survive them (see
+# forge/agents/loop.py's LoopConfig.bookkeeping_tools).
+BOOKKEEPING_TOOLS: frozenset[str] = frozenset({"update_progress_tool"})
 
 
 def _norm_rel(path: str) -> str:
@@ -110,18 +132,19 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "read_file_tool",
             "description": (
-                "Read the contents of a file at the given relative path in the worktree. "
-                "Reads the whole file by default. For a large file where you only need one "
-                "part (e.g. one method, one widget), pass offset (1-based line number) and "
-                "limit (number of lines) to read just that range instead of paying the token "
-                "cost of the entire file — the response shows which lines you got."
+                f"Read up to {MAX_READ_LINES} lines of a file at the given relative path in the worktree. "
+                f"Pass offset (1-based line number) and limit (number of lines, max {MAX_READ_LINES}) "
+                "to read exactly the range you need — one method, one widget, one class. "
+                f"A limit above {MAX_READ_LINES} is rejected. Without offset/limit you get the first "
+                f"{MAX_READ_LINES} lines and a header telling you the file's total length and the "
+                "offset to continue from. Use search_codebase_tool first to find the line you need."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Relative path to the file"},
-                    "offset": {"type": "integer", "description": "1-based line number to start reading from. Omit to read from the start."},
-                    "limit": {"type": "integer", "description": "Number of lines to read from offset. Omit to read to the end of the file."},
+                    "offset": {"type": "integer", "description": "1-based line number to start reading from. Defaults to 1."},
+                    "limit": {"type": "integer", "description": f"Number of lines to read from offset (1-{MAX_READ_LINES}). Defaults to {MAX_READ_LINES}."},
                 },
                 "required": ["path"],
             },
@@ -242,6 +265,36 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "update_progress_tool",
+            "description": (
+                "Update the PROGRESS CHECKLIST shown at the end of every message you receive. "
+                "Set a planned file to 'doing' when you start it and 'done' once the edit has "
+                "landed and analyze passes for it — never before. Pass several files in one "
+                "call. Only paths from the approved plan can be updated; the checklist mirrors "
+                "the plan and cannot be extended."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "updates": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string", "description": "A planned file path, exactly as the checklist shows it"},
+                                "status": {"type": "string", "enum": list(PROGRESS_STATUSES)},
+                            },
+                            "required": ["path", "status"],
+                        },
+                    },
+                },
+                "required": ["updates"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_command_tool",
             "description": (
                 "Run a whitelisted shell command (e.g. 'dart run build_runner build', "
@@ -264,9 +317,17 @@ def make_dev_tools(
     allow_test_run: bool,
     planned_test_files: list[str],
     baseline_dir: str | None = None,
+    progress_items: list[dict[str, str]] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Return (functions_dict, tool_schemas) pre-bound to this run's
-    worktree and plan scope."""
+    worktree and plan scope.
+
+    progress_items: the caller's live checklist (see
+    forge/agents/roles/dev.py). `update_progress_tool` mutates this list
+    in place, so the caller can render it as the loop's trailing reminder
+    and persist it for the next fix round. None disables the tool's
+    effect but still offers it, so the model never gets an unknown-tool
+    error for calling something the prompt told it to call."""
 
     def _scope_error(path: str) -> str | None:
         if _norm_rel(path) in allowed_paths:
@@ -277,8 +338,13 @@ def make_dev_tools(
         )
 
     def read_file_tool(path: str, offset: int | None = None, limit: int | None = None) -> str:
+        if limit is not None and limit > MAX_READ_LINES:
+            return (
+                f"BLOCKED: limit={limit} exceeds the {MAX_READ_LINES}-line cap per read. "
+                f"Read the range you actually need (limit <= {MAX_READ_LINES}), or page through the file with offset."
+            )
         try:
-            return read_file(worktree_path, path, offset=offset or 0, limit=limit)
+            return read_file(worktree_path, path, offset=offset or 0, limit=limit, max_lines=MAX_READ_LINES)
         except Exception as exc:
             return f"Error reading file {path}: {exc}"
 
@@ -357,6 +423,20 @@ def make_dev_tools(
     def analyze_changed_files_tool() -> str:
         return _scoped_analyze(worktree_path, analyze_targets)
 
+    def update_progress_tool(updates: list[dict[str, Any]]) -> str:
+        if progress_items is None:
+            return "Progress tracking is not enabled for this run; continue without it."
+        if not updates:
+            return "No updates provided.\n" + render_progress(progress_items)
+        applied, rejected = merge_progress_update(progress_items, updates)
+        result = f"Updated {applied} checklist entry/entries."
+        if rejected:
+            result += (
+                f" Rejected {len(rejected)}: {', '.join(rejected[:5])}. Only planned paths can be "
+                f"updated, with status one of {', '.join(PROGRESS_STATUSES)}."
+            )
+        return result + "\n" + render_progress(progress_items)
+
     def run_command_tool(command: str) -> str:
         guard_result, safe_command = _guard_run_command(command, worktree_path, analyze_targets, allow_test_run, planned_test_files)
         if guard_result is not None:
@@ -376,6 +456,7 @@ def make_dev_tools(
         "search_codebase_tool": search_codebase_tool,
         "lookup_sdk_symbol_tool": lookup_sdk_symbol_tool,
         "analyze_changed_files_tool": analyze_changed_files_tool,
+        "update_progress_tool": update_progress_tool,
         "run_command_tool": run_command_tool,
     }
 

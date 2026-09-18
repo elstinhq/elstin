@@ -213,6 +213,13 @@ def _python_fallback_grep(project_path: str, term: str, *, max_results: int) -> 
     return matches
 
 
+# Hard cap on lines served by one read. A single unwindowed read of a
+# 2,000-line file used to cost ~30k tokens and then get re-sent on every
+# later turn; 250 lines is enough for any one method/widget/class and
+# forces the model to page deliberately with offset/limit instead.
+MAX_READ_LINES = 250
+
+
 def read_file(
     project_path: str,
     relative_path: str,
@@ -220,21 +227,26 @@ def read_file(
     max_chars: int = 120_000,
     offset: int = 0,
     limit: int | None = None,
+    max_lines: int | None = None,
 ) -> str:
     """Read a file, optionally windowed to a 1-based line range.
 
-    ``offset``/``limit`` default to the whole file (unchanged behavior for
-    every existing caller — planner, explorer, feature_discovery all read
-    unwindowed). Only pass them to read a slice of a large file instead of
-    paying for the whole thing every time, the way a full-file read at up to
-    ``max_chars`` (120k chars, ~30k tokens) can dominate a tool-calling loop's
-    context after just a couple of calls.
+    ``offset``/``limit`` default to the whole file. ``max_lines`` caps how
+    many lines one call may serve: a request for more than that (or an
+    unwindowed read of a longer file) is clamped to the first ``max_lines``
+    from ``offset`` and the ``[lines a-b of n]`` header says how to
+    continue, so a model never pays for a whole large file in one turn.
+    Callers that need the whole file regardless (the dev role's FIX MODE
+    brief) leave ``max_lines`` unset.
     """
     abs_path = resolve_read_path(project_path, relative_path)
     if not os.path.isfile(abs_path):
         raise FileNotFoundError(relative_path)
 
-    if not offset and limit is None:
+    if max_lines is not None and limit is not None and limit > max_lines:
+        raise ValueError(f"limit must be at most {max_lines} lines (asked for {limit}); page through the file with offset")
+
+    if not offset and limit is None and max_lines is None:
         with open(abs_path, "r", encoding="utf-8", errors="replace") as handle:
             content = handle.read(max_chars + 1)
         if len(content) > max_chars:
@@ -245,8 +257,26 @@ def read_file(
         lines = handle.readlines()
 
     total = len(lines)
+    if not offset and limit is None and max_lines is not None and total <= max_lines:
+        # Small file, no window asked for: the whole thing, unadorned —
+        # identical to the unwindowed read above, so callers that number
+        # lines themselves see the same shape either way.
+        content = "".join(lines)
+        if len(content) > max_chars:
+            return content[:max_chars] + "\n... [TRUNCATED]"
+        return content
+
     start = max(offset - 1, 0) if offset else 0
-    end = start + limit if limit is not None else total
+    if start >= total:
+        # Otherwise the header below collapses to an inverted range
+        # ("[lines 5000-300 of 300]") with an empty body, which reads as a
+        # valid window rather than as an overshoot. Paging is the normal
+        # way to read a large file now, so this is reachable in ordinary
+        # use.
+        return f"[file has {total} line(s); offset {start + 1} is past the end]" if total else "[file is empty]"
+    requested_end = start + limit if limit is not None else total
+    clamped = max_lines is not None and requested_end - start > max_lines
+    end = start + max_lines if clamped else requested_end
     window = lines[start:end]
     content = "".join(window)
 
@@ -254,4 +284,7 @@ def read_file(
         content = content[:max_chars] + "\n... [TRUNCATED]"
 
     shown_end = min(start + len(window), total)
-    return f"[lines {start + 1}-{shown_end} of {total}]\n{content}"
+    header = f"[lines {start + 1}-{shown_end} of {total}]"
+    if clamped and shown_end < total:
+        header += f" (capped at {max_lines} lines per read — pass offset={shown_end + 1} to continue)"
+    return f"{header}\n{content}"

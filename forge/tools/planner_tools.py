@@ -15,11 +15,15 @@ from __future__ import annotations
 import fnmatch
 import os
 
-from forge.tools.grep import DEFAULT_EXCLUDES, grep_codebase, read_file
+from forge.tools.grep import DEFAULT_EXCLUDES, MAX_READ_LINES, grep_codebase, read_file
 from forge.tools.path_guard import PathGuardError
 
 _MAX_GREP_RESULTS = 50
 _MAX_FIND_RESULTS = 200
+
+# Every planner tool is read-only by construction (module docstring), so
+# forge/agents/loop.py may run any consecutive batch of them concurrently.
+READ_ONLY_TOOLS: frozenset[str] = frozenset({"read_file_tool", "grep_tool", "find_files_tool"})
 
 
 def _numbered(text: str, *, start_line: int = 1) -> str:
@@ -35,8 +39,13 @@ def make_planner_tools(*, project_path: str) -> tuple[dict[str, object], list[di
     forge/agents/loop.py the same kind of pair."""
 
     def read_file_tool(path: str, offset: int | None = None, limit: int | None = None) -> str:
+        if limit is not None and limit > MAX_READ_LINES:
+            return (
+                f"BLOCKED: limit={limit} exceeds the {MAX_READ_LINES}-line cap per read. "
+                f"Read the range you actually need (limit <= {MAX_READ_LINES}), or page through the file with offset."
+            )
         try:
-            content = read_file(project_path, path, offset=offset or 0, limit=limit)
+            content = read_file(project_path, path, offset=offset or 0, limit=limit, max_lines=MAX_READ_LINES)
         except FileNotFoundError:
             return f"File not found: {path}"
         except PathGuardError as exc:
@@ -88,17 +97,18 @@ def make_planner_tools(*, project_path: str) -> tuple[dict[str, object], list[di
             "function": {
                 "name": "read_file_tool",
                 "description": (
-                    "Read the contents of a file at the given path, relative to the project root. "
-                    "Reads the whole file by default (up to 120,000 characters). For a large file "
-                    "where you only need one part, pass offset (1-based line number) and limit "
-                    "(number of lines) to read just that range."
+                    f"Read up to {MAX_READ_LINES} lines of a file at the given path, relative to the project root. "
+                    f"Pass offset (1-based line number) and limit (number of lines, max {MAX_READ_LINES}) to read "
+                    f"exactly the range you need. A limit above {MAX_READ_LINES} is rejected. Without offset/limit "
+                    f"you get the first {MAX_READ_LINES} lines plus a header with the file's total length and the "
+                    "offset to continue from. Prefer grep_tool to locate the lines that matter before reading."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "Path relative to the project root"},
-                        "offset": {"type": "integer", "description": "1-based line number to start reading from. Omit to read from the start."},
-                        "limit": {"type": "integer", "description": "Number of lines to read from offset. Omit to read to the end of the file."},
+                        "offset": {"type": "integer", "description": "1-based line number to start reading from. Defaults to 1."},
+                        "limit": {"type": "integer", "description": f"Number of lines to read from offset (1-{MAX_READ_LINES}). Defaults to {MAX_READ_LINES}."},
                     },
                     "required": ["path"],
                     "additionalProperties": False,

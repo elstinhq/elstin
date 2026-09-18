@@ -348,62 +348,117 @@ async def test_api_duration_is_measured():
     assert isinstance(result.api_duration_ms, int)
 
 
-async def test_compaction_usage_is_reported_through_on_turn():
-    """The compaction call is a billable provider call. Its tokens used to
-    reach LoopResult.usage but never the on_turn hook — and since the
-    roles build their story_usage rows from on_turn, every compaction a
-    long run needed was silently unbilled."""
-    provider = FakeProvider(script=[
-        _text_response("summary of everything"),  # the compaction call
-        _text_response("done"),                    # the real turn
-    ])
-    seen_usage = []
-
-    big_history = [text_message("user", "x" * 5000) for _ in range(10)]
-    result = await run_agent_loop(
-        _config(provider, compaction_token_threshold=1, compaction_keep_recent=2,
-                on_turn=lambda turn, response: seen_usage.append(response.usage.input_tokens)),
-        big_history,
-    )
-
-    # Two provider calls happened (compaction + turn); on_turn saw both.
-    assert len(provider.calls) == 2
-    assert seen_usage == [10, 10]
-    assert result.usage.input_tokens == 20
+# --- compaction: cache-aware tombstoning ---------------------------------
 
 
-async def test_compaction_failure_is_non_fatal():
-    """A failed *housekeeping* call shouldn't kill a run that's otherwise
-    fine — the next turn just carries the uncompacted history."""
-    from forge.llm.errors import LlmBadRequestError
+def _turn(call_id: str, result: str, *, name: str = "read_file_tool", args: dict | None = None):
+    """One assistant tool-call turn plus its answering tool message."""
+    from forge.llm.types import Message
 
-    provider = FakeProvider(script=[LlmBadRequestError("summarizer rejected"), _text_response("done anyway")])
-    big_history = [text_message("user", "x" * 5000) for _ in range(10)]
+    return [
+        Message(role="assistant", content=[ToolCallBlock(id=call_id, name=name, arguments=args or {"path": call_id})]),
+        Message(role="tool", content=[ToolResultBlock(tool_call_id=call_id, content=result)]),
+    ]
 
-    result = await run_agent_loop(
-        _config(provider, compaction_token_threshold=1, compaction_keep_recent=2), big_history
-    )
 
+def test_compaction_tombstones_old_large_tool_results_and_keeps_recent_turns():
+    """No LLM call, no message removed: results older than the last N
+    turns are replaced in place with a fixed tombstone; the last N turns
+    and the opening plan message are untouched."""
+    from forge.agents.loop import TOMBSTONE, _compact_history
+
+    big = "x" * 5_000
+    history = [text_message("user", "the plan")]
+    for i in range(6):
+        history += _turn(f"c{i}", big)
+
+    compacted, pruned = _compact_history(history, keep_recent_turns=4)
+
+    assert pruned == 2
+    assert len(compacted) == len(history)
+    assert [m.role for m in compacted] == [m.role for m in history]
+    assert compacted[0] == history[0]  # the plan survives verbatim
+    # turns 0 and 1 (messages 1-4) are tombstoned; turns 2-5 intact
+    assert compacted[2].content[0].content == TOMBSTONE
+    assert compacted[4].content[0].content == TOMBSTONE
+    assert compacted[6].content[0].content == big
+    assert compacted[12].content[0].content == big
+    # tool_call_ids are preserved so the OpenAI tool-message pairing stays valid
+    assert compacted[2].content[0].tool_call_id == "c0"
+    assert compacted[1] == history[1]  # the assistant's tool_calls message itself is untouched
+
+
+def test_compaction_leaves_small_results_alone_and_is_idempotent():
+    """Short confirmations ("wrote file x") are the load-bearing ones and
+    cost less than the tombstone; and a second pass must not change a
+    byte, or the cached prefix would churn every turn."""
+    from forge.agents.loop import _compact_history
+
+    history = [text_message("user", "plan")]
+    history += _turn("c0", "Successfully wrote file to a.py.", name="write_file_tool")
+    history += _turn("c1", "y" * 5_000)
+    for i in range(2, 7):
+        history += _turn(f"c{i}", "z" * 5_000)
+
+    once, pruned_once = _compact_history(history, keep_recent_turns=4)
+    twice, pruned_twice = _compact_history(once, keep_recent_turns=4)
+
+    assert pruned_once == 2  # c1 and c2; c0 is small and kept
+    assert once[2].content[0].content == "Successfully wrote file to a.py."
+    assert pruned_twice == 0
+    assert twice == once
+
+
+def test_compaction_with_fewer_turns_than_keep_recent_is_a_noop():
+    from forge.agents.loop import _compact_history
+
+    history = [text_message("user", "plan")] + _turn("c0", "x" * 5_000) + _turn("c1", "x" * 5_000)
+
+    compacted, pruned = _compact_history(history, keep_recent_turns=4)
+
+    assert pruned == 0
+    assert compacted == history
+
+
+async def test_compaction_makes_no_provider_call():
+    """The old compaction summarized via an extra LLM call; the new one
+    must not — one provider call per turn, full stop."""
+    provider = FakeProvider(script=[_text_response("done")])
+    big_history = [text_message("user", "plan")]
+    for i in range(6):
+        big_history += _turn(f"c{i}", "x" * 5_000)
+
+    result = await run_agent_loop(_config(provider, compaction_token_threshold=1, compaction_keep_recent_turns=2), big_history)
+
+    assert len(provider.calls) == 1
     assert result.is_error is False
-    assert result.final_text == "done anyway"
+    sent = provider.calls[0].messages
+    from forge.agents.loop import TOMBSTONE
+
+    assert sent[2].content[0].content == TOMBSTONE  # old result pruned in what was sent
+    assert sent[-1].content[0].content == "x" * 5_000  # recent turn intact
 
 
 async def test_server_side_compaction_suppresses_our_own():
     """A provider that compacts server-side must not also get forge's
-    summarize-and-splice pass on top."""
+    tombstoning on top."""
+    from forge.agents.loop import TOMBSTONE
+
     provider = FakeProvider(
         script=[_text_response("done")],
         capabilities=Capabilities(supports_server_compaction=True),
     )
-    big_history = [text_message("user", "x" * 5000) for _ in range(10)]
+    big_history = [text_message("user", "plan")]
+    for i in range(6):
+        big_history += _turn(f"c{i}", "x" * 5_000)
 
-    result = await run_agent_loop(
-        _config(provider, compaction_token_threshold=1, compaction_keep_recent=2), big_history
-    )
+    result = await run_agent_loop(_config(provider, compaction_token_threshold=1, compaction_keep_recent_turns=2), big_history)
 
-    # One call only — no compaction call was made.
-    assert len(provider.calls) == 1
     assert result.is_error is False
+    assert not any(
+        isinstance(b, ToolResultBlock) and b.content == TOMBSTONE
+        for m in provider.calls[0].messages for b in m.content
+    )
 
 
 async def test_size_estimate_counts_image_payloads():
@@ -418,21 +473,351 @@ async def test_size_estimate_counts_image_payloads():
     assert _estimate_message_chars(with_image) == 10_000
 
 
-async def test_compaction_splits_without_separating_tool_call_from_result():
-    from forge.agents.loop import _split_for_compaction
-    from forge.llm.types import Message
+# --- parallel dispatch ---------------------------------------------------
 
-    history = [
-        text_message("user", "a"),
-        Message(role="assistant", content=[ToolCallBlock(id="c1", name="t", arguments={})]),
-        Message(role="tool", content=[ToolResultBlock(tool_call_id="c1", content="ok")]),
-        text_message("user", "b"),
-    ]
-    # keep_recent=2 naively wants to split at index 2 (right BETWEEN the
-    # tool_calls-bearing assistant message and its answering tool message)
-    # — must walk the boundary back to before the assistant message
-    # instead, so the pair stays together on the "keep" side.
-    to_summarize, to_keep = _split_for_compaction(history, keep_recent=2)
 
-    assert to_summarize == history[:1]
-    assert to_keep == history[1:]
+def _multi_call_response(*calls: tuple[str, str, dict]) -> LlmResponse:
+    return LlmResponse(
+        content=[ToolCallBlock(id=cid, name=name, arguments=args) for cid, name, args in calls],
+        stop_reason="tool_calls", usage=Usage(), model="fake-model",
+    )
+
+
+async def test_read_only_tools_in_one_turn_run_concurrently():
+    """Two read-only calls each block on a barrier that only releases once
+    BOTH are inside the tool — sequential dispatch would never get there
+    (the first call would time out on the barrier and come back as an
+    error)."""
+    import threading
+
+    barrier = threading.Barrier(2, timeout=5)
+
+    def read_file_tool(path: str) -> str:
+        barrier.wait()
+        return f"contents of {path}"
+
+    provider = FakeProvider(script=[
+        _multi_call_response(("c1", "read_file_tool", {"path": "a"}), ("c2", "read_file_tool", {"path": "b"})),
+        _text_response("done"),
+    ])
+    result = await run_agent_loop(
+        _config(provider, tool_fns={"read_file_tool": read_file_tool}, read_only_tools=frozenset({"read_file_tool"})),
+        [text_message("user", "go")],
+    )
+
+    tool_message = result.history[2]
+    assert [b.tool_call_id for b in tool_message.content] == ["c1", "c2"]  # call order preserved
+    assert [b.is_error for b in tool_message.content] == [False, False]
+    assert tool_message.content[0].content == "contents of a"
+
+
+async def test_mutating_tools_never_overlap_reads_or_each_other():
+    """Anything not declared read-only runs alone, in order: an edit never
+    starts while a read is in flight, and two edits never overlap."""
+    import threading
+    import time as _time
+
+    active = {"count": 0, "max": 0}
+    lock = threading.Lock()
+    order: list[str] = []
+
+    def _tracked(name: str):
+        def fn(**kwargs) -> str:
+            with lock:
+                active["count"] += 1
+                active["max"] = max(active["max"], active["count"])
+            order.append(name)
+            _time.sleep(0.02)
+            with lock:
+                active["count"] -= 1
+            return "ok"
+        return fn
+
+    provider = FakeProvider(script=[
+        _multi_call_response(
+            ("c1", "read_file_tool", {"path": "a"}),
+            ("c2", "edit_file_tool", {"path": "a"}),
+            ("c3", "edit_file_tool", {"path": "b"}),
+            ("c4", "read_file_tool", {"path": "b"}),
+        ),
+        _text_response("done"),
+    ])
+    result = await run_agent_loop(
+        _config(
+            provider,
+            tool_fns={"read_file_tool": _tracked("read"), "edit_file_tool": _tracked("edit")},
+            read_only_tools=frozenset({"read_file_tool"}),
+        ),
+        [text_message("user", "go")],
+    )
+
+    assert active["max"] == 1  # nothing ever ran concurrently with a mutating call
+    assert order == ["read", "edit", "edit", "read"]
+    assert [b.tool_call_id for b in result.history[2].content] == ["c1", "c2", "c3", "c4"]
+
+
+# --- repeat-call guard ---------------------------------------------------
+
+
+async def test_identical_call_in_consecutive_turn_is_intercepted_with_nudge():
+    from forge.agents.loop import REPEAT_CALL_NUDGE
+
+    calls: list[str] = []
+
+    def read_file_tool(path: str) -> str:
+        calls.append(path)
+        return "contents"
+
+    provider = FakeProvider(script=[
+        _tool_call_response("read_file_tool", {"path": "a.py"}, call_id="c1"),
+        _tool_call_response("read_file_tool", {"path": "a.py"}, call_id="c2"),
+        _text_response("ok I see"),
+    ])
+    result = await run_agent_loop(_config(provider, tool_fns={"read_file_tool": read_file_tool}), [text_message("user", "go")])
+
+    assert calls == ["a.py"]  # executed once, not twice
+    repeated = result.history[4].content[0]
+    assert isinstance(repeated, ToolResultBlock)
+    assert repeated.is_error is True
+    assert repeated.content == REPEAT_CALL_NUDGE
+    assert repeated.tool_call_id == "c2"
+
+
+async def test_repeat_guard_normalizes_argument_order_and_catches_same_turn_duplicates():
+    from forge.agents.loop import REPEAT_CALL_NUDGE
+
+    calls: list[dict] = []
+
+    def t(**kwargs) -> str:
+        calls.append(kwargs)
+        return "ok"
+
+    provider = FakeProvider(script=[
+        _multi_call_response(("c1", "t", {"a": 1, "b": 2}), ("c2", "t", {"b": 2, "a": 1})),
+        _text_response("done"),
+    ])
+    result = await run_agent_loop(_config(provider, tool_fns={"t": t}), [text_message("user", "go")])
+
+    assert len(calls) == 1
+    assert result.history[2].content[1].content == REPEAT_CALL_NUDGE
+
+
+async def test_repeat_guard_allows_identical_call_after_a_mutating_call():
+    """analyze -> edit -> analyze is the normal fix cycle: the second
+    analyze is a fresh observation of a changed worktree, not a loop."""
+    analyzed = {"n": 0}
+
+    def analyze_tool() -> str:
+        analyzed["n"] += 1
+        return "1 error"
+
+    provider = FakeProvider(script=[
+        _tool_call_response("analyze_tool", {}, call_id="c1"),
+        _tool_call_response("edit_file_tool", {"path": "a"}, call_id="c2"),
+        _tool_call_response("analyze_tool", {}, call_id="c3"),
+        _text_response("done"),
+    ])
+    result = await run_agent_loop(
+        _config(provider, tool_fns={"analyze_tool": analyze_tool, "edit_file_tool": lambda path: "edited"}),
+        [text_message("user", "go")],
+    )
+
+    assert analyzed["n"] == 2
+    assert all(not b.is_error for m in result.history if m.role == "tool" for b in m.content)
+
+
+async def test_repeat_guard_only_catches_consecutive_repeats():
+    """A re-read two turns later (after something else) is allowed —
+    compaction may have tombstoned the original result by then."""
+    calls: list[str] = []
+
+    def read_file_tool(path: str) -> str:
+        calls.append(path)
+        return "contents"
+
+    provider = FakeProvider(script=[
+        _tool_call_response("read_file_tool", {"path": "a"}, call_id="c1"),
+        _tool_call_response("read_file_tool", {"path": "b"}, call_id="c2"),
+        _tool_call_response("read_file_tool", {"path": "a"}, call_id="c3"),
+        _text_response("done"),
+    ])
+    await run_agent_loop(_config(provider, tool_fns={"read_file_tool": read_file_tool}), [text_message("user", "go")])
+
+    assert calls == ["a", "b", "a"]
+
+
+# --- idle-turn budget ----------------------------------------------------
+
+
+async def test_no_progress_for_max_idle_turns_is_a_soft_stop():
+    from forge.agents.loop import TERMINAL_NO_PROGRESS
+
+    provider = FakeProvider(script=[
+        _tool_call_response("read_file_tool", {"path": "a"}, call_id="c1"),
+        _tool_call_response("read_file_tool", {"path": "b"}, call_id="c2"),
+        _tool_call_response("read_file_tool", {"path": "c"}, call_id="c3"),
+        _text_response("never reached"),
+    ])
+    result = await run_agent_loop(
+        _config(
+            provider, tool_fns={"read_file_tool": lambda path: "x"},
+            progress_tools=frozenset({"edit_file_tool"}), max_idle_turns=2,
+        ),
+        [text_message("user", "go")],
+    )
+
+    assert result.terminal_reason == TERMINAL_NO_PROGRESS
+    assert result.is_error is False
+    assert result.turns_used == 2
+    assert len(provider.calls) == 2
+
+
+async def test_progress_tool_call_resets_the_idle_budget():
+    provider = FakeProvider(script=[
+        _tool_call_response("read_file_tool", {"path": "a"}, call_id="c1"),
+        _tool_call_response("edit_file_tool", {"path": "a"}, call_id="c2"),
+        _tool_call_response("read_file_tool", {"path": "b"}, call_id="c3"),
+        _text_response("done"),
+    ])
+    result = await run_agent_loop(
+        _config(
+            provider, tool_fns={"read_file_tool": lambda path: "x", "edit_file_tool": lambda path: "edited"},
+            progress_tools=frozenset({"edit_file_tool"}), max_idle_turns=2,
+        ),
+        [text_message("user", "go")],
+    )
+
+    assert result.terminal_reason == TERMINAL_END_TURN
+    assert result.final_text == "done"
+
+
+async def test_idle_budget_is_off_without_progress_tools():
+    """The planner declares no progress tools (it never edits) — it must
+    be able to read for as many turns as it likes."""
+    provider = FakeProvider(script=[
+        _tool_call_response("read_file_tool", {"path": f"f{i}"}, call_id=f"c{i}") for i in range(5)
+    ] + [_text_response("done")])
+    result = await run_agent_loop(
+        _config(provider, tool_fns={"read_file_tool": lambda path: "x"}, max_idle_turns=2),
+        [text_message("user", "go")],
+    )
+
+    assert result.terminal_reason == TERMINAL_END_TURN
+
+
+# --- trailing reminder --------------------------------------------------
+
+
+async def test_trailing_reminder_is_sent_every_turn_but_never_stored_in_history():
+    """The distinction that makes this cheap: appending the reminder INTO
+    history would bloat it with stale copies and change bytes the prefix
+    cache depends on. Kept out, it sits after every cached byte."""
+    state = {"n": 0}
+
+    def reminder() -> str:
+        state["n"] += 1
+        return f"CHECKLIST: {state['n']} remaining"
+
+    provider = FakeProvider(script=[
+        _tool_call_response("t", {"x": 1}, call_id="c1"),
+        _text_response("done"),
+    ])
+    result = await run_agent_loop(
+        _config(provider, tool_fns={"t": lambda x: "ok"}, trailing_reminder=reminder),
+        [text_message("user", "go")],
+    )
+
+    # Both turns carried a reminder, each freshly evaluated.
+    assert provider.calls[0].messages[-1].content[0].text == "CHECKLIST: 1 remaining"
+    assert provider.calls[1].messages[-1].content[0].text == "CHECKLIST: 2 remaining"
+    # And the history the caller persists holds none of them.
+    texts = [b.text for m in result.history for b in m.content if isinstance(b, TextBlock)]
+    assert not any("CHECKLIST" in t for t in texts)
+
+
+async def test_trailing_reminder_sits_after_the_whole_cached_prefix():
+    provider = FakeProvider(script=[_text_response("done")])
+
+    await run_agent_loop(
+        _config(provider, trailing_reminder=lambda: "REMINDER"),
+        [text_message("user", "the plan"), text_message("assistant", "ok")],
+    )
+
+    sent = provider.calls[0].messages
+    assert [m.role for m in sent] == ["user", "assistant", "user"]
+    assert sent[0].content[0].text == "the plan"  # prefix untouched
+
+
+async def test_empty_reminder_appends_nothing():
+    provider = FakeProvider(script=[_text_response("done")])
+
+    await run_agent_loop(_config(provider, trailing_reminder=lambda: ""), [text_message("user", "go")])
+
+    assert len(provider.calls[0].messages) == 1
+
+
+async def test_a_bookkeeping_tool_does_not_clear_the_repeat_guard():
+    """Regression: any non-read-only tool used to reset the guard, so the
+    checklist tool the dev prompt tells the model to call constantly
+    switched off the very protection weak models need."""
+    from forge.agents.loop import REPEAT_CALL_NUDGE
+
+    reads: list[str] = []
+
+    provider = FakeProvider(script=[
+        _tool_call_response("read_file_tool", {"path": "a.py"}, call_id="c1"),
+        _tool_call_response("update_progress_tool", {"updates": []}, call_id="c2"),
+        _tool_call_response("read_file_tool", {"path": "a.py"}, call_id="c3"),
+        _text_response("done"),
+    ])
+    result = await run_agent_loop(
+        _config(
+            provider,
+            tool_fns={"read_file_tool": lambda path: reads.append(path) or "contents", "update_progress_tool": lambda updates: "noted"},
+            read_only_tools=frozenset({"read_file_tool"}),
+            bookkeeping_tools=frozenset({"update_progress_tool"}),
+        ),
+        [text_message("user", "go")],
+    )
+
+    assert reads == ["a.py"]  # the repeat was intercepted, not executed
+    assert result.history[6].content[0].content == REPEAT_CALL_NUDGE
+
+
+async def test_a_worktree_changing_tool_still_clears_the_repeat_guard():
+    """The other half of the same rule: after an edit, an identical read is
+    a fresh observation and must be allowed."""
+    reads: list[str] = []
+
+    provider = FakeProvider(script=[
+        _tool_call_response("read_file_tool", {"path": "a.py"}, call_id="c1"),
+        _tool_call_response("edit_file_tool", {"path": "a.py"}, call_id="c2"),
+        _tool_call_response("read_file_tool", {"path": "a.py"}, call_id="c3"),
+        _text_response("done"),
+    ])
+    await run_agent_loop(
+        _config(
+            provider,
+            tool_fns={"read_file_tool": lambda path: reads.append(path) or "contents", "edit_file_tool": lambda path: "edited"},
+            read_only_tools=frozenset({"read_file_tool"}),
+            bookkeeping_tools=frozenset({"update_progress_tool"}),
+        ),
+        [text_message("user", "go")],
+    )
+
+    assert reads == ["a.py", "a.py"]
+
+
+async def test_a_raising_trailing_reminder_does_not_end_the_run():
+    """Regression: an exception here escaped run_dev, bypassed dev_node's
+    DevLoopError catch, and abandoned the rest of the daemon poll cycle."""
+    def boom() -> str:
+        raise KeyError("action")
+
+    provider = FakeProvider(script=[_text_response("done anyway")])
+
+    result = await run_agent_loop(_config(provider, trailing_reminder=boom), [text_message("user", "go")])
+
+    assert result.is_error is False
+    assert result.final_text == "done anyway"
+    assert len(provider.calls[0].messages) == 1  # nothing appended
