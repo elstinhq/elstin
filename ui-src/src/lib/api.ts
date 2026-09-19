@@ -2,6 +2,7 @@ import type {
   ConfigField,
   Epic,
   EpicUsage,
+  ExternalChangeAction,
   Project,
   ProjectRepo,
   Story,
@@ -109,6 +110,8 @@ export const api = {
       `/api/stories/${encodeURIComponent(storyKey)}/kind`,
       put({ kind }),
     ),
+  resolveExternalChange: (storyKey: string, action: ExternalChangeAction) =>
+    request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/external-change`, json({ action })),
   syncStory: (storyKey: string) => request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/sync`, { method: "POST" }),
   // Not a fetch: EventSource opens this itself. It lives here anyway so
   // every server URL the UI knows about is still in one file. (The plain

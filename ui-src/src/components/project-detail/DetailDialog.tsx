@@ -3,9 +3,10 @@ import { SquareArrowOutUpRight } from "lucide-react";
 import { PhaseTagFor, StatusTagFor } from "../shared/StatusTag";
 import { ActivityFeed } from "./ActivityFeed";
 import { EpicUsagePanel, StoryUsagePanel } from "./UsagePanel";
-import { useSetStoryKind, useSyncStory } from "../../hooks/useStories";
+import { useResolveExternalChange, useSetStoryKind, useSyncStory } from "../../hooks/useStories";
+import { useToast } from "../../lib/toast";
 import { useSyncEpicFields } from "../../hooks/useEpics";
-import type { Epic, Story } from "../../types/api";
+import type { Epic, ExternalChangeAction, Story } from "../../types/api";
 import { Button } from "../ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 
@@ -68,6 +69,69 @@ function KindDetailValue({ projectId, story }: { projectId: number; story: Story
   );
 }
 
+// A story can only be re-planned while nothing is in flight to orphan — the
+// same rule the API enforces, so the button is not offered when it would 409.
+const REPLANNABLE = new Set(["awaiting_plan_approval", "failed"]);
+
+function ChangedField({ label, current, incoming }: { label: string; current: string | null; incoming: string }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-muted-foreground text-xs">{label}</span>
+      <div className="text-muted-foreground max-h-[120px] overflow-y-auto whitespace-pre-wrap text-xs line-through">{current || "—"}</div>
+      <div className="max-h-[160px] overflow-y-auto whitespace-pre-wrap text-sm">{incoming || "—"}</div>
+    </div>
+  );
+}
+
+function ExternalChangePanel({ projectId, story }: { projectId: number; story: Story }) {
+  const resolve = useResolveExternalChange(projectId);
+  const { showToast } = useToast();
+  const pending = story.external_pending;
+  if (!pending) return null;
+
+  const canReplan = REPLANNABLE.has(story.status);
+
+  function run(action: ExternalChangeAction, done: string) {
+    resolve.mutate(
+      { storyKey: story.jira_key, action },
+      {
+        onSuccess: () => showToast(done, "success"),
+        onError: (err) => showToast(err.message || "Could not resolve this change.", "error"),
+      },
+    );
+  }
+
+  return (
+    <div className="border-border bg-accent/40 flex flex-col gap-3 rounded-md border p-3">
+      <div className="text-sm font-medium">Changed in the source after this story was planned</div>
+      <div className="text-muted-foreground text-xs">
+        {pending.reasons.join("; ")}. Nothing has been rewritten under the plan or the run — choose what to do with it.
+      </div>
+      {pending.summary !== undefined ? <ChangedField label="Summary" current={story.summary} incoming={pending.summary} /> : null}
+      {pending.description !== undefined ? (
+        <ChangedField label="Description" current={story.description} incoming={pending.description} />
+      ) : null}
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" loading={resolve.isPending} onClick={() => run("accept", "New text applied; the plan is unchanged")}>
+          Apply, keep the plan
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={!canReplan || resolve.isPending}
+          title={canReplan ? undefined : "Work is already under way or a PR exists — a re-plan would orphan it"}
+          onClick={() => run("replan", "New text applied; the story will be planned again")}
+        >
+          Apply and re-plan
+        </Button>
+        <Button size="sm" variant="ghost" disabled={resolve.isPending} onClick={() => run("dismiss", "Change dismissed")}>
+          Keep current text
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function EpicDetailBody({ epic }: { epic: Epic }) {
   return (
     <>
@@ -77,6 +141,11 @@ function EpicDetailBody({ epic }: { epic: Epic }) {
       <DetailRow label="Phase">
         <PhaseTagFor phase={epic.phase} />
       </DetailRow>
+      {epic.external_status ? (
+        <DetailRow label="Status in source">
+          {epic.external_closed ? `${epic.external_status} — closed, so forge put this epic on hold` : epic.external_status}
+        </DetailRow>
+      ) : null}
       <DetailRow label="Folder">{epic.repo || "No folder attached"}</DetailRow>
       <DetailRow label="Plan approved">{epic.plan_approved ? "Yes" : "No"}</DetailRow>
       <DetailRow label="Manually paused">{epic.manual_gate ? "Yes" : "No"}</DetailRow>
@@ -92,11 +161,19 @@ function StoryDetailBody({ projectId, story, activityEnabled }: { projectId: num
   return (
     <>
       <DetailRow label="JIRA key">{story.jira_key}</DetailRow>
+      <ExternalChangePanel projectId={projectId} story={story} />
       <DetailRow label="Summary">{story.summary || "—"}</DetailRow>
       {story.description ? <DescriptionRow text={story.description} /> : null}
       <DetailRow label="Status">
         <StatusTagFor status={story.status} />
       </DetailRow>
+      {story.external_status ? (
+        <DetailRow label="Status in source">
+          {story.external_closed
+            ? `${story.external_status} — closed${story.status === "skipped" ? ", so forge skipped this story" : "; this run was already under way and will finish"}`
+            : story.external_status}
+        </DetailRow>
+      ) : null}
       <DetailRow label="Kind">
         <KindDetailValue projectId={projectId} story={story} />
       </DetailRow>

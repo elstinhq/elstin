@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { queryKeys } from "../lib/queryClient";
-import type { ActivityEvent } from "../types/api";
+import type { ActivityEvent, ExternalChangeAction } from "../types/api";
 
 // Every story mutation ends with the same refresh the vanilla page did after
 // each fetch — re-pull this project's epic list so waves/statuses/gates
@@ -36,6 +36,17 @@ export function useSetStoryKind(projectId: number) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ storyKey, kind }: { storyKey: string; kind: string }) => api.setStoryKind(storyKey, kind),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) }),
+  });
+}
+
+export function useResolveExternalChange(projectId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ storyKey, action }: { storyKey: string; action: ExternalChangeAction }) =>
+      api.resolveExternalChange(storyKey, action),
+    // A re-plan moves the story back to pending, so the whole epic list is
+    // refreshed, not just the flag.
     onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) }),
   });
 }

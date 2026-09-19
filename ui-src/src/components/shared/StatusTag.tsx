@@ -71,6 +71,28 @@ export function PhaseTagFor({ phase }: { phase: EpicPhase }) {
   return <Tag label={phase} appearance={PHASE_APPEARANCE[phase]} />;
 }
 
+// The ticket's source changed it after a plan or run was built on the old
+// text; the new text is waiting for a person. Shown only while it is.
+export function ExternalChangedTag({ story }: { story: Story }) {
+  if (!story.external_pending) return null;
+  return <Tag label="changed in source" appearance="warning" title="Open the story to apply, re-plan, or dismiss the change" />;
+}
+
+// The source reports the ticket done, closed or gone. A story that had not
+// started is skipped; one in flight is only flagged, which is what the
+// title says, so nobody reads the tag as "forge stopped it".
+export function ClosedExternallyTag({ story }: { story: Story }) {
+  if (!story.external_closed) return null;
+  const inFlight = story.status !== "skipped" && story.status !== "merged" && story.status !== "done";
+  return (
+    <Tag
+      label="closed in source"
+      appearance="secondary"
+      title={inFlight ? `${story.external_status ?? "Closed"} in the source — this run was already under way and will finish` : (story.external_status ?? "Closed in the source")}
+    />
+  );
+}
+
 // Only QA tickets get a badge. "dev" is the overwhelming majority and the
 // default, so tagging every row with it would be noise that makes the one
 // row worth noticing harder to spot.

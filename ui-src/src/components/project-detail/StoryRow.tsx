@@ -1,4 +1,4 @@
-import { CoverageGapTag, KindTag, PrOpenErrorTag, StatusTagFor } from "../shared/StatusTag";
+import { ClosedExternallyTag, CoverageGapTag, ExternalChangedTag, KindTag, PrOpenErrorTag, StatusTagFor } from "../shared/StatusTag";
 import { Twisty } from "../shared/Twisty";
 import { useApproveStory, useRetryStory, useStartStory } from "../../hooks/useStories";
 import { useToast } from "../../lib/toast";
@@ -65,6 +65,8 @@ export function StoryRow({
         <CoverageGapTag story={story} />
         <PrOpenErrorTag story={story} />
         <StatusTagFor status={story.status} />
+        <ExternalChangedTag story={story} />
+        <ClosedExternallyTag story={story} />
 
         {story.parked_reason ? <span className="text-muted-foreground text-xs">({story.parked_reason})</span> : null}
 

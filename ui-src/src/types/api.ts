@@ -102,6 +102,17 @@ export type StoryStatus =
 
 export type StoryKind = "dev" | "qa";
 
+// Text the ticket's source changed after forge planned or started the story,
+// held for a person to decide on. Only the fields that changed are present.
+export interface ExternalPending {
+  summary?: string;
+  description?: string;
+  hash: string;
+  reasons: string[];
+}
+
+export type ExternalChangeAction = "accept" | "replan" | "dismiss";
+
 export interface Story {
   jira_key: string;
   epic_key: string;
@@ -122,6 +133,11 @@ export interface Story {
   pr_open_error: string | null;
   retry_count: number;
   failure_stage: string | null;
+  external_source: string | null;
+  external_status: string | null;
+  external_closed: boolean;
+  external_pending: ExternalPending | null;
+  external_changed_at: string | null;
   pull_request: PullRequest | null;
 }
 
@@ -144,6 +160,9 @@ export interface Epic {
   integration_branch: string | null;
   plan_approved: boolean;
   manual_gate: boolean;
+  external_source: string | null;
+  external_status: string | null;
+  external_closed: boolean;
   stories: Story[];
 }
 

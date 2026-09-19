@@ -101,6 +101,9 @@ export function EpicCard({
           )}
 
           {epic.manual_gate ? <Tag label="Paused" appearance="warning" /> : null}
+          {epic.external_closed ? (
+            <Tag label="closed in source" appearance="secondary" title="The source reports this epic closed, so forge put it on hold. Resume it to keep going." />
+          ) : null}
 
           <div className="flex-1" />
 
