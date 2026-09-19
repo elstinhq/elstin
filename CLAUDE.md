@@ -36,10 +36,17 @@ alembic upgrade head
 Run the full stack instead:
 
 ```bash
-docker compose up
+scripts/forge.sh
 # Dashboard: http://localhost:8000/
 # Settings:  http://localhost:8000/settings
 ```
+
+`scripts/forge.sh` wraps `docker compose` (or `podman compose`) with
+engine detection, an image rebuild on every `up` — the image bakes in
+`forge/`, `alembic/` and the UI bundle, so a stale one runs code you no
+longer have and fails migrations with a misleading "Can't locate
+revision" — a health wait, and `down`/`logs`/`status`/`rebuild`/`psql`/
+`reset` subcommands. Plain `docker compose up` still works.
 
 Tests:
 

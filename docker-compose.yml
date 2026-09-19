@@ -54,6 +54,13 @@ services:
     ports:
       - "${FORGE_APP_PORT:-8000}:8000"
     volumes:
+      # /data itself, not only the two directories below it: the dev
+      # loop's pre-edit baselines (/data/baselines, what
+      # roll_back_file_tool restores from) and downloaded JIRA
+      # attachments live directly under it, and without a volume they
+      # sit in the container's writable layer — gone the moment the
+      # container is recreated, which is every `scripts/forge.sh up`.
+      - forge-data:/data
       - forge-repos:/data/repos
       - forge-cloned-repos:/data/cloned-repos
     depends_on:
@@ -64,5 +71,6 @@ services:
 
 volumes:
   forge-pgdata:
+  forge-data:
   forge-repos:
   forge-cloned-repos:

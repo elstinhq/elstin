@@ -19,10 +19,17 @@ state, no Kubernetes, no multi-tenancy.
 ## Quick start
 
 ```bash
-docker compose up
+scripts/forge.sh
 # Dashboard: http://localhost:8000/
 # Settings:  http://localhost:8000/settings
 ```
+
+`scripts/forge.sh` is a wrapper over `docker compose` (or `podman
+compose`): it rebuilds the image on every `up` so the container runs the
+working tree rather than a stale copy of `forge/` and `alembic/`, waits
+for `/healthz`, and adds `down`/`logs`/`status`/`rebuild`/`psql`/`reset`.
+Plain `docker compose up` still works and nothing in `forge/` depends on
+the script.
 
 Local develop without the full stack:
 
