@@ -7,6 +7,7 @@ import {
   useTicketFilter,
 } from "../../hooks/useTicketFilter";
 import { useToast } from "../../lib/toast";
+import { sourceLabel } from "../../lib/ticketSource";
 import type {
   TicketFilter,
   TicketFilterInput,
@@ -23,6 +24,7 @@ import { Textarea } from "../ui/textarea";
 
 interface TicketFilterDialogProps {
   projectId: number;
+  ticketSource: string;
   open: boolean;
   onClose: () => void;
 }
@@ -116,7 +118,8 @@ function MatchRow({ match }: { match: TicketFilterMatch }) {
   );
 }
 
-export function TicketFilterDialog({ projectId, open, onClose }: TicketFilterDialogProps) {
+export function TicketFilterDialog({ projectId, ticketSource, open, onClose }: TicketFilterDialogProps) {
+  const github = ticketSource === "github";
   const filterQuery = useTicketFilter(projectId);
   const saveFilter = useSaveTicketFilter(projectId);
   const clearFilter = useClearTicketFilter(projectId);
@@ -198,23 +201,23 @@ export function TicketFilterDialog({ projectId, open, onClose }: TicketFilterDia
         </DialogHeader>
         <div className="flex flex-col gap-4">
           <p className="text-muted-foreground text-xs">
-            Pull tickets in from a saved JIRA query instead of adding them one key at a time. New matches are added paused
+            Pull tickets in from a saved {sourceLabel(ticketSource)} query instead of adding them one at a time. New matches are added paused
             and without a folder — pick a folder and resume to start work. Tickets that stop matching are never removed.
           </p>
 
           <div className="flex items-center justify-between gap-3">
             <Label htmlFor="filter-enabled" className="font-normal">
-              Keep checking JIRA in the background
+              Keep checking {sourceLabel(ticketSource)} in the background
             </Label>
             <Switch id="filter-enabled" checked={draft.enabled} onCheckedChange={(checked) => patch({ enabled: checked })} />
           </div>
 
           <form className="flex flex-col gap-4" onSubmit={(e) => e.preventDefault()}>
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="filter-project-key">JIRA project key</Label>
+              <Label htmlFor="filter-project-key">{github ? "Repository or organisation" : "JIRA project key"}</Label>
               <Input
                 id="filter-project-key"
-                placeholder="ENG"
+                placeholder={github ? "owner/repo, or just owner" : "ENG"}
                 value={draft.jira_project_key}
                 onChange={(e) => patch({ jira_project_key: e.target.value })}
               />
@@ -227,17 +230,21 @@ export function TicketFilterDialog({ projectId, open, onClose }: TicketFilterDia
                 value={draft.assignee}
                 onChange={(e) => patch({ assignee: e.target.value })}
               />
-              <p className="text-muted-foreground text-xs">An account ID, an email, or currentUser()</p>
+              <p className="text-muted-foreground text-xs">
+                {github ? "A GitHub username, or currentUser() for the token's owner" : "An account ID, an email, or currentUser()"}
+              </p>
             </div>
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="filter-statuses">Statuses</Label>
               <Input
                 id="filter-statuses"
-                placeholder="To Do, In Progress"
+                placeholder={github ? "open" : "To Do, In Progress"}
                 value={draft.statuses}
                 onChange={(e) => patch({ statuses: e.target.value })}
               />
-              <p className="text-muted-foreground text-xs">Comma-separated</p>
+              <p className="text-muted-foreground text-xs">
+                {github ? "open or closed — anything else is ignored" : "Comma-separated"}
+              </p>
             </div>
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="filter-labels">Labels</Label>
@@ -253,22 +260,24 @@ export function TicketFilterDialog({ projectId, open, onClose }: TicketFilterDia
               <Label htmlFor="filter-issue-types">Issue types</Label>
               <Input
                 id="filter-issue-types"
-                placeholder="Story, Bug"
+                placeholder={github ? "Bug, Feature" : "Story, Bug"}
                 value={draft.issue_types}
                 onChange={(e) => patch({ issue_types: e.target.value })}
               />
               <p className="text-muted-foreground text-xs">Comma-separated</p>
             </div>
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="filter-jql">Extra JQL</Label>
+              <Label htmlFor="filter-jql">{github ? "Extra search terms" : "Extra JQL"}</Label>
               <Textarea
                 id="filter-jql"
                 rows={2}
-                placeholder="sprint in openSprints()"
+                placeholder={github ? "milestone:v2" : "sprint in openSprints()"}
                 value={draft.extra_jql}
                 onChange={(e) => patch({ extra_jql: e.target.value })}
               />
-              <p className="text-muted-foreground text-xs">Optional — AND-ed with the fields above, for anything they can't express</p>
+              <p className="text-muted-foreground text-xs">
+                Optional — combined with the fields above, for anything they can't express
+              </p>
             </div>
           </form>
 

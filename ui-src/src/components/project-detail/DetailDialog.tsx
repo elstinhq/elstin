@@ -5,6 +5,7 @@ import { ActivityFeed } from "./ActivityFeed";
 import { EpicUsagePanel, StoryUsagePanel } from "./UsagePanel";
 import { useResolveExternalChange, useSetStoryKind, useSyncStory } from "../../hooks/useStories";
 import { useToast } from "../../lib/toast";
+import { displayKey, sourceLabel, ticketUrl } from "../../lib/ticketSource";
 import { useSyncEpicFields } from "../../hooks/useEpics";
 import type { Epic, ExternalChangeAction, Story } from "../../types/api";
 import { Button } from "../ui/button";
@@ -21,6 +22,7 @@ interface DetailDialogProps {
   target: DetailTarget | null;
   onClose: () => void;
   jiraBaseUrl: string | null;
+  ticketSource: string;
 }
 
 function DetailRow({ label, children }: { label: string; children: ReactNode }) {
@@ -135,7 +137,7 @@ function ExternalChangePanel({ projectId, story }: { projectId: number; story: S
 function EpicDetailBody({ epic }: { epic: Epic }) {
   return (
     <>
-      <DetailRow label="JIRA key">{epic.jira_key}</DetailRow>
+      <DetailRow label="Ticket">{epic.external_id || epic.jira_key}</DetailRow>
       <DetailRow label="Summary">{epic.summary || "—"}</DetailRow>
       {epic.description ? <DescriptionRow text={epic.description} /> : null}
       <DetailRow label="Phase">
@@ -160,7 +162,7 @@ function EpicDetailBody({ epic }: { epic: Epic }) {
 function StoryDetailBody({ projectId, story, activityEnabled }: { projectId: number; story: Story; activityEnabled: boolean }) {
   return (
     <>
-      <DetailRow label="JIRA key">{story.jira_key}</DetailRow>
+      <DetailRow label="Ticket">{story.external_id || story.jira_key}</DetailRow>
       <ExternalChangePanel projectId={projectId} story={story} />
       <DetailRow label="Summary">{story.summary || "—"}</DetailRow>
       {story.description ? <DescriptionRow text={story.description} /> : null}
@@ -200,7 +202,7 @@ function StoryDetailBody({ projectId, story, activityEnabled }: { projectId: num
   );
 }
 
-export function DetailDialog({ projectId, epics, target, onClose, jiraBaseUrl }: DetailDialogProps) {
+export function DetailDialog({ projectId, epics, target, onClose, jiraBaseUrl, ticketSource }: DetailDialogProps) {
   const syncEpicFields = useSyncEpicFields(projectId);
   const syncStory = useSyncStory(projectId);
 
@@ -209,8 +211,14 @@ export function DetailDialog({ projectId, epics, target, onClose, jiraBaseUrl }:
     target?.kind === "story" ? epics.flatMap((e) => e.stories || []).find((s) => s.jira_key === target.key) : undefined;
 
   const open = target != null && (epic != null || story != null);
-  const heading = target?.kind === "epic" ? `Task ${target.key}` : `Story ${target?.key ?? ""}`;
   const syncing = syncEpicFields.isPending || syncStory.isPending;
+  // The ticket's own record says which system it came from; the project's
+  // setting only decides for a ticket created before that was recorded.
+  const linked = epic ?? story;
+  const linkedSource = linked?.external_source ?? ticketSource;
+  const shownKey = linked ? displayKey(linked) : (target?.key ?? "");
+  const heading = target?.kind === "epic" ? `Task ${shownKey}` : `Story ${shownKey}`;
+  const sourceUrl = target ? ticketUrl(linkedSource, linked?.external_id, target.key, jiraBaseUrl) : null;
 
   function handleSync() {
     if (!target) return;
@@ -238,20 +246,16 @@ export function DetailDialog({ projectId, epics, target, onClose, jiraBaseUrl }:
         <DialogFooter className="sm:justify-between">
           <div className="flex gap-2">
             <Button variant="outline" loading={syncing} onClick={handleSync}>
-              Sync from JIRA
+              Sync from {sourceLabel(linkedSource)}
             </Button>
             <Button variant="outline" onClick={onClose}>
               Close
             </Button>
           </div>
-          {jiraBaseUrl && target ? (
+          {sourceUrl ? (
             <Button asChild>
-              <a
-                href={`${jiraBaseUrl.replace(/\/$/, "")}/browse/${encodeURIComponent(target.key)}`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Open in JIRA
+              <a href={sourceUrl} target="_blank" rel="noreferrer">
+                Open in {sourceLabel(linkedSource)}
                 <SquareArrowOutUpRight />
               </a>
             </Button>

@@ -8,6 +8,7 @@ export interface Project {
   id: number;
   name: string;
   description: string | null;
+  ticket_source: string;
   repo_count: number;
   epic_count: number;
   created_at: string;
@@ -134,6 +135,7 @@ export interface Story {
   retry_count: number;
   failure_stage: string | null;
   external_source: string | null;
+  external_id: string | null;
   external_status: string | null;
   external_closed: boolean;
   external_pending: ExternalPending | null;
@@ -161,6 +163,7 @@ export interface Epic {
   plan_approved: boolean;
   manual_gate: boolean;
   external_source: string | null;
+  external_id: string | null;
   external_status: string | null;
   external_closed: boolean;
   stories: Story[];

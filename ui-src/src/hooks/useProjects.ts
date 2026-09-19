@@ -10,6 +10,14 @@ export function useProject(id: number) {
   return useQuery({ queryKey: queryKeys.project(id), queryFn: () => api.getProject(id) });
 }
 
+export function useSetTicketSource(id: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (ticketSource: string) => api.updateProject(id, { ticket_source: ticketSource }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.project(id) }),
+  });
+}
+
 export function useCreateProject() {
   const queryClient = useQueryClient();
   return useMutation({

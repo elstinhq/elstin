@@ -43,6 +43,8 @@ export const api = {
   createProject: (body: { name: string; description: string; repo_url: string | null }) =>
     request<Project>("/api/projects", json(body)),
   getProject: (id: number) => request<Project>(`/api/projects/${id}`),
+  updateProject: (id: number, body: { ticket_source?: string; name?: string; description?: string }) =>
+    request<Project>(`/api/projects/${id}`, put(body)),
 
   // -- folders (project repos) -----------------------------------------
   listProjectRepos: (projectId: number) => request<ProjectRepo[]>(`/api/projects/${projectId}/repos`),

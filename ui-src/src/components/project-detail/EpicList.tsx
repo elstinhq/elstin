@@ -44,7 +44,7 @@ export function EpicList({ projectId, epics, repos, autoRunEnabled, onOpenEpic, 
       <EmptyState
         icon={ClipboardList}
         heading="No tasks yet"
-        body='Use "Add ticket" above to sync one from JIRA. New tickets start paused until you resume.'
+        body='Use "Add ticket" above to sync one from your ticket source. New tickets start paused until you resume.'
       />
     );
   }

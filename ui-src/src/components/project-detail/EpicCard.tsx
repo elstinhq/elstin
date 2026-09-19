@@ -9,6 +9,7 @@ import { Card } from "../ui/card";
 import { Progress } from "../ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { cn } from "../../lib/utils";
+import { displayKey } from "../../lib/ticketSource";
 
 // Wave first, then issue key — the order the epic actually executes in. The
 // API returns rows in arbitrary DB order, which put the QA ticket at the
@@ -73,7 +74,7 @@ export function EpicCard({
               onOpenEpic(epic.jira_key);
             }}
           >
-            {epic.jira_key}
+            {displayKey(epic)}
           </span>
           <PhaseTagFor phase={epic.phase} />
 

@@ -39,6 +39,7 @@ export function ProjectDetailPage({ projectId }: { projectId: number }) {
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [detailTarget, setDetailTarget] = useState<DetailTarget | null>(null);
 
+  const ticketSource = projectQuery.data?.ticket_source ?? "jira";
   const epics = epicsQuery.data ?? [];
   const repos = reposQuery.data ?? [];
 
@@ -128,15 +129,16 @@ export function ProjectDetailPage({ projectId }: { projectId: number }) {
         </div>
       </div>
 
-      <SyncTicketDialog projectId={projectId} open={syncDialogOpen} onClose={() => setSyncDialogOpen(false)} />
-      <TicketFilterDialog projectId={projectId} open={filterDialogOpen} onClose={() => setFilterDialogOpen(false)} />
-      <ProjectSettingsDialog projectId={projectId} open={settingsDialogOpen} onClose={() => setSettingsDialogOpen(false)} />
+      <SyncTicketDialog projectId={projectId} ticketSource={ticketSource} open={syncDialogOpen} onClose={() => setSyncDialogOpen(false)} />
+      <TicketFilterDialog projectId={projectId} ticketSource={ticketSource} open={filterDialogOpen} onClose={() => setFilterDialogOpen(false)} />
+      <ProjectSettingsDialog projectId={projectId} ticketSource={ticketSource} open={settingsDialogOpen} onClose={() => setSettingsDialogOpen(false)} />
       <DetailDialog
         projectId={projectId}
         epics={epics}
         target={detailTarget}
         onClose={() => setDetailTarget(null)}
         jiraBaseUrl={jiraBaseUrl}
+        ticketSource={ticketSource}
       />
     </AppShell>
   );

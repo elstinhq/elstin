@@ -5,6 +5,7 @@ import { useToast } from "../../lib/toast";
 import type { Story } from "../../types/api";
 import { Button } from "../ui/button";
 import { cn } from "../../lib/utils";
+import { displayKey } from "../../lib/ticketSource";
 
 interface StoryRowProps {
   projectId: number;
@@ -58,8 +59,8 @@ export function StoryRow({
           <span className="w-4 shrink-0" />
         )}
 
-        <span className={cn("shrink-0 font-mono text-sm", isSubtask ? "w-[70px] opacity-75" : "w-[78px]")}>
-          {story.jira_key}
+        <span className={cn("shrink-0 font-mono text-sm", isSubtask ? "min-w-[70px] opacity-75" : "min-w-[78px]")}>
+          {displayKey(story)}
         </span>
         <KindTag story={story} />
         <CoverageGapTag story={story} />
