@@ -27,9 +27,11 @@ scripts/forge.sh
 `scripts/forge.sh` is a wrapper over `docker compose` (or `podman
 compose`): it rebuilds the image on every `up` so the container runs the
 working tree rather than a stale copy of `forge/` and `alembic/`, waits
-for `/healthz`, and adds `down`/`logs`/`status`/`rebuild`/`psql`/`reset`.
-Plain `docker compose up` still works and nothing in `forge/` depends on
-the script.
+for `/healthz`, and adds `stop`/`down`/`logs`/`status`/`rebuild`/`psql`/
+`reset`. `scripts/stop.sh` stops the stack (`--keep` to leave the
+containers in place); only `reset` deletes data, and it asks first. Plain
+`docker compose up` still works and nothing in `forge/` depends on either
+script.
 
 Local develop without the full stack:
 

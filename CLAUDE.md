@@ -45,8 +45,10 @@ scripts/forge.sh
 engine detection, an image rebuild on every `up` — the image bakes in
 `forge/`, `alembic/` and the UI bundle, so a stale one runs code you no
 longer have and fails migrations with a misleading "Can't locate
-revision" — a health wait, and `down`/`logs`/`status`/`rebuild`/`psql`/
-`reset` subcommands. Plain `docker compose up` still works.
+revision" — a health wait, and `stop`/`down`/`logs`/`status`/`rebuild`/
+`psql`/`reset` subcommands. `scripts/stop.sh` is the stop half (`--keep`
+stops the containers without removing them); both leave every volume
+alone, so only `reset` loses data. Plain `docker compose up` still works.
 
 Tests:
 

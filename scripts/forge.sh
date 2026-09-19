@@ -24,7 +24,8 @@
 #
 # Usage: scripts/forge.sh [command]
 #   up        build, start, wait for health (default)
-#   down      stop, keep the database
+#   stop      stop the containers, keep them for a fast restart
+#   down      stop and remove the containers, keep all data
 #   restart   down + up
 #   rebuild   rebuild from scratch, ignoring the layer cache, then up
 #   logs      follow the app's logs
@@ -152,7 +153,7 @@ banner() {
     say ""
     say "${DIM}Nothing is read from a .env file: open /settings and fill in JIRA,${RESET}"
     say "${DIM}GitHub and your LLM provider before the daemon has work to poll for.${RESET}"
-    say "${DIM}Logs: scripts/forge.sh logs   Stop: scripts/forge.sh down${RESET}"
+    say "${DIM}Logs: scripts/forge.sh logs   Stop: scripts/stop.sh${RESET}"
 }
 
 # --- commands ----------------------------------------------------------
@@ -216,10 +217,23 @@ explain_startup_failure() {
     fi
 }
 
+# Two ways to stop, because they are genuinely different: `stop` parks the
+# containers where they are (the next `up` restarts them in place), while
+# `down` removes them and the network. Neither touches a volume, so the
+# database, worktrees and cloned repos survive both — only `reset` deletes
+# data, and it asks first.
+cmd_stop() {
+    require_engine
+    step "Stopping the containers (they are kept, along with all data)"
+    "${COMPOSE[@]}" stop
+    say "Start again with: ${BOLD}scripts/forge.sh up${RESET}"
+}
+
 cmd_down() {
     require_engine
-    step "Stopping (the database volume is kept)"
+    step "Stopping and removing the containers (volumes, and so all data, are kept)"
     "${COMPOSE[@]}" down
+    say "Start again with: ${BOLD}scripts/forge.sh up${RESET}"
 }
 
 # `up` already builds. This is the bigger hammer for when the layer cache
@@ -291,6 +305,7 @@ command="${1:-up}"
 
 case "$command" in
     up)       cmd_up "$@" ;;
+    stop)     cmd_stop ;;
     down)     cmd_down ;;
     restart)  cmd_down; cmd_up "$@" ;;
     rebuild)  cmd_rebuild ;;
