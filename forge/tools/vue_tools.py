@@ -282,6 +282,7 @@ Vue 3 + Vite conventions for this codebase:
 - Routing and pages follow the existing `router/` + `pages/` (or equivalent) structure; keep new routes consistent with current patterns.
 - Unit tests: Vitest + `@vue/test-utils`, named `*.spec.ts` under `tests/`. Prefer extending existing test helpers over inventing new harnesses.
 - Run typecheck via `vue-tsc` and scoped Vitest for planned test files — do not invent a different test runner.
+- Adding or upgrading a dependency: do not write its name, version or API from memory. Run `npm view <pkg> version` to confirm the package exists and get its current version, `npm install <pkg>` to add it, then read `node_modules/<pkg>/README.md` and its `.d.ts` types before writing code against it. Then let `vue-tsc` confirm the usage.
 """.strip()
 
 
@@ -305,6 +306,9 @@ def vue_vite_profile() -> LanguageProfile:
         safe_command_prefixes=(
             ("npm", "ci"),
             ("npm", "install"),
+            # Read-only registry lookup — lets the agent check a package's
+            # real name, latest version and dist-tags instead of guessing.
+            ("npm", "view"),
             ("npm", "run", "lint"),
             ("npm", "run", "build"),
             ("npm", "run", "test"),
