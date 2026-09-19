@@ -31,6 +31,8 @@ class _EpicMixin:
         summary: str = "",
         description: str | None = None,
         manual_gate: bool = True,
+        external_source: str | None = None,
+        external_id: str | None = None,
     ) -> None:
         """Insert a new epic row on first sync. Starts paused (`manual_gate=True`)
         so the daemon does not auto-run until a human resumes. Re-sync calls
@@ -41,6 +43,7 @@ class _EpicMixin:
             session.add(Epic(
                 jira_key=jira_key, project_id=project_id, levels=levels, phase="planning",
                 summary=summary, description=description, manual_gate=manual_gate,
+                external_source=external_source, external_id=external_id,
             ))
 
     def set_epic_project_repo(self, jira_key: str, project_repo_id: int | None) -> None:
@@ -122,4 +125,7 @@ def _epic_to_dict(session, epic: Epic) -> dict:
         "integration_branch": epic.integration_branch,
         "plan_approved": epic.plan_approved,
         "manual_gate": epic.manual_gate,
+        "external_source": epic.external_source,
+        "external_id": epic.external_id,
+        "external_synced_at": epic.external_synced_at.isoformat() if epic.external_synced_at else None,
     }

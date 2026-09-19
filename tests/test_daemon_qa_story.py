@@ -45,7 +45,8 @@ def captured_jira_comments(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, s
             posted.append((issue_key, body))
             return True
 
-    monkeypatch.setattr(daemon, "JiraService", _FakeJira)
+    monkeypatch.setattr(daemon, "get_ticket_source", lambda project_id: _FakeJira(project_id))
+    monkeypatch.setattr(daemon, "ticket_source_configured", _FakeJira.is_configured)
     return posted
 
 

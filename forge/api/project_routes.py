@@ -31,6 +31,7 @@ from forge.config.store import (
 from forge.api.epic_routes import _story_with_pr
 from forge.services.jira_filter import build_jql, preview_filter, sync_project_filter
 from forge.services.repo_clone import RepoCloneError, clone_repository
+from forge.services.ticket_source import known_sources
 from forge.state.manager import StateManager
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -45,6 +46,7 @@ class ProjectCreateRequest(BaseModel):
 class ProjectUpdateRequest(BaseModel):
     name: str | None = None
     description: str | None = None
+    ticket_source: str | None = None
 
 
 class ProjectRepoCreateRequest(BaseModel):
@@ -117,7 +119,12 @@ def update_project(project_id: int, body: ProjectUpdateRequest) -> dict:
     sm = StateManager()
     if sm.get_project(project_id) is None:
         raise HTTPException(status_code=404, detail=f"No such project: {project_id}")
-    sm.update_project(project_id, name=body.name, description=body.description)
+    if body.ticket_source is not None and body.ticket_source not in known_sources():
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown ticket source {body.ticket_source!r} (available: {', '.join(known_sources())})",
+        )
+    sm.update_project(project_id, name=body.name, description=body.description, ticket_source=body.ticket_source)
     return sm.get_project(project_id)
 
 

@@ -25,6 +25,11 @@ class Project(Base):
     name: Mapped[str] = mapped_column(String(256), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Which ticket source this project's epics and stories are pulled from
+    # ("jira" today) — forge/services/ticket_source.py resolves it to a
+    # client. Existing projects are "jira".
+    ticket_source: Mapped[str] = mapped_column(String(16), default="jira", server_default="jira", nullable=False)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False

@@ -189,8 +189,15 @@ def _fake_search(tickets):
     tests, same rule as everywhere else."""
 
     class _Fake:
+        name = "jira"
+
         def __init__(self, project_id=None):
             self.project_id = project_id
+
+        def compile_filter(self, ticket_filter):
+            from forge.services.jira_filter import build_jql
+
+            return build_jql(ticket_filter)
 
         def search_tickets(self, jql, max_results=50):
             return tickets
@@ -240,7 +247,8 @@ def test_ticket_filter_preview_uses_the_unsaved_filter_and_writes_nothing(monkey
 
     project_id = StateManager().create_project("Widgets")
     ticket = JiraTicket(key="ENG-1", summary="s", description="", status="To Do", issue_type="Story", priority=None)
-    monkeypatch.setattr(jira_filter, "JiraService", _fake_search([ticket]))
+    fake = _fake_search([ticket])
+    monkeypatch.setattr(jira_filter, "get_ticket_source", lambda project_id: fake(project_id))
 
     with _client() as client:
         response = client.post(
@@ -263,8 +271,8 @@ def test_ticket_filter_sync_runs_a_disabled_filter_on_demand(monkeypatch: pytest
     project_id = StateManager().create_project("Widgets")
     ticket = JiraTicket(key="ENG-1", summary="s", description="", status="To Do", issue_type="Story", priority=None)
     fake = _fake_search([ticket])
-    monkeypatch.setattr(jira_filter, "JiraService", fake)
-    monkeypatch.setattr(epic_sync, "JiraService", fake)
+    monkeypatch.setattr(jira_filter, "get_ticket_source", lambda project_id: fake(project_id))
+    monkeypatch.setattr(epic_sync, "get_ticket_source", lambda project_id: fake(project_id))
 
     with _client() as client:
         client.put(f"/api/projects/{project_id}/ticket-filter", json={"enabled": False, "jira_project_key": "ENG"})

@@ -19,6 +19,8 @@ class _StoryMixin:
         kind_reason: str | None = None,
         parent_key: str | None = None,
         status: str = "pending",
+        external_source: str | None = None,
+        external_id: str | None = None,
     ) -> None:
         with session_scope() as session:
             if session.get(Story, jira_key) is not None:
@@ -27,6 +29,7 @@ class _StoryMixin:
                 jira_key=jira_key, epic_key=epic_key, wave=wave, status=status,
                 summary=summary, description=description,
                 kind=kind, kind_reason=kind_reason, parent_key=parent_key,
+                external_source=external_source, external_id=external_id,
             ))
 
     def list_subtasks(self, parent_key: str) -> list[dict]:
@@ -295,4 +298,7 @@ def _story_to_dict(session, story: Story) -> dict:
         "pr_open_error": story.pr_open_error,
         "retry_count": story.retry_count,
         "failure_stage": story.failure_stage,
+        "external_source": story.external_source,
+        "external_id": story.external_id,
+        "external_synced_at": story.external_synced_at.isoformat() if story.external_synced_at else None,
     }

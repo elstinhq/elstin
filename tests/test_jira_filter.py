@@ -96,9 +96,13 @@ class _FakeJiraService:
     tree_by_root: dict[str, list[JiraTicket]] = {}
     last_jql: str | None = None
     search_error: Exception | None = None
+    name = "jira"
 
     def __init__(self, project_id: int | None = None) -> None:
         self.project_id = project_id
+
+    def compile_filter(self, ticket_filter: dict) -> str:
+        return jira_filter.build_jql(ticket_filter)
 
     def search_tickets(self, jql: str, max_results: int = 50) -> list[JiraTicket]:
         _FakeJiraService.last_jql = jql
@@ -116,8 +120,8 @@ def fake_jira(monkeypatch: pytest.MonkeyPatch):
     _FakeJiraService.tree_by_root = {}
     _FakeJiraService.last_jql = None
     _FakeJiraService.search_error = None
-    monkeypatch.setattr(jira_filter, "JiraService", _FakeJiraService)
-    monkeypatch.setattr(epic_sync, "JiraService", _FakeJiraService)
+    monkeypatch.setattr(jira_filter, "get_ticket_source", lambda project_id: _FakeJiraService(project_id=project_id))
+    monkeypatch.setattr(epic_sync, "get_ticket_source", lambda project_id: _FakeJiraService(project_id=project_id))
     return _FakeJiraService
 
 

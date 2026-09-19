@@ -68,6 +68,15 @@ class Epic(Base):
     # column default stays false for rows created before that contract.
     manual_gate: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
+    # Where this ticket came from — see alembic revision 20260920_0020.
+    # `external_source` is NULL for a ticket created natively on the board.
+    # `external_hash` digests the content as last applied, so a later sync
+    # can tell whether the ticket changed; NULL means baseline unknown.
+    external_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    external_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    external_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    external_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
@@ -163,6 +172,15 @@ class Story(Base):
     # retry means only re-attempting the merge). Cleared on every other
     # status transition, same convention as parked_reason.
     failure_stage: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
+    # Where this ticket came from — see alembic revision 20260920_0020.
+    # `external_source` is NULL for a ticket created natively on the board.
+    # `external_hash` digests the content as last applied, so a later sync
+    # can tell whether the ticket changed; NULL means baseline unknown.
+    external_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    external_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    external_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    external_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(

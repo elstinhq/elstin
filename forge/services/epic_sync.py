@@ -58,7 +58,8 @@ from __future__ import annotations
 
 import logging
 
-from forge.services.jira_service import JiraService, JiraTicket, issue_key_sort_key
+from forge.services.jira_service import JiraTicket, issue_key_sort_key
+from forge.services.ticket_source import get_ticket_source
 from forge.services.story_kind import KIND_QA, classify_story_kind
 from forge.state.manager import StateManager
 
@@ -176,8 +177,8 @@ def sync_epic_from_jira(jira_key: str, *, project_id: int) -> None:
     if existing is not None and existing["project_id"] != project_id:
         raise ValueError(f"{jira_key} already belongs to a different project (project_id={existing['project_id']})")
 
-    svc = JiraService(project_id=project_id)
-    tickets = svc.get_ticket_tree(jira_key)
+    source = get_ticket_source(project_id)
+    tickets = source.get_ticket_tree(jira_key)
     root = next(t for t in tickets if t.key == jira_key)
     descendants = [t for t in tickets if t.key != jira_key]
 
@@ -225,6 +226,7 @@ def sync_epic_from_jira(jira_key: str, *, project_id: int) -> None:
     sm.create_epic(
         jira_key, project_id=project_id, levels=levels,
         summary=root.summary, description=root.description,
+        external_source=source.name, external_id=jira_key,
     )
     sm.set_epic_levels(jira_key, levels)
 
@@ -234,6 +236,7 @@ def sync_epic_from_jira(jira_key: str, *, project_id: int) -> None:
             ticket.key, epic_key=jira_key, wave=wave_of[ticket.key],
             summary=ticket.summary, description=ticket.description,
             kind=kind, kind_reason=reason,
+            external_source=source.name, external_id=ticket.key,
         )
 
     for ticket in subtasks:
@@ -254,6 +257,7 @@ def sync_epic_from_jira(jira_key: str, *, project_id: int) -> None:
             summary=ticket.summary, description=ticket.description,
             kind=parent_kind, kind_reason="inherited_from_parent",
             parent_key=parent_key, status="skipped",
+            external_source=source.name, external_id=ticket.key,
         )
 
 
@@ -272,7 +276,7 @@ def sync_story_from_jira(story_key: str) -> dict:
     if epic is None:
         raise ValueError(f"No such epic: {story['epic_key']}")
 
-    ticket = JiraService(project_id=epic["project_id"]).get_ticket(story_key)
+    ticket = get_ticket_source(epic["project_id"]).get_ticket(story_key)
     sm.update_story_jira_fields(
         story_key, summary=ticket.summary, description=ticket.description or None,
     )
@@ -291,7 +295,7 @@ def sync_epic_fields_from_jira(epic_key: str) -> dict:
     if epic is None:
         raise ValueError(f"No such epic: {epic_key}")
 
-    ticket = JiraService(project_id=epic["project_id"]).get_ticket(epic_key)
+    ticket = get_ticket_source(epic["project_id"]).get_ticket(epic_key)
     sm.update_epic_jira_fields(
         epic_key, summary=ticket.summary, description=ticket.description or None,
     )

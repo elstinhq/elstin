@@ -46,7 +46,7 @@ from forge.orchestration.reconciler import (
 from forge.agents.roles.qa import format_qa_report_comment
 from forge.orchestration.state import initial_state
 from forge.services.github_service import GitHubService, parse_github_remote, push_branch
-from forge.services.jira_service import JiraService
+from forge.services.ticket_source import get_ticket_source, ticket_source_configured
 from forge.services.usage import record_run_outcome
 from forge.state.manager import StateManager
 from forge.tools.codebase_skeleton import build_workspace_skeleton
@@ -279,15 +279,15 @@ def _post_qa_report(sm: StateManager, epic: dict, story_key: str, qa_report: dic
     if not qa_report:
         return
     project_id = epic["project_id"]
-    if not JiraService.is_configured(project_id):
-        logger.info("story %s: JIRA not configured — QA report not posted", story_key)
+    if not ticket_source_configured(project_id):
+        logger.info("story %s: ticket source not configured — QA report not posted", story_key)
         return
     try:
         body = format_qa_report_comment(qa_report, epic_key=epic["jira_key"])
-        if JiraService(project_id=project_id).add_comment(story_key, body):
-            logger.info("story %s: QA report posted to JIRA", story_key)
+        if get_ticket_source(project_id).add_comment(story_key, body):
+            logger.info("story %s: QA report posted to the ticket source", story_key)
     except Exception as exc:  # noqa: BLE001 — best-effort, the run itself already succeeded
-        logger.warning("story %s: could not post QA report to JIRA: %s", story_key, exc)
+        logger.warning("story %s: could not post QA report to the ticket source: %s", story_key, exc)
 
 
 async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, resume: bool) -> None:

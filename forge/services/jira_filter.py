@@ -68,7 +68,8 @@ import re
 from dataclasses import dataclass
 
 from forge.services.epic_sync import is_jira_subtask, sync_epic_from_jira
-from forge.services.jira_service import JiraService, JiraTicket, issue_key_sort_key
+from forge.services.jira_service import JiraTicket, issue_key_sort_key
+from forge.services.ticket_source import get_ticket_source
 from forge.state.manager import StateManager
 
 logger = logging.getLogger("forge.jira_filter")
@@ -252,8 +253,9 @@ def _resolve_filter(project_id: int, ticket_filter: dict | None, sm: StateManage
 
 
 def search_matching_tickets(project_id: int, ticket_filter: dict) -> tuple[str, list[JiraTicket]]:
-    jql = build_jql(ticket_filter)
-    tickets = JiraService(project_id=project_id).search_tickets(jql, max_results=MAX_FILTER_RESULTS)
+    source = get_ticket_source(project_id)
+    jql = source.compile_filter(ticket_filter)
+    tickets = source.search_tickets(jql, max_results=MAX_FILTER_RESULTS)
     logger.info("project %s filter matched %d ticket(s): %s", project_id, len(tickets), jql)
     return jql, tickets
 

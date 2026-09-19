@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from jira import JIRA, JIRAError
 
 from forge.config.store import get_config, resolve_bool_config, resolve_config
+from forge.services.ticket_source import Ticket
 
 logger = logging.getLogger("forge.jira_service")
 
@@ -26,22 +26,9 @@ _MAX_SYNC_TICKETS = 200
 _MAX_REFERENCED_TICKETS = 5
 
 
-@dataclass
-class JiraTicket:
-    key: str
-    summary: str
-    description: str
-    status: str
-    issue_type: str
-    priority: str | None
-    parent_key: str | None = None
-    acceptance_criteria: list[str] = field(default_factory=list)
-    linked_issues: list[dict] = field(default_factory=list)
-    attachments: list[dict] = field(default_factory=list)
-    # Carried through purely so story-kind classification has an explicit,
-    # human-set signal to prefer over prose heuristics — see
-    # forge/services/story_kind.py.
-    labels: list[str] = field(default_factory=list)
+# The ticket shape moved to forge/services/ticket_source.py so it is not
+# JIRA's; the old name stays because every existing caller and test uses it.
+JiraTicket = Ticket
 
 
 class JiraService:
@@ -50,6 +37,8 @@ class JiraService:
     as a project-specific override (see forge.config.store.resolve_config).
     `project_id=None` means global-only, the same behavior as before
     projects existed."""
+
+    name = "jira"
 
     def __init__(self, project_id: int | None = None) -> None:
         self.project_id = project_id
@@ -102,6 +91,13 @@ class JiraService:
             fields="summary,description,status,issuetype,priority,issuelinks,attachment,parent",
         )
         return [self._parse_issue(issue) for issue in issues]
+
+    def compile_filter(self, ticket_filter: dict) -> str:
+        """The project's saved filter parts as JQL. Imported here because
+        forge/services/jira_filter.py imports this module."""
+        from forge.services.jira_filter import build_jql
+
+        return build_jql(ticket_filter)
 
     def get_ticket(self, issue_key: str) -> JiraTicket:
         logger.info("Fetching JIRA issue %s", issue_key)

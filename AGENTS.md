@@ -553,6 +553,7 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | New language support | `tools/*_tools.py` + `language_hooks.py` |
 | Sync / levels / kind | `services/epic_sync.py`, `services/story_kind.py` |
 | Filter-based ingestion | `services/jira_filter.py`, `daemon/ticket_sync.py` |
+| Which system tickets come from (source per project, neutral `Ticket`) | `services/ticket_source.py` — sync code calls `get_ticket_source(project_id)`, never `JiraService` directly |
 | Live activity / streaming | `services/activity_stream.py`, `api/run_routes.py` |
 | Graph routing / gates | `orchestration/graph.py`, `config/store.py` |
 | Dispatch / PR / CI | `daemon/main.py`, `orchestration/integration.py` |

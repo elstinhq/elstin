@@ -37,6 +37,7 @@ class _FakeJiraService:
     tree_by_root: dict[str, list[JiraTicket]] = {}
     ticket_by_key: dict[str, JiraTicket] = {}
     raise_error: Exception | None = None
+    name = "jira"
 
     def __init__(self, project_id: int | None = None) -> None:
         self.project_id = project_id
@@ -57,7 +58,7 @@ def _patch_jira(monkeypatch: pytest.MonkeyPatch):
     _FakeJiraService.tree_by_root = {}
     _FakeJiraService.ticket_by_key = {}
     _FakeJiraService.raise_error = None
-    monkeypatch.setattr(epic_sync, "JiraService", _FakeJiraService)
+    monkeypatch.setattr(epic_sync, "get_ticket_source", lambda project_id: _FakeJiraService(project_id=project_id))
 
 
 def test_sync_creates_epic_paused_by_default(project_id):

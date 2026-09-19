@@ -39,7 +39,15 @@ class _ProjectMixin:
             ]
             return result
 
-    def update_project(self, project_id: int, *, name: str | None = None, description: str | None = None) -> None:
+    def get_project_ticket_source(self, project_id: int) -> str | None:
+        with session_scope() as session:
+            project = session.get(Project, project_id)
+            return project.ticket_source if project is not None else None
+
+    def update_project(
+        self, project_id: int, *, name: str | None = None, description: str | None = None,
+        ticket_source: str | None = None,
+    ) -> None:
         with session_scope() as session:
             project = session.get(Project, project_id)
             if project is None:
@@ -48,6 +56,8 @@ class _ProjectMixin:
                 project.name = name
             if description is not None:
                 project.description = description or None
+            if ticket_source is not None:
+                project.ticket_source = ticket_source
 
     def add_project_repo(self, project_id: int, path: str, *, label: str | None = None, clone_url: str | None = None) -> int:
         with session_scope() as session:
@@ -165,6 +175,7 @@ def _project_to_dict(project: Project, repo_count: int, epic_count: int) -> dict
         "id": project.id,
         "name": project.name,
         "description": project.description,
+        "ticket_source": project.ticket_source,
         "repo_count": repo_count,
         "epic_count": epic_count,
         "created_at": project.created_at.isoformat(),
