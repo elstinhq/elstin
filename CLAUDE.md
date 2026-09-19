@@ -134,6 +134,10 @@ stylesheet `<link>`, both of which must run before the JS bundle.
    *Which* tickets arrive in the first place is a third place:
    `forge/services/jira_filter.py` (a project's saved JIRA query, compiled
    to JQL) plus `forge/daemon/ticket_sync.py` (the slow background sweep
-   that re-runs it). A sweep only ever adds: new roots are ingested, roots
-   forge already has are **re-walked** so stories added to them in JIRA
-   later still arrive, and nothing is ever unsynced, paused, or reordered.
+   that re-runs it). A sweep ingests new roots and **re-walks** roots
+   forge already has (and every in-progress epic, matched or not) so stories
+   added later still arrive; nothing is ever unsynced or reordered. The
+   re-walk also reconciles content and closure with the source — see
+   `forge/services/external_sync.py`: text changed under a plan is *held*
+   for a human, never rewritten; closed/deleted tickets stop being
+   dispatched.

@@ -126,3 +126,25 @@ def test_the_migration_backfills_existing_rows_as_jira():
         for table, key in (("epics", "OLD-1"), ("stories", "OLD-2")):
             row = conn.execute(text(f"SELECT external_source, external_id, external_hash, external_synced_at FROM {table} WHERE jira_key = '{key}'")).one()
             assert tuple(row) == ("jira", key, None, None)
+
+
+def test_migrations_produce_every_column_the_models_have_on_the_synced_tables():
+    """create_all bypasses Alembic, so a column added to a model but missing
+    from its migration would pass every other test and break a real deploy."""
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import create_engine, inspect, text
+
+    from forge.db.models import Epic, Project, Story
+
+    engine = create_engine(os.environ["DATABASE_URL"])
+    with engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
+    config = Config("alembic.ini")
+    config.set_main_option("script_location", "alembic")
+    command.upgrade(config, "head")
+
+    for model in (Epic, Story, Project):
+        columns = {c["name"] for c in inspect(engine).get_columns(model.__tablename__)}
+        expected = {c.name for c in model.__table__.columns}
+        assert columns == expected, f"{model.__tablename__}: migration/model drift {expected ^ columns}"

@@ -58,8 +58,9 @@ from __future__ import annotations
 
 import logging
 
+from forge.services.external_sync import ReconcileReport, reconcile_epic
 from forge.services.jira_service import JiraTicket, issue_key_sort_key
-from forge.services.ticket_source import get_ticket_source
+from forge.services.ticket_source import content_hash, get_ticket_source
 from forge.services.story_kind import KIND_QA, classify_story_kind
 from forge.state.manager import StateManager
 
@@ -162,7 +163,7 @@ def relevel_epic(epic_key: str) -> list[list[str]]:
     return levels
 
 
-def sync_epic_from_jira(jira_key: str, *, project_id: int) -> None:
+def sync_epic_from_jira(jira_key: str, *, project_id: int) -> ReconcileReport:
     """Registers the epic and its child tickets under `project_id`, using
     that project's JIRA connection (its own override, or the global
     default — see forge.config.store.resolve_config). Deliberately
@@ -171,7 +172,11 @@ def sync_epic_from_jira(jira_key: str, *, project_id: int) -> None:
     picking a target folder are two independent steps.
 
     Raises ValueError if the epic already exists under a *different*
-    project — re-syncing never silently reassigns an epic's project."""
+    project — re-syncing never silently reassigns an epic's project.
+
+    Walking an epic that is already on the board also reconciles it with the
+    source — content changes and closure — per forge/services/external_sync.py;
+    the returned report says what that did."""
     sm = StateManager()
     existing = sm.get_epic(jira_key)
     if existing is not None and existing["project_id"] != project_id:
@@ -260,6 +265,10 @@ def sync_epic_from_jira(jira_key: str, *, project_id: int) -> None:
             external_source=source.name, external_id=ticket.key,
         )
 
+    return reconcile_epic(
+        sm, source, epic_key=jira_key, root=root, top_level=top_level, subtasks=subtasks, tickets=tickets,
+    )
+
 
 def sync_story_from_jira(story_key: str) -> dict:
     """Pulls the latest summary/description for one already-synced story
@@ -277,8 +286,11 @@ def sync_story_from_jira(story_key: str) -> dict:
         raise ValueError(f"No such epic: {story['epic_key']}")
 
     ticket = get_ticket_source(epic["project_id"]).get_ticket(story_key)
-    sm.update_story_jira_fields(
-        story_key, summary=ticket.summary, description=ticket.description or None,
+    # A person asked for this refresh, so it is applied whatever the story's
+    # state, and it resolves any change that was being held for them.
+    sm.apply_external_content(
+        "story", story_key, summary=ticket.summary, description=ticket.description or None,
+        content_hash=content_hash(ticket.summary, ticket.description),
     )
     logger.info("story %s refreshed from JIRA", story_key)
     refreshed = sm.get_story(story_key)
@@ -296,8 +308,9 @@ def sync_epic_fields_from_jira(epic_key: str) -> dict:
         raise ValueError(f"No such epic: {epic_key}")
 
     ticket = get_ticket_source(epic["project_id"]).get_ticket(epic_key)
-    sm.update_epic_jira_fields(
-        epic_key, summary=ticket.summary, description=ticket.description or None,
+    sm.apply_external_content(
+        "epic", epic_key, summary=ticket.summary, description=ticket.description or None,
+        content_hash=content_hash(ticket.summary, ticket.description),
     )
     logger.info("epic %s fields refreshed from JIRA", epic_key)
     refreshed = sm.get_epic(epic_key)

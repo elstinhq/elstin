@@ -13,6 +13,8 @@ without a caller is a promise nothing checks.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -41,6 +43,17 @@ class Ticket:
     # human-set signal to prefer over prose heuristics — see
     # forge/services/story_kind.py.
     labels: list[str] = field(default_factory=list)
+    # The source considers the ticket finished (JIRA: status category
+    # "done"; GitHub: closed). Sync stops dispatching a closed ticket.
+    closed: bool = False
+
+
+def content_hash(summary: str, description: str | None) -> str:
+    """Digest of what a ticket *says* — the two fields forge copies onto the
+    board. Whitespace at the ends is ignored so a trailing newline the source
+    added does not read as an edit."""
+    payload = json.dumps([(summary or "").strip(), (description or "").strip()])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 class TicketSource(Protocol):
@@ -64,6 +77,15 @@ class TicketSource(Protocol):
         """Post a comment; False when the source is read-only or the write failed."""
 
     def transition_ticket(self, key: str, transition_name: str) -> bool: ...
+
+    def is_missing(self, key: str) -> bool:
+        """True only when the source positively says the ticket does not
+        exist (or is no longer visible to us). A transient failure must
+        raise, not return True — a wrong "missing" skips real work."""
+
+    # Optional: the most tickets get_ticket_tree returns. A tree that hits it
+    # may be truncated, so sync must not read absent tickets as gone.
+    max_tree_tickets: int | None
 
 
 @dataclass(frozen=True)

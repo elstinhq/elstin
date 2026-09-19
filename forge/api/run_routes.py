@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -66,6 +67,12 @@ class StoryRepoRequest(BaseModel):
 
 class StoryKindRequest(BaseModel):
     kind: str
+
+
+class ExternalChangeRequest(BaseModel):
+    # accept: take the new text, keep the plan. replan: take it and start
+    # over. dismiss: keep the current text and stop flagging this version.
+    action: Literal["accept", "replan", "dismiss"]
 
 
 def _story_with_pr(sm: StateManager, story_key: str) -> dict:
@@ -143,6 +150,28 @@ def retry_story(story_key: str, background_tasks: BackgroundTasks) -> dict:
         )
     sm.retry_story(story_key)
     _maybe_trigger_manual_run(sm, story_key, background_tasks)
+    return _story_with_pr(sm, story_key)
+
+
+@router.post("/{story_key}/external-change")
+def resolve_external_change(story_key: str, body: ExternalChangeRequest, background_tasks: BackgroundTasks) -> dict:
+    """A human's answer to a ticket that changed in its source after forge
+    planned or started the story — see forge/services/external_sync.py for
+    why it was held rather than applied."""
+    sm = StateManager()
+    story = sm.get_story(story_key)
+    if story is None:
+        raise HTTPException(status_code=404, detail=f"No such story: {story_key}")
+    if story["external_pending"] is None:
+        raise HTTPException(status_code=409, detail=f"{story_key} has no changed-in-source text waiting")
+    try:
+        sm.resolve_external_change(story_key, body.action)
+    except ValueError as exc:  # a re-plan was asked for while work is in flight
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if body.action == "replan":
+        # A re-planned story goes back to pending; for a manual-mode project
+        # nothing else will start it (same as retry).
+        _maybe_trigger_manual_run(sm, story_key, background_tasks)
     return _story_with_pr(sm, story_key)
 
 

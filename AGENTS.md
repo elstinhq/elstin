@@ -170,14 +170,28 @@ Migrations: `20260919_0018_story_project_repo.py`,
 - **Filter sync:** a project can instead carry one saved JIRA query
   (`ProjectTicketFilter`) that a slow background loop re-runs, ingesting
   every new root it matches. Structured fields compile to JQL in
-  `forge/services/jira_filter.py`; a sweep **only ever adds** — new roots
-  are ingested, and roots forge already has are **re-walked** through the
-  same idempotent `sync_epic_from_jira` so child stories added in JIRA
-  after first ingest still arrive (`create_epic`/`create_story` no-op on
-  existing rows, so a story mid-run is never touched). Sub-tasks, children
-  of other matches, and keys owned by another project are skipped, and
-  nothing is unsynced when a ticket stops matching. Ingested epics land
-  paused and folder-less, exactly like "Add ticket".
+  `forge/services/jira_filter.py`. A sweep ingests every new root, and
+  **re-walks** roots forge already has (and every epic still in progress,
+  whether or not the filter matches it any more — the filter selects on
+  status, so a finished epic drops out of it) through the idempotent
+  `sync_epic_from_jira`: `create_epic`/`create_story` no-op on existing
+  rows, so a story mid-run is never restructured. The re-walk then
+  reconciles content and closure (below). Sub-tasks, children of other
+  matches, and keys owned by another project are skipped, and nothing is
+  unsynced when a ticket stops matching. Ingested epics land paused and
+  folder-less, exactly like "Add ticket".
+- **The board vs. its source** (`forge/services/external_sync.py`,
+  `ticket_source.py`): the Postgres board is what agents read; the source
+  owns what a ticket *says*. A ticket whose text changed is applied at once
+  when no plan depends on it (unplanned or finished story, sub-task, epic)
+  and **held** on the story (`external_pending`) when one does — a human
+  applies it, applies and re-plans, or dismisses it
+  (`POST /api/stories/{key}/external-change`). A ticket the source reports
+  closed or deleted stops being dispatched: an unstarted story becomes
+  `skipped` (parked_reason `closed_externally`), an in-flight one is only
+  flagged, a closed epic is put on hold. A story is only called deleted
+  after the source confirms it, and never from a walk that hit its size cap.
+  Orchestration state (kind, gates, worktrees, PRs, levels) is never touched.
 - Migrations: `alembic/versions/20260817_0007_story_kind.py`,
   `20260817_0008_story_parent.py`.
 

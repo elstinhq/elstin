@@ -39,6 +39,7 @@ class JiraService:
     projects existed."""
 
     name = "jira"
+    max_tree_tickets = _MAX_SYNC_TICKETS
 
     def __init__(self, project_id: int | None = None) -> None:
         self.project_id = project_id
@@ -98,6 +99,15 @@ class JiraService:
         from forge.services.jira_filter import build_jql
 
         return build_jql(ticket_filter)
+
+    def is_missing(self, key: str) -> bool:
+        try:
+            self._client.issue(key, fields="summary")
+        except JIRAError as exc:
+            if exc.status_code == 404:
+                return True
+            raise
+        return False
 
     def get_ticket(self, issue_key: str) -> JiraTicket:
         logger.info("Fetching JIRA issue %s", issue_key)
@@ -315,7 +325,15 @@ class JiraService:
             linked_issues=linked,
             attachments=image_attachments,
             labels=list(getattr(fields, "labels", None) or []),
+            closed=_status_is_done(fields.status),
         )
+
+
+def _status_is_done(status) -> bool:
+    """JIRA groups every workflow's statuses into three categories; "done"
+    is the one that means finished regardless of what the team calls it."""
+    category = getattr(status, "statusCategory", None)
+    return (getattr(category, "key", "") or "").lower() == "done"
 
 
 # ---------------------------------------------------------------------------

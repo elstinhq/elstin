@@ -247,10 +247,10 @@ def test_sync_continues_past_one_failing_ticket(project_id, fake_jira, monkeypat
 
     real_sync = jira_filter.sync_epic_from_jira
 
-    def _flaky(jira_key: str, *, project_id: int) -> None:
+    def _flaky(jira_key: str, *, project_id: int):
         if jira_key == "ENG-1":
             raise RuntimeError("boom")
-        real_sync(jira_key, project_id=project_id)
+        return real_sync(jira_key, project_id=project_id)
 
     monkeypatch.setattr(jira_filter, "sync_epic_from_jira", _flaky)
 

@@ -301,4 +301,9 @@ def _story_to_dict(session, story: Story) -> dict:
         "external_source": story.external_source,
         "external_id": story.external_id,
         "external_synced_at": story.external_synced_at.isoformat() if story.external_synced_at else None,
+        "external_hash": story.external_hash,
+        "external_status": story.external_status,
+        "external_closed": story.external_closed,
+        "external_pending": story.external_pending,
+        "external_changed_at": story.external_changed_at.isoformat() if story.external_changed_at else None,
     }

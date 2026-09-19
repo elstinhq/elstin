@@ -76,6 +76,13 @@ class Epic(Base):
     external_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
     external_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     external_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # What the last sync saw — alembic revision 20260920_0021. `external_hash`
+    # above is the digest of source content last *resolved* (applied or
+    # dismissed by a human), not merely last seen.
+    external_status: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # The source says this ticket is done, closed, or gone. Not-yet-started
+    # stories are skipped, in-flight ones only flagged, epics put on hold.
+    external_closed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
@@ -181,6 +188,18 @@ class Story(Base):
     external_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
     external_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     external_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # What the last sync saw — alembic revision 20260920_0021. `external_hash`
+    # above is the digest of source content last *resolved* (applied or
+    # dismissed by a human), not merely last seen.
+    external_status: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # The source says this ticket is done, closed, or gone. Not-yet-started
+    # stories are skipped, in-flight ones only flagged, epics put on hold.
+    external_closed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    # Content the source changed after this story was planned or started,
+    # held for a human: {"summary", "description", "hash", "reasons"} — only
+    # the keys that changed. NULL = nothing waiting.
+    external_pending: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    external_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(

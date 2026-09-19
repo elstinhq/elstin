@@ -128,4 +128,7 @@ def _epic_to_dict(session, epic: Epic) -> dict:
         "external_source": epic.external_source,
         "external_id": epic.external_id,
         "external_synced_at": epic.external_synced_at.isoformat() if epic.external_synced_at else None,
+        "external_hash": epic.external_hash,
+        "external_status": epic.external_status,
+        "external_closed": epic.external_closed,
     }
