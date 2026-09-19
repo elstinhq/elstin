@@ -34,6 +34,9 @@ class _FakeSource:
     def __init__(self, project_id=None):
         self.project_id = project_id
 
+    def normalize_key(self, raw):
+        return raw
+
     def get_ticket_tree(self, root_key, max_tickets=None):
         return list(_FakeSource.tree[root_key])
 

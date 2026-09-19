@@ -101,6 +101,9 @@ class _FakeJiraService:
     def __init__(self, project_id: int | None = None) -> None:
         self.project_id = project_id
 
+    def normalize_key(self, raw):
+        return raw
+
     def compile_filter(self, ticket_filter: dict) -> str:
         return jira_filter.build_jql(ticket_filter)
 

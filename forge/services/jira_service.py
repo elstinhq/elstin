@@ -93,6 +93,9 @@ class JiraService:
         )
         return [self._parse_issue(issue) for issue in issues]
 
+    def normalize_key(self, raw: str) -> str:
+        return (raw or "").strip()
+
     def compile_filter(self, ticket_filter: dict) -> str:
         """The project's saved filter parts as JQL. Imported here because
         forge/services/jira_filter.py imports this module."""

@@ -42,6 +42,11 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
     ConfigField("github_org", "GitHub organization", False, None, "string"),
     ConfigField("github_token", "GitHub token", True, None, "string"),
     ConfigField(
+        "github_issues_write_enabled",
+        "Allow forge to comment on and close GitHub issues (for projects whose tickets come from GitHub Issues)",
+        False, "false", "bool",
+    ),
+    ConfigField(
         "git_author_name",
         "Commit author name (blank = commits are authored by code_forge itself)",
         False, None, "string",

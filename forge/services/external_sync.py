@@ -191,7 +191,7 @@ def reconcile_epic(
         if row is None:
             continue
         if _reconcile_content(sm, "story", row, ticket, report) and row["parent_key"]:
-            sub_reasons.setdefault(row["parent_key"], []).append(ticket.key)
+            sub_reasons.setdefault(row["parent_key"], []).append(ticket.external_id or ticket.key)
 
     for ticket in top_level:
         row = sm.get_story(ticket.key)

@@ -42,6 +42,9 @@ class _FakeJiraService:
     def __init__(self, project_id: int | None = None) -> None:
         self.project_id = project_id
 
+    def normalize_key(self, raw):
+        return raw
+
     def get_ticket_tree(self, root_key: str, max_tickets: int | None = None) -> list[JiraTicket]:
         if _FakeJiraService.raise_error is not None:
             raise _FakeJiraService.raise_error

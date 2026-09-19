@@ -21,14 +21,20 @@ class _FakeSource:
     def __init__(self, project_id: int | None = None) -> None:
         self.project_id = project_id
 
+    def normalize_key(self, raw):
+        return raw
+
     def get_ticket_tree(self, root_key: str, max_tickets: int | None = None) -> list[JiraTicket]:
         return [JiraTicket(key=root_key, summary="s", description="", status="To Do", issue_type="Story", priority=None)]
 
 
 @pytest.fixture()
 def fake_source_registered(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(ticket_source, "_REGISTRY", dict(ticket_source._REGISTRY))
+    # Defaults first: registering them after the copy below would put them in
+    # the copy only, and the module's "already registered" flag would then
+    # hide their absence from every later test.
     ticket_source._ensure_default_sources_registered()
+    monkeypatch.setattr(ticket_source, "_REGISTRY", dict(ticket_source._REGISTRY))
     ticket_source.register_source("fake", lambda project_id: _FakeSource(project_id), lambda project_id: True)
 
 
@@ -54,9 +60,9 @@ def test_the_project_setting_selects_the_registered_source(fake_source_registere
 def test_an_unregistered_source_fails_loudly_and_counts_as_not_configured():
     sm = StateManager()
     project_id = sm.create_project("Widgets")
-    sm.update_project(project_id, ticket_source="github")  # not written yet
+    sm.update_project(project_id, ticket_source="linear")  # not written
 
-    with pytest.raises(ValueError, match="'github' is not available"):
+    with pytest.raises(ValueError, match="'linear' is not available"):
         ticket_source.get_ticket_source(project_id)
     assert ticket_source.ticket_source_configured(project_id) is False
 

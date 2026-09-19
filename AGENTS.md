@@ -192,6 +192,19 @@ Migrations: `20260919_0018_story_project_repo.py`,
   flagged, a closed epic is put on hold. A story is only called deleted
   after the source confirms it, and never from a walk that hit its size cap.
   Orchestration state (kind, gates, worktrees, PRs, levels) is never touched.
+- **Sources** are per project (`projects.ticket_source`, `PUT
+  /api/projects/{id}`): `jira`, or `github` (`services/github_issues.py`,
+  reads with the global `github_token`; comments/closing are off until
+  `github_issues_write_enabled`). A GitHub issue's board key is
+  `gh.<owner>.<repo>.<number>`, lower-cased — *not* `owner/repo#12`, whose
+  `/` breaks `/api/stories/{key}`, branch names and worktree paths — and
+  the readable `owner/repo#12` is its `external_id`. `normalize_key` turns
+  what a person types (`owner/repo#12`, an issue URL) into the board key;
+  keys over 64 characters (very long owner + repo) are refused. Hierarchy is
+  GitHub sub-issues (root with children = epic, sub-issue of a story =
+  sub-task), dependencies are "blocked by", closed is `state == closed`, kind
+  comes from labels. A source's tickets keep their source if the project is
+  later switched.
 - Migrations: `alembic/versions/20260817_0007_story_kind.py`,
   `20260817_0008_story_parent.py`.
 

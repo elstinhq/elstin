@@ -46,6 +46,10 @@ class Ticket:
     # The source considers the ticket finished (JIRA: status category
     # "done"; GitHub: closed). Sync stops dispatching a closed ticket.
     closed: bool = False
+    # The ticket's id in its source when that is not `key` — a GitHub issue's
+    # key on the board is path-safe (`gh.owner.repo.12`) while its id is
+    # `owner/repo#12`. None means the key is the id (JIRA).
+    external_id: str | None = None
 
 
 def content_hash(summary: str, description: str | None) -> str:
@@ -63,6 +67,10 @@ class TicketSource(Protocol):
 
     def search_tickets(self, query: str, max_results: int = 50) -> list[Ticket]:
         """`query` is in the source's own query language — see `compile_filter`."""
+
+    def normalize_key(self, raw: str) -> str:
+        """What a person typed to add a ticket → the key the board uses.
+        Raises ValueError for something that is not a ticket of this source."""
 
     def get_ticket(self, key: str) -> Ticket: ...
 
@@ -111,9 +119,11 @@ def _ensure_default_sources_registered() -> None:
         return
     _DEFAULTS_REGISTERED = True
 
+    from forge.services.github_issues import GitHubIssuesSource
     from forge.services.jira_service import JiraService
 
     register_source("jira", lambda project_id: JiraService(project_id=project_id), JiraService.is_configured)
+    register_source("github", lambda project_id: GitHubIssuesSource(project_id), GitHubIssuesSource.is_configured)
 
 
 def known_sources() -> list[str]:

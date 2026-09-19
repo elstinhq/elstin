@@ -41,7 +41,7 @@ the rest. Ports follow `FORGE_APP_PORT` / `FORGE_PG_PORT`.
 
 Then open **http://localhost:8000/** to watch epics/stories and
 approve gated steps, or **http://localhost:8000/settings** to fill in your
-JIRA URL/credentials, GitHub org/token, and OpenAI API key (or an
+JIRA URL/credentials (or, for a project that pulls from GitHub Issues, just the GitHub token), GitHub org/token, and OpenAI API key (or an
 OpenAI-compatible endpoint's key + base URL — Azure, OpenRouter, vLLM,
 Ollama, etc.). Nothing is read from a `.env` file — `DATABASE_URL` (wired
 automatically by `docker-compose.yml`) is the only process environment

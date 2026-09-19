@@ -194,6 +194,9 @@ def _fake_search(tickets):
         def __init__(self, project_id=None):
             self.project_id = project_id
 
+        def normalize_key(self, raw):
+            return raw
+
         def compile_filter(self, ticket_filter):
             from forge.services.jira_filter import build_jql
 

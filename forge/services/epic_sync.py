@@ -183,6 +183,7 @@ def sync_epic_from_jira(jira_key: str, *, project_id: int) -> ReconcileReport:
         raise ValueError(f"{jira_key} already belongs to a different project (project_id={existing['project_id']})")
 
     source = get_ticket_source(project_id)
+    jira_key = source.normalize_key(jira_key)
     tickets = source.get_ticket_tree(jira_key)
     root = next(t for t in tickets if t.key == jira_key)
     descendants = [t for t in tickets if t.key != jira_key]
@@ -231,7 +232,7 @@ def sync_epic_from_jira(jira_key: str, *, project_id: int) -> ReconcileReport:
     sm.create_epic(
         jira_key, project_id=project_id, levels=levels,
         summary=root.summary, description=root.description,
-        external_source=source.name, external_id=jira_key,
+        external_source=source.name, external_id=root.external_id or jira_key,
     )
     sm.set_epic_levels(jira_key, levels)
 
@@ -241,7 +242,7 @@ def sync_epic_from_jira(jira_key: str, *, project_id: int) -> ReconcileReport:
             ticket.key, epic_key=jira_key, wave=wave_of[ticket.key],
             summary=ticket.summary, description=ticket.description,
             kind=kind, kind_reason=reason,
-            external_source=source.name, external_id=ticket.key,
+            external_source=source.name, external_id=ticket.external_id or ticket.key,
         )
 
     for ticket in subtasks:
@@ -262,7 +263,7 @@ def sync_epic_from_jira(jira_key: str, *, project_id: int) -> ReconcileReport:
             summary=ticket.summary, description=ticket.description,
             kind=parent_kind, kind_reason="inherited_from_parent",
             parent_key=parent_key, status="skipped",
-            external_source=source.name, external_id=ticket.key,
+            external_source=source.name, external_id=ticket.external_id or ticket.key,
         )
 
     return reconcile_epic(
