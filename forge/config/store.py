@@ -70,6 +70,16 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
     ConfigField("require_pr_open_approval", "Require human approval before opening a PR", False, "true", "bool"),
     ConfigField("require_pr_review", "Require human PR review before merge", False, "true", "bool"),
     ConfigField("dev_sdk_model", "Dev agent model", False, "gpt-5.1", "string"),
+    ConfigField(
+        "dev_web_access_enabled",
+        "Let the dev agent search the web and fetch public pages (docs, package READMEs); internal/private addresses are always refused",
+        False, "true", "bool",
+    ),
+    ConfigField(
+        "brave_search_api_key",
+        "Brave Search API key for the dev agent's web search (blank = fall back to DuckDuckGo, which is unofficial and can rate-limit)",
+        True, None, "string",
+    ),
     ConfigField("dev_sdk_effort", "Dev agent reasoning effort (low/medium/high/xhigh/max)", False, "medium", "string"),
     ConfigField("dev_sdk_max_turns", "Dev agent max turns per run (0 = unbounded)", False, "80", "string"),
     ConfigField("dev_sdk_max_budget_usd", "Dev agent max spend per run in USD (0 = unbounded)", False, "0", "string"),

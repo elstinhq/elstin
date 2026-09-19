@@ -58,14 +58,14 @@ from forge.agents.roles.dev import (
     _plan_path_set,
     build_dev_system,
 )
-from forge.config.store import get_config, get_float_config, get_int_config
+from forge.config.store import get_bool_config, get_config, get_float_config, get_int_config
 from forge.llm.errors import LlmError
 from forge.llm.registry import LlmNotConfiguredError, get_provider
 from forge.llm.types import ContentBlock, LlmResponse, history_from_json, history_to_json, text_message
 from forge.services.run_activity import append_activity
 from forge.services.usage import effective_budget_usd, record_phase_usage, record_run_outcome
 from forge.tools import language_hooks
-from forge.tools.dev_tools import BOOKKEEPING_TOOLS, PROGRESS_TOOLS, READ_ONLY_TOOLS, make_dev_tools
+from forge.tools.dev_tools import BOOKKEEPING_TOOLS, PROGRESS_TOOLS, READ_ONLY_TOOLS, WEB_TOOLS, make_dev_tools
 from forge.tools.progress import render_progress, seed_progress_items
 from forge.tools.workspace import Workspace, labels_in_plan
 from forge.tools.worktree import create_worktree
@@ -328,6 +328,8 @@ async def run_dev(
             default_label=default_label,
             write_roots=write_roots,
             read_roots=read_roots,
+            web_access=get_bool_config("dev_web_access_enabled"),
+            search_api_key=get_config("brave_search_api_key"),
         )
 
         initial_messages = (history_from_json(prior_history) if prior_history else []) + [text_message("user", prompt)]
@@ -342,7 +344,7 @@ async def run_dev(
             max_turns=get_int_config("dev_sdk_max_turns", 80),
             max_budget_usd=dev_budget,
             compaction_token_threshold=get_int_config("agent_compaction_token_threshold", 120_000),
-            read_only_tools=READ_ONLY_TOOLS,
+            read_only_tools=READ_ONLY_TOOLS | WEB_TOOLS,
             progress_tools=PROGRESS_TOOLS,
             bookkeeping_tools=BOOKKEEPING_TOOLS,
             max_idle_turns=get_int_config("dev_sdk_max_idle_turns", 4),
