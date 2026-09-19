@@ -50,7 +50,9 @@ from forge.services.jira_service import JiraService
 from forge.services.usage import record_run_outcome
 from forge.state.manager import StateManager
 from forge.tools.codebase_skeleton import build_workspace_skeleton
-from forge.tools.git_tools import GitMergeError, branch_exists, commit_all, get_branch_diff_summary
+from forge.tools.git_tools import (
+    CODE_FORGE_CO_AUTHOR, GitMergeError, branch_exists, commit_all, get_branch_diff_summary,
+)
 from forge.tools.workspace import build_repo_roots
 from forge.tools.worktree import create_worktree
 
@@ -421,11 +423,12 @@ async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, res
         # has two branches, and each needs its own commit before its own
         # push and PR — git has no cross-repo commit.
         message = f"{story_key}: {story['summary'] or story_key}"
+        author = _commit_author()
         for entry in await asyncio.to_thread(sm.list_story_worktrees, story_key) or [
             {"repo_label": default_label, "worktree_path": worktree_path}
         ]:
             try:
-                commit_sha = await asyncio.to_thread(commit_all, entry["worktree_path"], message)
+                commit_sha = await asyncio.to_thread(commit_all, entry["worktree_path"], message, author=author)
                 if commit_sha:
                     logger.info("story %s: committed %s in repo %s", story_key, commit_sha, entry["repo_label"])
             except GitMergeError as exc:
@@ -440,6 +443,14 @@ async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, res
     # reading, so withholding it on failure would be backwards.
     if story_kind == "qa":
         await asyncio.to_thread(_post_qa_report, sm, epic, story_key, result.get("qa_report") or {})
+
+
+def _commit_author() -> tuple[str, str] | None:
+    """The configured (name, email) commits are credited to, or None when
+    either is unset — commit_all then authors as code_forge itself."""
+    name = (get_config("git_author_name") or "").strip()
+    email = (get_config("git_author_email") or "").strip()
+    return (name, email) if name and email else None
 
 
 def _extract_coverage_gap(result: dict) -> tuple[bool, str | None]:
@@ -487,6 +498,9 @@ def _maybe_open_pull_request(
             "\n\n⚠️ **Coverage gap**: tests pass, but coverage fell short of the "
             "repo's threshold" + (f" ({coverage_gap_detail})" if coverage_gap_detail else "") + "."
         )
+
+    if _commit_author():
+        body += f"\n\n{CODE_FORGE_CO_AUTHOR}"
 
     try:
         gh = GitHubService()

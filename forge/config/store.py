@@ -41,6 +41,16 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
     ),
     ConfigField("github_org", "GitHub organization", False, None, "string"),
     ConfigField("github_token", "GitHub token", True, None, "string"),
+    ConfigField(
+        "git_author_name",
+        "Commit author name (blank = commits are authored by code_forge itself)",
+        False, None, "string",
+    ),
+    ConfigField(
+        "git_author_email",
+        "Commit author email (use the address on your GitHub account so commits are credited to you; code_forge is added as co-author)",
+        False, None, "string",
+    ),
     ConfigField("llm_provider", "LLM provider (only 'openai' is wired today)", False, "openai", "string"),
     ConfigField("openai_api_key", "OpenAI API key", True, None, "string"),
     ConfigField(

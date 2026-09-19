@@ -503,3 +503,40 @@ async def test_a_bad_verifier_reply_fails_one_story_without_abandoning_the_poll_
     assert failed["failure_stage"] == "run"
     # The real assertion: the epic behind the failure still got its turn.
     assert sm.get_story("ENG-11")["status"] == "awaiting_pr_open"
+
+
+async def test_pr_body_names_code_forge_as_co_author_only_when_a_commit_author_is_configured(
+    project_id, monkeypatch: pytest.MonkeyPatch
+):
+    """With no git_author_* set, commits are authored by code_forge itself,
+    so a co-author line would only repeat the author and is left off."""
+    import forge.daemon.main as daemon_main
+
+    bodies: list[str] = []
+
+    class _FakeGitHubService:
+        @staticmethod
+        def is_configured():
+            return True
+
+        def create_pull_request(self, *args, body, **kwargs):
+            bodies.append(body)
+            return {"number": len(bodies), "url": f"https://github.com/acme/repo/pull/{len(bodies)}"}
+
+    monkeypatch.setattr(daemon_main, "GitHubService", _FakeGitHubService)
+    monkeypatch.setattr(daemon_main, "parse_github_remote", lambda project_path: ("acme", "repo"))
+    monkeypatch.setattr(daemon_main, "push_branch", lambda project_path, branch: (True, None))
+
+    sm = StateManager()
+    sm.create_epic("ENG-9", project_id=project_id, levels=[["ENG-10"]], manual_gate=False)
+    sm.create_story("ENG-10", epic_key="ENG-9", wave=0)
+    epic = sm.get_epic("ENG-9")
+
+    daemon_main._maybe_open_pull_request(sm, epic, "ENG-10", "ENG-10-branch", story_repo=epic["repo"])
+    assert "Co-authored-by" not in bodies[0]
+
+    set_config("git_author_name", "Leo Elstin")
+    set_config("git_author_email", "leo@example.com")
+    daemon_main._maybe_open_pull_request(sm, epic, "ENG-10", "ENG-10-branch", story_repo=epic["repo"])
+    assert bodies[1].endswith("Co-authored-by: code_forge <forge@localhost>")
+    assert daemon_main._commit_author() == ("Leo Elstin", "leo@example.com")
