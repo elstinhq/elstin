@@ -428,3 +428,24 @@ def test_a_github_story_key_works_as_a_url_path_segment(gh, github_project):
 
     assert response.status_code == 200
     assert response.json()["external_id"] == "acme/app#2"
+
+
+def test_adding_a_github_issue_by_url_over_http_returns_the_epic_under_its_board_key(gh, github_project):
+    """Regression: the route looked the new epic up by what was typed (the
+    URL) rather than the key it was stored under, so a successful sync
+    answered 404 "No such epic: https://github.com/…"."""
+    from fastapi.testclient import TestClient
+
+    from forge.app import create_app
+
+    _tree(gh)
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/api/epics/sync",
+            json={"jira_key": "https://github.com/acme/app/issues/1", "project_id": github_project},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["jira_key"], body["external_id"], body["summary"]) == ("gh.acme.app.1", "acme/app#1", "Ship login")
+    assert len(body["stories"]) >= 3

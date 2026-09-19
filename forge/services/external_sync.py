@@ -55,6 +55,9 @@ _NOT_STARTED = frozenset({"pending", "awaiting_plan_approval"})
 
 @dataclass
 class ReconcileReport:
+    # The board key of the epic that was walked. What a person typed to add it
+    # (a URL, owner/repo#1) is not the key it is stored under.
+    epic_key: str = ""
     applied: list[str] = field(default_factory=list)
     flagged: list[str] = field(default_factory=list)
     closed: list[str] = field(default_factory=list)  # newly skipped
@@ -177,7 +180,7 @@ def reconcile_epic(
 ) -> ReconcileReport:
     """`tickets` is the whole walk (root included); `top_level`/`subtasks` are
     its split into dispatchable stories and context — see epic_sync."""
-    report = ReconcileReport()
+    report = ReconcileReport(epic_key=epic_key)
 
     epic = sm.get_epic(epic_key)
     if epic is not None:

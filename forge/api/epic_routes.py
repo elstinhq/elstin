@@ -78,7 +78,7 @@ def sync_epic(body: EpicSyncRequest) -> dict:
     if sm.get_project(body.project_id) is None:
         raise HTTPException(status_code=404, detail=f"No such project: {body.project_id}")
     try:
-        sync_epic_from_jira(body.jira_key, project_id=body.project_id)
+        report = sync_epic_from_jira(body.jira_key, project_id=body.project_id)
     except ValueError as exc:  # JIRA not configured, auth failed, or epic belongs to another project
         status = 409 if "different project" in str(exc) else 400
         raise HTTPException(status_code=status, detail=str(exc)) from exc
@@ -88,7 +88,8 @@ def sync_epic(body: EpicSyncRequest) -> dict:
                 status_code=404, detail=f"JIRA issue {body.jira_key} not found or not accessible"
             ) from exc
         raise HTTPException(status_code=502, detail=(exc.text or str(exc))) from exc
-    return get_epic(body.jira_key)
+    # By the key the epic is stored under — what was typed may be a URL.
+    return get_epic(report.epic_key)
 
 
 @router.post("/{epic_key}/sync")

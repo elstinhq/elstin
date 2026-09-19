@@ -72,9 +72,12 @@ def test_get_epic_404_for_unknown_key():
 def test_sync_epic_returns_epic_shape_with_no_repo(project_id, monkeypatch: pytest.MonkeyPatch):
     from forge.state.manager import StateManager
 
-    def fake_sync(jira_key: str, *, project_id: int) -> None:
+    def fake_sync(jira_key: str, *, project_id: int):
+        from forge.services.external_sync import ReconcileReport
+
         StateManager().create_epic(jira_key, project_id=project_id, levels=[["ENG-2"]])
         StateManager().create_story("ENG-2", epic_key=jira_key, wave=0, summary="Add a widget")
+        return ReconcileReport(epic_key=jira_key)
 
     monkeypatch.setattr(epic_routes, "sync_epic_from_jira", fake_sync)
 
