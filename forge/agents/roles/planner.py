@@ -80,6 +80,12 @@ CRITICAL — files_to_modify completeness (the dev agent is BLOCKED from editing
 - Every acceptance criterion must be traceable to at least one file in files_to_create or files_to_modify. If you cannot point to a file that implements a criterion, either add the file or drop the criterion.
 - After drafting the list, re-read each criterion and each action described in the plan and verify the responsible file is present. If it is missing, add it.
 
+CRITICAL — multi-repo projects:
+- When the user message lists more than one repo, the project spans several. Paths with no prefix belong to the default repo; a path in another repo carries its `@label/` prefix, e.g. `@api/src/models/cart.py`.
+- Use the SAME prefix in files_to_create/files_to_modify. That is how you say a change reaches another repo, and it is the only thing that gets the dev agent a worktree there — a file named without its prefix will be created in the wrong repo.
+- Do not split one coherent change across repos unnecessarily, but do not avoid it either: if the UI change requires an API field that does not exist, plan both, each with its own prefix.
+- Every repo is readable while planning, whether or not you plan to change it.
+
 Put read-only reference files in context_files only.
 The PROJECT ARCHITECTURE GUIDE (AGENTS.md) in the user message is the single source of truth for folder layout, naming, DI patterns, state management, routing, and which services to use. Follow it exactly. Do not invent paths, patterns, or dependencies not described there.
 

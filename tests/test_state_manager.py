@@ -147,7 +147,11 @@ def test_pull_request_upsert(project_id):
 
     sm.upsert_pull_request("ENG-2", number=42, url="https://github.com/acme/widgets/pull/42")
     pr = sm.get_pull_request("ENG-2")
-    assert pr == {"story_key": "ENG-2", "number": 42, "url": "https://github.com/acme/widgets/pull/42", "state": "open"}
+    # repo_label is "" for a story that wrote only its default repo.
+    assert pr == {
+        "story_key": "ENG-2", "repo_label": "", "number": 42,
+        "url": "https://github.com/acme/widgets/pull/42", "state": "open",
+    }
 
     sm.upsert_pull_request("ENG-2", state="merged")
     pr = sm.get_pull_request("ENG-2")

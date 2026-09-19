@@ -94,55 +94,47 @@ Entry points (`pyproject.toml`): `forge-daemon`, `forge-mcp-jira`,
 
 ## Multi-repo projects
 
-A project may have several repos (`ProjectRepo` is one-to-many). The
-writable repo belongs to the **story**, not the epic: one epic routinely
-carries an API story and a UI story that must land in different repos.
+**No repo is bound to an epic or a story.** A project may have several
+repos (`ProjectRepo` is one-to-many); all of them are the workspace, the
+planner reads all of them, and **the approved plan decides which ones get
+written**. A story therefore writes one repo or several, discovered from
+the task rather than configured ahead of it.
 
-- `Story.project_repo_id` is the override; NULL inherits
-  `Epic.project_repo_id`, which is the common case. `manager_story`
-  resolves both into `story["repo"]`, so no caller can accidentally use
-  the epic's repo for a story that overrode it. Human override:
-  `PUT /api/stories/{key}/repo` (pending, non-sub-task stories only —
-  the worktree, branch and PR already live in the old repo otherwise).
-- **Every story-scoped git operation keys off `story["repo"]`**: worktree,
-  `project_path`, commit, push, PR open/merge, CI lookup, and the merge
-  into the integration branch. `epic["repo"]` survives only as the
-  default and as the "no folder assigned yet" dispatch gate.
-- The integration branch **name** stays per epic, so a cross-repo epic
-  gets a same-named branch in each repo its stories wrote to. That is
-  what keeps it reviewable as one unit; epic QA diffs every such repo
-  (`other_repo_diffs`) rather than only the epic's default.
-- Every repo on the project *other than the story's own* mounts
-  **read-only**, addressed by an `@label/` prefix (`@api/src/auth.py`).
-  `tools/workspace.py` owns the root set. Labels come from
-  `ProjectRepo.label` (else the directory name), slugified, colliding
-  labels suffixed.
-- **Reads span the project, writes do not.** `read_file_tool`,
-  `grep_tool`/`search_codebase_tool` and `find_files_tool` cover every
-  root and label their hits so a result reads back verbatim. Write tools
-  keep using the worktree path, and plan scope only admits unprefixed
-  relative paths, so a prefixed path cannot reach a write even if a plan
-  names one.
-- The prefix is required, not optional: a bare `api/...` would be
-  ambiguous the moment the story's own repo has a top-level `api/`
-  directory, and an unknown label is an error rather than a silent read
-  of a different file under the name the model asked for.
-- The daemon assembles `{label: path}` (it owns the DB) into
-  `FeatureRunState.reference_roots`, re-supplied on every resume so a repo
-  added or removed since dispatch leaves no stale path in a checkpoint.
-- Reference repos are read at their **clone path, not a worktree**, so
-  they show whatever branch that checkout is on. That is why they are
-  read-only.
-- A single-repo project is byte-identical to before: no note in any tool
-  description, and `make_dev_tools` returns the shared `TOOL_SCHEMAS`
-  object rather than a patched copy, so a cached prompt prefix stays valid.
+- `tools/workspace.py` owns the model: `Workspace(default_label, roots)`.
+  A path with no prefix belongs to the *default* repo (the epic's assigned
+  folder — a default, not a binding); `@label/path` names any other.
+  `labels_in_plan()` is how the written set is derived from the plan.
+- Labels come from `ProjectRepo.label` (else the directory name),
+  slugified, colliding labels suffixed. An unknown label is an **error**,
+  never a silent fallback — resolving it elsewhere would read the wrong
+  file, or land an edit in the wrong repo.
+- **Worktrees are per (story, repo)** (`story_worktrees`), created lazily
+  by `dev_loop` for each repo the plan names, because that set is only
+  known after planning. `Story.worktree_path`/`branch` mirror the default
+  repo's row so the dashboard and single-repo paths are unchanged.
+- **The gate runs per repo.** `run_deterministic_gate` partitions the plan
+  by label and runs `compare_to_plan` in each worktree — a TypeScript UI
+  and a Python API have different analyzers, and a planned API file does
+  not exist in the UI worktree. Reports are merged with paths re-prefixed.
+- **Commit, PR, CI and merge are per repo.** One `PullRequest` per
+  (story, repo); the CI gate is the *conjunction* of every PR, so the UI
+  half cannot merge while the API half is red. The integration branch NAME
+  stays per epic, giving a same-named branch in each repo, which is what
+  keeps a cross-repo epic reviewable as one unit; epic QA diffs all of
+  them.
+- Plan scope still authorises every write. A writable repo is not a
+  free-for-all: the path must be in the plan, prefix included.
+- A single-repo project is byte-identical to before — no prefixes, no note
+  in any tool description, and `make_dev_tools` returns the shared
+  `TOOL_SCHEMAS` object rather than a patched copy.
 
-**Still one repo per story.** Forge does not open two branches for one
-story: there is no cross-repo transaction, so a story half-landing across
-two repos would have nothing to undo it. Work that must change both repos
-is two stories in one epic, which wave ordering already sequences.
+**The trade-off, stated plainly:** a story spanning two repos produces two
+branches and two pull requests, and git has no transaction across them, so
+it can land in one and fail in the other. Forge makes that visible (every
+PR must be green before the merge step) rather than pretending otherwise.
 
-Migrations: `alembic/versions/20260919_0018_story_project_repo.py`.
+Migrations: `20260919_0018_story_project_repo.py`,
+`20260919_0019_multi_repo_stories.py`.
 
 ## Story kinds and hierarchy
 

@@ -42,7 +42,11 @@ def test_list_epics_includes_stories_and_pr_state(project_id):
         story = epics[0]["stories"][0]
         assert story["jira_key"] == "ENG-2"
         assert story["status"] == "awaiting_pr_review"
-        assert story["pull_request"] == {"story_key": "ENG-2", "number": 7, "url": "https://github.com/acme/widgets/pull/7", "state": "open"}
+        # repo_label is "" for a story that wrote only its default repo.
+        assert story["pull_request"] == {
+            "story_key": "ENG-2", "repo_label": "", "number": 7,
+            "url": "https://github.com/acme/widgets/pull/7", "state": "open",
+        }
 
 
 def test_get_epic_by_key(project_id):

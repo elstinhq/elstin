@@ -34,19 +34,21 @@ def _numbered(text: str, *, start_line: int = 1) -> str:
 
 
 def make_planner_tools(
-    *, project_path: str, reference_roots: dict[str, str] | None = None
+    *, project_path: str, repo_roots: dict[str, str] | None = None, default_label: str = ""
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
     """Return (functions_dict, tool_schemas) pre-bound to this run's
     project root — same (functions, schemas) shape as
     forge/tools/dev_tools.py's make_dev_tools(), so both roles hand
     forge/agents/loop.py the same kind of pair.
 
-    reference_roots: {label: path} for the project's other repos
-    (forge/tools/workspace.py). Every tool here reads across them, since
-    planning a UI change usually requires reading the API repo it talks
-    to. With none supplied the behaviour and the prompts are byte-identical
-    to the single-repo case."""
-    workspace = Workspace(primary=project_path, references=dict(reference_roots or {}))
+    repo_roots: {label: path} for EVERY repo on the project
+    (forge/tools/workspace.py). The planner reads all of them, because
+    which repos a task touches is something it works out from the task
+    rather than something configured ahead of it — and the plan it
+    produces is what then decides where dev writes. With none supplied the
+    behaviour and the prompts are byte-identical to the single-repo case."""
+    roots = dict(repo_roots or {default_label: project_path})
+    workspace = Workspace(default_label=default_label, roots=roots)
     workspace_note = workspace.describe()
 
     def read_file_tool(path: str, offset: int | None = None, limit: int | None = None) -> str:
@@ -56,8 +58,7 @@ def make_planner_tools(
                 f"Read the range you actually need (limit <= {MAX_READ_LINES}), or page through the file with offset."
             )
         try:
-            label, relative = workspace.split_reference(path)
-            root = project_path if label is None else workspace.references[label]
+            _label, root, relative = workspace.root_for(path)
             content = read_file(root, relative, offset=offset or 0, limit=limit, max_lines=MAX_READ_LINES)
         except FileNotFoundError:
             return f"File not found: {path}"
@@ -86,7 +87,7 @@ def make_planner_tools(
             try:
                 matches = grep_codebase(root, pattern, max_results=cap - len(lines))
             except Exception as exc:  # noqa: BLE001 - a bad regex or missing rg is data, not a crash
-                failures.append(f"{workspace.display_path(label, '')or 'this repo'}: {exc}")
+                failures.append(f"{label}: {exc}")
                 continue
             lines.extend(
                 f"{workspace.display_path(label, m.file_path)}:{m.line_number}: {m.line_text}" for m in matches

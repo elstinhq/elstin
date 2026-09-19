@@ -51,7 +51,7 @@ from forge.services.usage import record_run_outcome
 from forge.state.manager import StateManager
 from forge.tools.codebase_skeleton import build_workspace_skeleton
 from forge.tools.git_tools import GitMergeError, branch_exists, commit_all, get_branch_diff_summary
-from forge.tools.workspace import build_reference_roots
+from forge.tools.workspace import build_repo_roots
 from forge.tools.worktree import create_worktree
 
 logger = logging.getLogger("forge.daemon")
@@ -123,23 +123,25 @@ def build_context(sm: StateManager, epic: dict) -> OrchestratorContext:
     )
 
 
-def _reference_roots(sm: StateManager, epic: dict, story_repo: str | None) -> dict[str, str]:
-    """{label: path} for every repo on this project except the one THIS
-    story writes to.
+def _workspace_roots(sm: StateManager, epic: dict, default_repo: str | None) -> tuple[str, dict[str, str]]:
+    """(default label, {label: path}) for every repo on this project.
 
-    Keyed on the story's repo rather than the epic's, because they differ
-    exactly when multi-repo support matters: an epic carrying an API story
-    and a UI story has each of them writing to its own repo and reading
-    the other. Assembled here because the daemon owns the DB, the same
-    separation the QA context follows."""
-    if not epic.get("project_id"):
-        return {}
-    repos = sm.list_project_repos(epic["project_id"])
-    return build_reference_roots(repos, story_repo)
+    No repo is bound to the epic or the story. The planner reads all of
+    them and the approved plan decides which ones dev writes, so this is
+    simply the whole project. `default_repo` only fixes which repo an
+    UNPREFIXED path means — the epic's assigned folder. Assembled here
+    because the daemon owns the DB, the same separation the QA context
+    follows."""
+    repos = sm.list_project_repos(epic["project_id"]) if epic.get("project_id") else []
+    return build_repo_roots(repos, default_repo)
 
 
 def _build_story_brief(
-    sm: StateManager, story: dict, repo_path: str | None = None, reference_roots: dict[str, str] | None = None
+    sm: StateManager,
+    story: dict,
+    repo_path: str | None = None,
+    repo_roots: dict[str, str] | None = None,
+    default_label: str = "",
 ) -> str:
     """The `user_request` handed to the planner.
 
@@ -180,7 +182,9 @@ def _build_story_brief(
 
     if repo_path:
         try:
-            skeleton = build_workspace_skeleton(repo_path, reference_roots, max_chars=_MAX_SKELETON_CHARS)
+            skeleton = build_workspace_skeleton(
+                repo_path, repo_roots, default_label=default_label, max_chars=_MAX_SKELETON_CHARS
+            )
         except Exception as exc:  # noqa: BLE001 — a map is a head start, never a reason not to plan
             logger.warning("story %s: could not build codebase skeleton for %s: %s", story["jira_key"], repo_path, exc)
             skeleton = ""
@@ -293,8 +297,21 @@ async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, res
     # operation below is story-scoped, so none of them may use
     # epic["repo"] — an epic whose stories span repos would otherwise
     # branch, commit and open PRs against whichever repo the epic happened
-    # to default to.
+    # to default to. It is only a DEFAULT, though: the plan may name other
+    # repos by prefix, and dev creates a worktree in each of those too.
     story_repo = story.get("repo") or epic["repo"]
+
+    # The whole project's repos. Which of them this story writes is
+    # decided by its plan, inside the run (forge/tools/workspace.py).
+    default_label, repo_roots = await asyncio.to_thread(_workspace_roots, sm, epic, story_repo)
+    known_worktrees = {
+        entry["repo_label"]: {
+            "repo_path": entry["repo_path"],
+            "worktree_path": entry["worktree_path"],
+            "branch": entry["branch"],
+        }
+        for entry in await asyncio.to_thread(sm.list_story_worktrees, story_key)
+    }
 
     if not resume:
         worktrees_base_dir = get_config("worktrees_base_dir") or "/data/repos"
@@ -305,16 +322,16 @@ async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, res
             summary=story["summary"] or story_key,
             worktrees_base_dir=worktrees_base_dir,
             base_ref=epic.get("integration_branch"),
+            repo_label=default_label,
         )
         worktree_path = wt["worktree_path"]
-        sm.set_story_worktree(story_key, worktree_path=worktree_path, branch=wt["branch"])
+        sm.record_story_worktree(
+            story_key, repo_label=default_label, repo_path=story_repo,
+            worktree_path=worktree_path, branch=wt["branch"], is_default=True,
+        )
 
     # thread_id == story_key by construction — one LangGraph run per story,
     # named for exactly the thing it implements.
-    # Read-only sibling repos for this project, so a UI story can read the
-    # API repo it talks to (forge/tools/workspace.py). Empty for a
-    # single-repo project, which leaves every path below unchanged.
-    reference_roots = await asyncio.to_thread(_reference_roots, sm, epic, story_repo)
 
     config = {"configurable": {"thread_id": story_key}}
     async with checkpointer_from_url(get_database_url()) as checkpointer:
@@ -324,7 +341,13 @@ async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, res
             # checkpoint: a repo may have been added to or removed from the
             # project since this run was first dispatched, and a stale
             # absolute path would fail the path guard rather than degrade.
-            patch = {"worktree_path": worktree_path, "story_kind": story_kind, "reference_roots": reference_roots}
+            patch = {
+                "worktree_path": worktree_path,
+                "story_kind": story_kind,
+                "repo_roots": repo_roots,
+                "default_repo_label": default_label,
+                "story_worktrees": known_worktrees,
+            }
             if story_kind == "qa":
                 # Rebuilt rather than reused from the checkpoint: more
                 # stories may have merged since this run was first
@@ -334,16 +357,38 @@ async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, res
             await graph.aupdate_state(config, patch)
             result = await graph.ainvoke(None, config)
         else:
-            brief = await asyncio.to_thread(_build_story_brief, sm, story, story_repo, reference_roots)
+            brief = await asyncio.to_thread(
+                _build_story_brief, sm, story, story_repo, repo_roots, default_label
+            )
             state = initial_state(story_key, brief, story_repo)
             state["worktree_path"] = worktree_path
-            state["reference_roots"] = reference_roots
+            state["repo_roots"] = repo_roots
+            state["default_repo_label"] = default_label
+            state["story_worktrees"] = known_worktrees
             state["story_kind"] = story_kind
             if story_kind == "qa":
                 state["qa_context"] = await asyncio.to_thread(_build_qa_context, sm, epic, story)
             result = await graph.ainvoke(state, config)
 
     sm.set_story_thread_id(story_key, story_key)
+
+    # Record every repo the run turned out to write. dev creates a worktree
+    # per repo the approved plan names, so this set is only known after the
+    # run — that is the whole point of the plan deciding rather than
+    # configuration.
+    for label, entry in (result.get("story_worktrees") or {}).items():
+        if not entry.get("worktree_path") or not entry.get("branch"):
+            continue
+        await asyncio.to_thread(
+            sm.record_story_worktree,
+            story_key,
+            repo_label=label,
+            repo_path=entry.get("repo_path") or "",
+            worktree_path=entry["worktree_path"],
+            branch=entry["branch"],
+            is_default=(label == default_label),
+        )
+
     # The graph's own terminal status, not the coarser story status below:
     # "completed" vs "qa_completed" vs "awaiting_approval" are different
     # run shapes, and the mapping would flatten them.
@@ -372,15 +417,23 @@ async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, res
         # working-tree state: GitHub then rejects PR creation with "No
         # commits between main and <branch>" despite the worktree having
         # real, verified changes sitting there uncommitted.
-        try:
-            commit_sha = await asyncio.to_thread(
-                commit_all, worktree_path, f"{story_key}: {story['summary'] or story_key}"
-            )
-            logger.info("story %s: committed worktree changes %s", story_key, commit_sha)
-        except GitMergeError as exc:
-            sm.set_story_status(story_key, "failed", failure_stage="run")
-            logger.error("story %s: failed to commit worktree changes: %s", story_key, exc)
-            return
+        # One commit per repo the story wrote. A story spanning two repos
+        # has two branches, and each needs its own commit before its own
+        # push and PR — git has no cross-repo commit.
+        message = f"{story_key}: {story['summary'] or story_key}"
+        for entry in await asyncio.to_thread(sm.list_story_worktrees, story_key) or [
+            {"repo_label": default_label, "worktree_path": worktree_path}
+        ]:
+            try:
+                commit_sha = await asyncio.to_thread(commit_all, entry["worktree_path"], message)
+                if commit_sha:
+                    logger.info("story %s: committed %s in repo %s", story_key, commit_sha, entry["repo_label"])
+            except GitMergeError as exc:
+                sm.set_story_status(story_key, "failed", failure_stage="run")
+                logger.error(
+                    "story %s: failed to commit changes in repo %s: %s", story_key, entry["repo_label"], exc
+                )
+                return
 
     # Posted whether the run finished clean or failed on the merged branch's
     # test suite — a failing epic is exactly when the report is most worth
@@ -403,7 +456,7 @@ def _extract_coverage_gap(result: dict) -> tuple[bool, str | None]:
 
 def _maybe_open_pull_request(
     sm: StateManager, epic: dict, story_key: str, branch: str | None,
-    *, story_repo: str, coverage_gap: bool = False, coverage_gap_detail: str | None = None,
+    *, story_repo: str, repo_label: str = "", coverage_gap: bool = False, coverage_gap_detail: str | None = None,
 ) -> None:
     """Push the story branch and open a real GitHub PR once the pr_open_gate
     has cleared (see handle_intent's OpenPullRequest branch), when GitHub is
@@ -444,7 +497,7 @@ def _maybe_open_pull_request(
             title=f"{story_key}: {branch}",
             body=body,
         )
-        sm.upsert_pull_request(story_key, number=pr["number"], url=pr["url"], state="open")
+        sm.upsert_pull_request(story_key, repo_label=repo_label, number=pr["number"], url=pr["url"], state="open")
         sm.set_story_pr_open_error(story_key, None)
         logger.info("story %s: opened PR %s", story_key, pr["url"])
     except Exception as exc:  # noqa: BLE001 — best-effort, story still progresses via forge's own gate
@@ -473,12 +526,15 @@ async def handle_intent(sm: StateManager, epic: dict, intent) -> None:
 
     elif isinstance(intent, OpenPullRequest):
         story = sm.get_story(intent.story_key)
-        await asyncio.to_thread(
-            _maybe_open_pull_request,
-            sm, epic, intent.story_key, story["branch"],
-            story_repo=story.get("repo") or epic["repo"],
-            coverage_gap=story["coverage_gap"], coverage_gap_detail=story["coverage_gap_detail"],
-        )
+        # One PR per repo the story wrote. Two repos means two PRs, both of
+        # which have to be green before the merge step proceeds.
+        for entry in _story_repo_targets(sm, epic, story):
+            await asyncio.to_thread(
+                _maybe_open_pull_request,
+                sm, epic, intent.story_key, entry["branch"],
+                story_repo=entry["repo_path"], repo_label=entry["repo_label"],
+                coverage_gap=story["coverage_gap"], coverage_gap_detail=story["coverage_gap_detail"],
+            )
         sm.set_story_status(intent.story_key, "awaiting_pr_review")
         # Same reasoning as ResumeStory: the approval that cleared the
         # pr_open_gate must not silently pre-clear the pr_review_gate too.
@@ -489,17 +545,29 @@ async def handle_intent(sm: StateManager, epic: dict, intent) -> None:
         if await asyncio.to_thread(_ci_checks_block_merge, sm, epic, intent.story_key):
             return
         worktrees_base_dir = get_config("worktrees_base_dir") or "/data/repos"
-        result = await asyncio.to_thread(
-            # Merged inside the story's own repo. The integration branch
-            # NAME is per epic, so an epic spanning two repos gets a
-            # same-named branch in each — which is what makes a cross-repo
-            # epic reviewable as one unit.
-            merge_story_into_integration, story.get("repo") or epic["repo"], epic_key, story["branch"], worktrees_base_dir
-        )
+        # Merged inside each repo the story wrote. The integration branch
+        # NAME is per epic, so an epic spanning two repos gets a same-named
+        # branch in each — which is what makes a cross-repo epic reviewable
+        # as one unit.
+        targets = _story_repo_targets(sm, epic, story)
+        results = [
+            await asyncio.to_thread(
+                merge_story_into_integration, entry["repo_path"], epic_key, entry["branch"], worktrees_base_dir
+            )
+            for entry in targets
+        ]
+        failed = [(entry, res) for entry, res in zip(targets, results) if not res["applied"]]
+        result = {
+            "applied": bool(results) and not failed,
+            "error": "; ".join(f"{entry['repo_label']}: {res['error']}" for entry, res in failed) or None,
+        }
         if result["applied"]:
             sm.set_story_status(intent.story_key, "merged")
             sm.set_story_gate_approved(intent.story_key, False)
-            await asyncio.to_thread(_maybe_merge_pull_request, sm, epic, intent.story_key)
+            for entry in targets:
+                await asyncio.to_thread(
+                    _maybe_merge_pull_request, sm, epic, intent.story_key, entry["repo_path"], entry["repo_label"]
+                )
             if not epic.get("integration_branch"):
                 sm.set_integration_branch(epic_key, integration_branch_name(epic_key))
             logger.info("story %s merged into %s", intent.story_key, integration_branch_name(epic_key))
@@ -549,67 +617,113 @@ def _ci_checks_block_merge(sm: StateManager, epic: dict, story_key: str) -> bool
     """CI-aware merge gate — don't merge on your own say-so, check real CI
     evidence. Returns True when the merge should NOT proceed this cycle.
 
+    A story that wrote several repos has a PR in each, and ALL of them must
+    be green: merging the UI half of a change while the API half is red is
+    exactly the split-brain that per-repo PRs make possible, so the gate is
+    the conjunction rather than any one PR.
+
     - No PR opened yet, or GitHub not configured: nothing to check — never blocks.
-    - CI pending: block, but leave gate_approved untouched so the next poll
-      cycle re-checks automatically — no re-approval needed once CI finishes.
-    - CI failed: block AND clear gate_approved, forcing a human to look at
-      it and re-approve — a silently-retried merge attempt against a known
-      failure would just spin forever doing nothing useful.
+    - Any PR pending: block, but leave gate_approved untouched so the next
+      poll cycle re-checks automatically — no re-approval needed once CI
+      finishes.
+    - Any PR failed: block AND clear gate_approved, forcing a human to look
+      at it and re-approve — a silently-retried merge attempt against a
+      known failure would just spin forever doing nothing useful.
     """
-    pr = sm.get_pull_request(story_key)
-    if not pr or not pr.get("number") or not GitHubService.is_configured():
+    prs = [pr for pr in sm.list_pull_requests(story_key) if pr.get("number")]
+    if not prs or not GitHubService.is_configured():
         return False
+
     story = sm.get_story(story_key)
-    remote = parse_github_remote((story or {}).get("repo") or epic["repo"])
-    if not remote:
-        return False
-    owner, repo_name = remote
+    by_label = {entry["repo_label"]: entry for entry in _story_repo_targets(sm, epic, story or {})}
 
-    try:
-        status = GitHubService().get_pr_check_status(owner, repo_name, pr["number"])
-    except Exception as exc:  # noqa: BLE001 — treat an unreadable CI status as "not ready" rather than merging blind
-        logger.warning("story %s: could not read CI status for PR #%s: %s", story_key, pr["number"], exc)
+    pending: list[str] = []
+    failed: list[str] = []
+    for pr in prs:
+        target = by_label.get(pr["repo_label"])
+        repo_path = target["repo_path"] if target else ((story or {}).get("repo") or epic["repo"])
+        remote = parse_github_remote(repo_path)
+        if not remote:
+            continue
+        owner, repo_name = remote
+        try:
+            status = GitHubService().get_pr_check_status(owner, repo_name, pr["number"])
+        except Exception as exc:  # noqa: BLE001 — an unreadable CI status is "not ready", never "merge blind"
+            logger.warning("story %s: could not read CI status for PR #%s: %s", story_key, pr["number"], exc)
+            pending.append(f"#{pr['number']}")
+            continue
+        if status == "pending":
+            pending.append(f"#{pr['number']}")
+        elif status != "success":
+            failed.append(f"#{pr['number']}")
+
+    if failed:
+        sm.set_story_gate_approved(story_key, False)
+        sm.set_story_status(story_key, "awaiting_pr_review", parked_reason="ci_failed")
+        logger.warning(
+            "story %s: CI failed for PR(s) %s — approval cleared, needs human attention",
+            story_key, ", ".join(failed),
+        )
         return True
-
-    if status == "success":
-        return False
-    if status == "pending":
+    if pending:
         sm.set_story_status(story_key, "awaiting_pr_review", parked_reason="ci_pending")
-        logger.info("story %s: waiting on CI for PR #%s", story_key, pr["number"])
+        logger.info("story %s: waiting on CI for PR(s) %s", story_key, ", ".join(pending))
         return True
-
-    sm.set_story_gate_approved(story_key, False)
-    sm.set_story_status(story_key, "awaiting_pr_review", parked_reason="ci_failed")
-    logger.warning("story %s: CI failed for PR #%s — approval cleared, needs human attention", story_key, pr["number"])
-    return True
+    return False
 
 
-def _maybe_merge_pull_request(sm: StateManager, epic: dict, story_key: str) -> None:
+def _story_repo_targets(sm: StateManager, epic: dict, story: dict) -> list[dict[str, str]]:
+    """Every (repo, branch) this story produced, for the commit/PR/merge
+    steps to walk.
+
+    Falls back to the story's single repo and branch for a story
+    dispatched before per-repo worktrees existed, so an in-flight story
+    survives the upgrade."""
+    entries = sm.list_story_worktrees(story["jira_key"])
+    if entries:
+        return [
+            {"repo_label": e["repo_label"], "repo_path": e["repo_path"], "branch": e["branch"]}
+            for e in entries
+            if e.get("branch")
+        ]
+    if story.get("branch"):
+        return [
+            {
+                "repo_label": "",
+                "repo_path": story.get("repo") or epic["repo"],
+                "branch": story["branch"],
+            }
+        ]
+    return []
+
+
+def _maybe_merge_pull_request(
+    sm: StateManager, epic: dict, story_key: str, story_repo: str, repo_label: str = ""
+) -> None:
     """Merge the real GitHub PR (if one was opened) once the local
     integration-branch merge has already succeeded. Best-effort, same
     reasoning as _maybe_open_pull_request: forge's own state is the source
     of truth for story progress, a real PR's state trails it."""
-    existing = sm.get_pull_request(story_key)
+    existing = sm.get_pull_request(story_key, repo_label)
     if not existing or not existing.get("number") or not GitHubService.is_configured():
-        sm.upsert_pull_request(story_key, state="merged")
+        sm.upsert_pull_request(story_key, repo_label=repo_label, state="merged")
         return
 
-    story = sm.get_story(story_key)
-    remote = parse_github_remote((story or {}).get("repo") or epic["repo"])
+    remote = parse_github_remote(story_repo)
     if not remote:
-        sm.upsert_pull_request(story_key, state="merged")
+        sm.upsert_pull_request(story_key, repo_label=repo_label, state="merged")
         return
     owner, repo_name = remote
 
     try:
         gh = GitHubService()
         result = gh.merge_pull_request(owner, repo_name, existing["number"])
-        sm.upsert_pull_request(story_key, number=existing["number"], url=existing.get("url"), state="merged" if result.get("merged") else "open")
+        sm.upsert_pull_request(story_key, repo_label=repo_label, number=existing["number"], url=existing.get("url"), state="merged" if result.get("merged") else "open")
         if not result.get("merged"):
             logger.warning("story %s: GitHub reported PR #%s as not merged", story_key, existing["number"])
     except Exception as exc:  # noqa: BLE001 — best-effort; local merge already succeeded
         logger.warning("story %s: PR merge via GitHub API failed: %s", story_key, exc)
-        sm.upsert_pull_request(story_key, number=existing["number"], url=existing.get("url"), state="merged")
+        sm.upsert_pull_request(story_key, repo_label=repo_label, number=existing["number"], url=existing.get("url"), state="merged")
 
 
 async def poll_once(sm: StateManager | None = None) -> None:

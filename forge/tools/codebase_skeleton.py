@@ -144,37 +144,40 @@ def render_skeleton(files: dict[str, list[str]], *, max_chars: int = DEFAULT_MAX
 
 
 def build_workspace_skeleton(
-    primary_path: str,
-    reference_roots: dict[str, str] | None = None,
+    default_path: str,
+    repo_roots: dict[str, str] | None = None,
     *,
+    default_label: str = "",
     max_chars: int = DEFAULT_MAX_CHARS,
 ) -> str:
-    """A skeleton per repo in the workspace, primary first.
+    """A skeleton per repo in the workspace, the default repo first.
 
     The budget is split rather than granted per repo: a project with four
-    repos would otherwise quadruple the brief. The primary repo gets the
-    larger share because it is the one the story changes, and each
-    reference repo's section is labelled with the `@label/` prefix its
-    paths must carry, so the map doubles as documentation of how to
-    address them."""
-    references = dict(reference_roots or {})
-    primary = build_codebase_skeleton(primary_path, max_chars=max_chars if not references else max_chars // 2)
-    if not references:
-        return primary
+    repos would otherwise quadruple the brief. Each non-default repo's
+    section is labelled with the `@label/` prefix its paths must carry, so
+    the map doubles as documentation of how to address them — including
+    in the plan, since a prefixed path in `files_to_modify` is how the
+    planner says "this change also touches that repo"."""
+    roots = dict(repo_roots or {})
+    others = {label: path for label, path in roots.items() if label != default_label}
+    default = build_codebase_skeleton(default_path, max_chars=max_chars if not others else max_chars // 2)
+    if not others:
+        return default
 
-    # Whatever the primary did not use stays available to the references,
-    # so a small primary repo does not waste half the budget.
-    remaining = max(max_chars - len(primary), max_chars // 4)
-    per_reference = max(remaining // len(references), 600)
+    # Whatever the default repo did not use stays available to the rest,
+    # so a small default repo does not waste half the budget.
+    remaining = max(max_chars - len(default), max_chars // 4)
+    per_repo = max(remaining // len(others), 600)
 
-    sections = [primary] if primary else []
-    for label in sorted(references):
-        body = build_codebase_skeleton(references[label], max_chars=per_reference)
+    sections = [default] if default else []
+    for label in sorted(others):
+        body = build_codebase_skeleton(others[label], max_chars=per_repo)
         if not body:
             continue
         sections.append(
-            f"### Reference repo {REFERENCE_SIGIL}{label} (read-only)\n"
-            f"Address these files as {REFERENCE_SIGIL}{label}/<path>. You cannot modify this repo.\n"
+            f"### Repo {REFERENCE_SIGIL}{label}\n"
+            f"Address these files as {REFERENCE_SIGIL}{label}/<path>, including in the plan's "
+            f"files_to_create/files_to_modify if the change reaches this repo.\n"
             + body
         )
     return "\n\n".join(sections)

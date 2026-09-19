@@ -67,6 +67,8 @@ from forge.services.usage import effective_budget_usd, record_phase_usage, recor
 from forge.tools import language_hooks
 from forge.tools.dev_tools import BOOKKEEPING_TOOLS, PROGRESS_TOOLS, READ_ONLY_TOOLS, make_dev_tools
 from forge.tools.progress import render_progress, seed_progress_items
+from forge.tools.workspace import Workspace, labels_in_plan
+from forge.tools.worktree import create_worktree
 from forge.tools.worktree_sync import sync_planned_files_from_project
 
 logger = logging.getLogger("forge.dev_loop")
@@ -127,7 +129,9 @@ async def run_dev(
     run_id: str | None = None,
     prior_history: list[dict[str, Any]] | None = None,
     prior_progress: list[dict[str, str]] | None = None,
-    reference_roots: dict[str, str] | None = None,
+    repo_roots: dict[str, str] | None = None,
+    default_label: str = "",
+    story_worktrees: dict[str, dict[str, str]] | None = None,
     gate_feedback: str | None = None,
     sdk_model: str | None = None,
     sdk_effort: str | None = None,
@@ -143,7 +147,16 @@ async def run_dev(
     prior_progress: the checklist this story's earlier dev pass left behind
     (forge/tools/progress.py). Carried forward so a fix round resumes the
     same bookkeeping rather than re-deriving it from the plan and
-    reporting every already-written file as pending."""
+    reporting every already-written file as pending.
+
+    repo_roots / default_label / story_worktrees: the workspace
+    (forge/tools/workspace.py). `repo_roots` is every repo on the project
+    at its checkout; `story_worktrees` is the worktrees this story already
+    has, keyed by label. Which repos this story WRITES comes from the
+    approved plan, not from either of those — a prefixed path in
+    files_to_create/files_to_modify names its repo, and a worktree is
+    created here for any such repo that does not have one yet. That is why
+    the set can be one repo or several and is discovered per task."""
     continuing = bool(prior_history)
     resolved_model = sdk_model or get_config("dev_sdk_model")
     logger.info("Dev starting worktree=%s model=%s resume=%s", worktree_path, resolved_model, continuing)
@@ -220,7 +233,69 @@ async def run_dev(
             append_activity(run_id, type="tool", phase="dev", title=f"Synced {len(synced)} file(s) from project", files=synced, meta={"tool": "sync_planned_files"})
 
         allowed_paths = _plan_path_set(plan)
-        analyze_targets, planned_test_files = language_hooks.classify_targets(worktree_path, allowed_paths)
+
+        # --- which repos does this plan write? ---------------------------
+        roots = dict(repo_roots or {default_label: worktree_path})
+        existing = {label: entry["worktree_path"] for label, entry in (story_worktrees or {}).items()}
+        existing.setdefault(default_label, worktree_path)
+
+        write_roots: dict[str, str] = {}
+        created: dict[str, dict[str, str]] = {}
+        for label in labels_in_plan(plan, default_label):
+            if label in existing:
+                write_roots[label] = existing[label]
+                continue
+            repo_path = roots.get(label)
+            if repo_path is None:
+                # The plan named a repo this project does not have. Skip it
+                # rather than fail: plan scope will refuse the writes, and
+                # the gate will report the planned files as missing, which
+                # is a far more legible failure than a worktree error.
+                logger.warning("plan references unknown repo %r — skipping worktree creation", label)
+                continue
+            wt = await asyncio.to_thread(
+                create_worktree,
+                repo_path,
+                story_key=run_id or "story",
+                summary=plan.get("feature_summary") or (run_id or "story"),
+                worktrees_base_dir=get_config("worktrees_base_dir") or "/data/repos",
+                repo_label=label,
+            )
+            write_roots[label] = wt["worktree_path"]
+            created[label] = {"repo_path": repo_path, "worktree_path": wt["worktree_path"], "branch": wt["branch"]}
+            logger.info("created worktree for repo %s at %s", label, wt["worktree_path"])
+            if run_id:
+                append_activity(
+                    run_id, type="status", phase="dev",
+                    title=f"Created a worktree in repo {label}",
+                    detail=f"The plan writes {label}; branch {wt['branch']}",
+                )
+        write_roots.setdefault(default_label, worktree_path)
+
+        # Readable everywhere: a repo with a worktree is read there (so dev
+        # sees what it just wrote), any other repo at its own checkout.
+        read_roots = {**roots, **existing, **write_roots}
+
+        # Analyze/test targets are classified inside the repo that owns
+        # them — a TypeScript UI and a Python API have different profiles,
+        # and classifying both against one worktree would mislabel one.
+        workspace = Workspace(default_label=default_label, roots=write_roots)
+        analyze_targets: list[str] = []
+        planned_test_files: list[str] = []
+        by_label: dict[str, list[str]] = {}
+        for display in allowed_paths:
+            try:
+                label, relative = workspace.split(display)
+            except Exception:  # noqa: BLE001 — an unknown repo is not fatal here
+                continue
+            by_label.setdefault(label, []).append(relative)
+        for label, relatives in by_label.items():
+            root = write_roots.get(label)
+            if not root:
+                continue
+            repo_analyze, repo_tests = language_hooks.classify_targets(root, set(relatives))
+            analyze_targets.extend(workspace.display_path(label, t) for t in repo_analyze)
+            planned_test_files.extend(workspace.display_path(label, t) for t in repo_tests)
         allow_test_run = bool(planned_test_files)
 
         if gate_feedback:
@@ -250,9 +325,9 @@ async def run_dev(
             planned_test_files=planned_test_files,
             baseline_dir=baseline_dir,
             progress_items=progress_items,
-            # Reads may span the project's other repos; writes stay in this
-            # worktree (forge/tools/workspace.py).
-            reference_roots=reference_roots,
+            default_label=default_label,
+            write_roots=write_roots,
+            read_roots=read_roots,
         )
 
         initial_messages = (history_from_json(prior_history) if prior_history else []) + [text_message("user", prompt)]
@@ -322,7 +397,9 @@ async def run_dev(
 
         logger.info("Dev loop finished run_id=%s truncated=%s turns=%d", run_id, truncated, result.turns_used)
 
-        file_changes, dev_verify_state = await asyncio.to_thread(_finalize_dev_changes, worktree_path, plan)
+        file_changes, dev_verify_state = await asyncio.to_thread(
+            _finalize_dev_changes, write_roots, plan, default_label
+        )
     finally:
         if run_id:
             record_phase_usage(
@@ -340,6 +417,14 @@ async def run_dev(
         "messages": [{"role": "dev", "content": dev_summary_holder["text"]}],
         "dev_history": history_to_json(result.history),
         "dev_progress": progress_items,
+        # Every repo this story now has a worktree in, for the daemon to
+        # record and to commit/push/PR per repo afterwards.
+        "story_worktrees": {
+            **(story_worktrees or {}),
+            **created,
+            default_label: (story_worktrees or {}).get(default_label)
+            or {"repo_path": roots.get(default_label, ""), "worktree_path": worktree_path, "branch": ""},
+        },
         # {profile_key: state} — e.g. Dart's build_runner signature. Fed
         # back into the verifier as VerifyContext.prior_state per profile.
         "dev_build_runner": dev_verify_state,

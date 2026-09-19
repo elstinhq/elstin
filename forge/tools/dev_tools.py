@@ -22,6 +22,7 @@ from forge.tools.edit_file import EditFileError, edit_file
 from forge.tools.filesystem import roll_back_file, snapshot_baseline, write_file
 from forge.tools.grep import MAX_READ_LINES, grep_codebase, read_file
 from forge.tools.language_hooks import run_analyze
+from forge.tools.path_guard import PathGuardError
 from forge.tools.progress import PROGRESS_STATUSES, merge_progress_update, render_progress
 from forge.tools.safe_shell import run_safe_command
 from forge.tools.workspace import Workspace
@@ -61,13 +62,15 @@ def _truncate_tail(text: str, limit: int) -> str:
     return f"...[truncated {len(text) - limit} chars]...\n{text[-limit:]}"
 
 
-def _scoped_analyze(worktree_path: str, analyze_targets: list[str]) -> str:
+def _analyze_one_repo(worktree_path: str, analyze_targets: list[str]) -> dict[str, Any] | None:
+    """Analyze one repo's slice of the planned files, or None when it has
+    no planned file on disk yet."""
     targets = [rel for rel in analyze_targets if os.path.isfile(os.path.join(worktree_path, rel))]
     if not targets:
-        return "No planned source files exist yet — create them before analyzing."
+        return None
     result = run_analyze(worktree_path, targets)
     if result.get("skipped"):
-        return json.dumps({"passed": True, "skipped": True, "reason": result.get("reason", "")}, indent=2)
+        return {"passed": True, "skipped": True, "reason": result.get("reason", ""), "targets": targets}
     payload: dict[str, Any] = {
         "passed": result.get("passed", False),
         "error_count": result.get("error_count", 0),
@@ -76,7 +79,54 @@ def _scoped_analyze(worktree_path: str, analyze_targets: list[str]) -> str:
     }
     if not payload["passed"] and not payload["error_lines"]:
         payload["output_tail"] = _truncate_tail(result.get("stdout") or result.get("stderr") or "", 1500)
-    return json.dumps(payload, indent=2)
+    return payload
+
+
+def _scoped_analyze(workspace: Workspace, analyze_targets: list[str]) -> str:
+    """Compile/lint every repo the plan touches, each with its own
+    toolchain in its own worktree.
+
+    A story spanning a TypeScript UI and a Python API has two different
+    analyzers to run, and a single combined pass would use whichever
+    profile the default repo happens to declare. Partitioning by repo
+    first is what makes the check mean anything for the others. Error
+    lines are prefixed with the repo label so a path in the output reads
+    back as a path the model can open."""
+    by_label: dict[str, list[str]] = {}
+    for display in analyze_targets:
+        try:
+            label, relative = workspace.split(display)
+        except Exception:  # noqa: BLE001 — an unknown label is data, not a crash
+            continue
+        by_label.setdefault(label, []).append(relative)
+
+    reports: dict[str, Any] = {}
+    for label, targets in by_label.items():
+        root = workspace.roots.get(label)
+        if not root:
+            continue
+        report = _analyze_one_repo(root, targets)
+        if report is not None:
+            report["targets"] = [workspace.display_path(label, t) for t in report["targets"]]
+            report["error_lines"] = [
+                f"{workspace.display_path(label, '')}{line}" if label != workspace.default_label else line
+                for line in report.get("error_lines", [])
+            ]
+            reports[label] = report
+
+    if not reports:
+        return "No planned source files exist yet — create them before analyzing."
+    if len(reports) == 1 and workspace.default_label in reports:
+        # Single-repo output shape, unchanged from before multi-repo.
+        return json.dumps(reports[workspace.default_label], indent=2)
+    return json.dumps(
+        {
+            "passed": all(r.get("passed", False) for r in reports.values()),
+            "error_count": sum(r.get("error_count", 0) or 0 for r in reports.values()),
+            "repos": reports,
+        },
+        indent=2,
+    )
 
 
 def _guard_run_command(
@@ -310,10 +360,18 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 ]
 
 
-# The tools that can reach a reference repo. Everything else is
-# primary-only by construction, so naming them here keeps the schema
-# patch below honest about which descriptions may claim otherwise.
-_WORKSPACE_AWARE_TOOLS = ("read_file_tool", "search_codebase_tool")
+# The tools whose paths may carry a repo prefix: the reads, which span
+# every repo, and the writes, which reach whichever repos the approved
+# plan names. The rest (analyze, run_command, rollback bookkeeping) act on
+# the workspace as a whole or on the default repo, so mentioning prefixes
+# in their descriptions would only mislead.
+_WORKSPACE_AWARE_TOOLS = (
+    "read_file_tool",
+    "search_codebase_tool",
+    "write_file_tool",
+    "edit_file_tool",
+    "apply_edits_tool",
+)
 
 
 def _schemas_with_workspace_note(note: str) -> list[dict[str, Any]]:
@@ -343,7 +401,9 @@ def make_dev_tools(
     planned_test_files: list[str],
     baseline_dir: str | None = None,
     progress_items: list[dict[str, str]] | None = None,
-    reference_roots: dict[str, str] | None = None,
+    default_label: str = "",
+    write_roots: dict[str, str] | None = None,
+    read_roots: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Return (functions_dict, tool_schemas) pre-bound to this run's
     worktree and plan scope.
@@ -355,14 +415,37 @@ def make_dev_tools(
     effect but still offers it, so the model never gets an unknown-tool
     error for calling something the prompt told it to call.
 
-    reference_roots: {label: path} for the project's other repos
-    (forge/tools/workspace.py). READS span them; every write tool keeps
-    using worktree_path directly and `_scope_error` only ever admits
-    plan-scoped relative paths, so a prefixed path can never reach a
-    write. That asymmetry is the point: the story's branch, commit and
-    pull request all belong to one repo."""
-    workspace = Workspace(primary=worktree_path, references=dict(reference_roots or {}))
-    workspace_note = workspace.describe()
+    write_roots: {label: worktree path} for every repo the approved plan
+    writes — derived from the plan, not configured, so a story touches
+    one repo or several depending on the task
+    (forge/tools/workspace.py). Defaults to the single default-label
+    worktree.
+
+    read_roots: {label: path} for every repo the story may READ. Wider
+    than write_roots: a repo the plan does not change is still readable,
+    at its own checkout, so a UI change can be written against the API
+    contract it has to match. Defaults to write_roots.
+
+    Plan scope is still the only thing that authorises a write:
+    `allowed_paths` holds the plan's paths in display form (`@api/x.py`
+    for a non-default repo), and a write to anything else is refused
+    whichever repo it names."""
+    resolved_write = dict(write_roots or {default_label: worktree_path})
+    resolved_read = dict(read_roots or resolved_write)
+    # Reads see every repo; a repo with a worktree is read THERE rather
+    # than at its clone, so dev reads back what it just wrote.
+    resolved_read.update(resolved_write)
+
+    write_workspace = Workspace(default_label=default_label, roots=resolved_write)
+    read_workspace = Workspace(default_label=default_label, roots=resolved_read)
+    workspace_note = read_workspace.describe()
+
+    def _resolve_write(path: str) -> tuple[str, str]:
+        """(worktree root, relative path) for a write. Raises for a repo
+        the plan does not write, which is what stops an edit landing in a
+        repo that has no branch to carry it."""
+        label, relative = write_workspace.split(path)
+        return write_workspace.roots[label], relative
 
     def _scope_error(path: str) -> str | None:
         if _norm_rel(path) in allowed_paths:
@@ -379,8 +462,7 @@ def make_dev_tools(
                 f"Read the range you actually need (limit <= {MAX_READ_LINES}), or page through the file with offset."
             )
         try:
-            label, relative = workspace.split_reference(path)
-            root = worktree_path if label is None else workspace.references[label]
+            _label, root, relative = read_workspace.root_for(path)
             return read_file(root, relative, offset=offset or 0, limit=limit, max_lines=MAX_READ_LINES)
         except Exception as exc:
             return f"Error reading file {path}: {exc}"
@@ -389,12 +471,16 @@ def make_dev_tools(
         blocked = _scope_error(path)
         if blocked:
             return blocked
-        abs_target = os.path.join(worktree_path, _norm_rel(path))
+        try:
+            root, relative = _resolve_write(path)
+        except PathGuardError as exc:
+            return f"BLOCKED: {exc}"
+        abs_target = os.path.join(root, _norm_rel(relative))
         if os.path.isfile(abs_target) and not overwrite:
             return f"BLOCKED: {path} already exists. Use edit_file_tool to change it; only pass overwrite=true if the file is corrupted beyond repair."
         try:
-            snapshot_baseline(baseline_dir, worktree_path, path)
-            write_file(worktree_path, path, content)
+            snapshot_baseline(baseline_dir, root, relative)
+            write_file(root, relative, content)
             return f"Successfully wrote file to {path}."
         except Exception as exc:
             return f"Error writing file {path}: {exc}"
@@ -404,8 +490,12 @@ def make_dev_tools(
         if blocked:
             return blocked
         try:
-            snapshot_baseline(baseline_dir, worktree_path, path)
-            edit_file(worktree_path, path, target_content, replacement_content, allow_multiple=allow_multiple)
+            root, relative = _resolve_write(path)
+        except PathGuardError as exc:
+            return f"BLOCKED: {exc}"
+        try:
+            snapshot_baseline(baseline_dir, root, relative)
+            edit_file(root, relative, target_content, replacement_content, allow_multiple=allow_multiple)
             return f"Successfully replaced content in {path}."
         except EditFileError as exc:
             return f"Edit failed: {exc}"
@@ -424,8 +514,13 @@ def make_dev_tools(
                 results.append(f"[{idx}] {path}: {blocked}")
                 continue
             try:
-                snapshot_baseline(baseline_dir, worktree_path, path)
-                edit_file(worktree_path, path, spec.get("target_content", ""), spec.get("replacement_content", ""), allow_multiple=spec.get("allow_multiple", False))
+                try:
+                    root, relative = _resolve_write(path)
+                except PathGuardError as exc:
+                    results.append(f"[{idx}] {path}: BLOCKED: {exc}")
+                    continue
+                snapshot_baseline(baseline_dir, root, relative)
+                edit_file(root, relative, spec.get("target_content", ""), spec.get("replacement_content", ""), allow_multiple=spec.get("allow_multiple", False))
                 ok += 1
                 results.append(f"[{idx}] {path}: OK")
             except EditFileError as exc:
@@ -439,7 +534,11 @@ def make_dev_tools(
         if blocked:
             return blocked
         try:
-            roll_back_file(worktree_path, path, baseline_dir=baseline_dir)
+            root, relative = _resolve_write(path)
+        except PathGuardError as exc:
+            return f"BLOCKED: {exc}"
+        try:
+            roll_back_file(root, relative, baseline_dir=baseline_dir)
             return f"Successfully rolled back uncommitted changes to {path}."
         except Exception as exc:
             return f"Error rolling back {path}: {exc}"
@@ -447,12 +546,12 @@ def make_dev_tools(
     def search_codebase_tool(query: str) -> str:
         hits: list[dict[str, Any]] = []
         try:
-            for label, root in workspace.read_roots():
+            for label, root in read_workspace.read_roots():
                 if len(hits) >= 15:
                     break
                 for match in grep_codebase(root, query, max_results=15 - len(hits)):
                     hits.append({
-                        "file": workspace.display_path(label, match.file_path),
+                        "file": read_workspace.display_path(label, match.file_path),
                         "line": match.line_number,
                         "text": match.line_text,
                     })
@@ -467,7 +566,7 @@ def make_dev_tools(
             return f"Error looking up SDK symbol {query}: {exc}"
 
     def analyze_changed_files_tool() -> str:
-        return _scoped_analyze(worktree_path, analyze_targets)
+        return _scoped_analyze(write_workspace, analyze_targets)
 
     def update_progress_tool(updates: list[dict[str, Any]]) -> str:
         if progress_items is None:

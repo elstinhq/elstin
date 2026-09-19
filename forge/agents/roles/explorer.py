@@ -206,7 +206,8 @@ async def run_explorer(
     model: str,
     project_path: str,
     area: dict[str, Any],
-    reference_roots: dict[str, str] | None = None,
+    repo_roots: dict[str, str] | None = None,
+    default_label: str = "",
     max_turns: int = DEFAULT_MAX_TURNS,
     max_budget_usd: float = 0.0,
     effort: str | None = None,
@@ -219,7 +220,7 @@ async def run_explorer(
     Never raises: an explorer is an optimization, so a sub-agent that fails
     costs the planner a head start and nothing else. Its own loop already
     retried anything retryable."""
-    tool_fns, tool_schemas = make_planner_tools(project_path=project_path, reference_roots=reference_roots)
+    tool_fns, tool_schemas = make_planner_tools(project_path=project_path, repo_roots=repo_roots, default_label=default_label)
     hints = "\n".join(f"- {h}" for h in area.get("path_hints") or [])
     prompt = (
         f"Investigation task: {area['question']}\n\n"
@@ -276,7 +277,8 @@ async def gather_exploration(
     model: str,
     project_path: str,
     user_request: str,
-    reference_roots: dict[str, str] | None = None,
+    repo_roots: dict[str, str] | None = None,
+    default_label: str = "",
     max_agents: int = DEFAULT_MAX_AGENTS,
     max_turns: int = DEFAULT_MAX_TURNS,
     planner_budget_usd: float = 0.0,
@@ -303,7 +305,8 @@ async def gather_exploration(
     reports = await asyncio.gather(*(
         run_explorer(
             provider=provider, model=model, project_path=project_path, area=area,
-            reference_roots=reference_roots,
+            repo_roots=repo_roots,
+            default_label=default_label,
             max_turns=max_turns, max_budget_usd=budget, effort=effort,
             on_turn=on_turn, run_id=run_id,
         )

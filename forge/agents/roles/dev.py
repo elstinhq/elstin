@@ -21,6 +21,7 @@ from typing import Any
 from forge.tools import language_hooks
 from forge.tools.git_tools import list_changed_files, stage_files
 from forge.tools.grep import read_file
+from forge.tools.workspace import Workspace
 
 DEV_SYSTEM_LOOP_CORE = """You are a senior software developer implementing an approved plan in a git worktree.
 You work iteratively by calling tools. Analyze your progress after each tool result and decide what to do next.
@@ -194,27 +195,50 @@ def _build_iteration_brief(
     return "\n".join(lines)
 
 
-def _finalize_dev_changes(worktree_path: str, plan: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Stage changed files and run any post-edit codegen step each
-    detected language's profile needs (e.g. Dart's build_runner — most
-    languages, including Java, don't have one). Returns (file_changes,
-    dev_verify_state) — dev_verify_state is `{profile_key: state}`, fed
-    back into the verifier as VerifyContext.prior_state per profile."""
-    changed_files = list_changed_files(worktree_path)
+def _finalize_dev_changes(
+    write_roots: dict[str, str], plan: dict[str, Any], default_label: str = ""
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Stage changed files and run any post-edit codegen step each detected
+    language's profile needs (e.g. Dart's build_runner — most languages,
+    including Java, don't have one), in EVERY repo the plan writes.
+
+    Returns (file_changes, dev_verify_state). file_changes carries paths in
+    display form (`@api/x.py` for a non-default repo) so the verifier and
+    the gate can route each one back to the repo it belongs to.
+    dev_verify_state is `{repo_label: {profile_key: state}}` when the story
+    spans repos, and the historical `{profile_key: state}` when it does not
+    — a single-repo run's shape is unchanged."""
+    workspace = Workspace(default_label=default_label, roots=dict(write_roots))
     file_changes: list[dict[str, Any]] = []
-    dev_verify_state: dict[str, Any] = {}
+    per_repo_state: dict[str, Any] = {}
 
-    if not changed_files:
-        return file_changes, dev_verify_state
+    create_paths = {
+        _norm_rel(f.get("path") if isinstance(f, dict) else str(f))
+        for f in plan.get("files_to_create", [])
+        if (f.get("path") if isinstance(f, dict) else f)
+    }
 
-    stage_files(worktree_path, changed_files)
-    for profile in language_hooks.detect_profiles(worktree_path):
-        if profile.after_dev_changes is None:
+    for label, root in workspace.read_roots():
+        changed_files = list_changed_files(root)
+        if not changed_files:
             continue
-        dev_verify_state[profile.key] = profile.after_dev_changes(worktree_path, changed_files)
+        stage_files(root, changed_files)
 
-    create_paths = [f.get("path") for f in plan.get("files_to_create", [])]
-    for path in changed_files:
-        action_type = "create" if path in create_paths else "modify"
-        file_changes.append({"path": path, "action": action_type, "summary": "Updated iteratively by agentic dev loop"})
-    return file_changes, dev_verify_state
+        repo_state: dict[str, Any] = {}
+        for profile in language_hooks.detect_profiles(root):
+            if profile.after_dev_changes is None:
+                continue
+            repo_state[profile.key] = profile.after_dev_changes(root, changed_files)
+        if repo_state:
+            per_repo_state[label] = repo_state
+
+        for path in changed_files:
+            display = workspace.display_path(label, path)
+            action_type = "create" if _norm_rel(display) in create_paths else "modify"
+            file_changes.append(
+                {"path": display, "action": action_type, "summary": "Updated iteratively by agentic dev loop"}
+            )
+
+    if len(workspace.roots) <= 1:
+        return file_changes, per_repo_state.get(default_label, {})
+    return file_changes, per_repo_state

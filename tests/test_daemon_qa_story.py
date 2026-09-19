@@ -278,7 +278,7 @@ def _add_reference_repo(sm, project_id: int, tmp_path, name: str, rel: str, cont
     return str(root)
 
 
-async def test_reference_roots_are_every_project_repo_except_the_storys_own(
+async def test_workspace_roots_cover_every_repo_on_the_project(
     git_repo: str, tmp_path, project_id, monkeypatch
 ):
     monkeypatch.setenv("DATABASE_URL", os.environ["DATABASE_URL"])
@@ -292,14 +292,18 @@ async def test_reference_roots_are_every_project_repo_except_the_storys_own(
 
     epic = sm.get_epic("ENG-1")
 
-    # A story writing to the epic's default repo reads the API repo.
-    assert daemon._reference_roots(sm, epic, git_repo) == {"api": api}
-    # And a story overridden onto the API repo reads the UI one instead —
-    # the writable repo is never among its own references.
-    assert daemon._reference_roots(sm, epic, api) == {"web-ui": git_repo}
+    # Every repo is in the workspace; the default only fixes which one an
+    # unprefixed path means.
+    default_label, roots = daemon._workspace_roots(sm, epic, git_repo)
+    assert default_label == "web-ui"
+    assert roots == {"web-ui": git_repo, "api": api}
+
+    other_default, other_roots = daemon._workspace_roots(sm, epic, api)
+    assert other_default == "api"
+    assert other_roots == roots
 
 
-async def test_story_brief_maps_the_reference_repo_with_its_prefix(
+async def test_story_brief_maps_every_repo_with_its_prefix(
     git_repo: str, tmp_path, project_id, monkeypatch
 ):
     """The skeleton doubles as documentation of how to address the other
@@ -312,14 +316,17 @@ async def test_story_brief_maps_the_reference_repo_with_its_prefix(
     sm.create_story("ENG-2", epic_key="ENG-1", wave=0, summary="Show the cart total")
     api = _add_reference_repo(sm, project_id, tmp_path, "api", "models/cart.py", "class Cart:\n    pass\n")
 
-    brief = daemon._build_story_brief(sm, sm.get_story("ENG-2"), git_repo, {"api": api})
+    brief = daemon._build_story_brief(
+        sm, sm.get_story("ENG-2"), git_repo, {"web-ui": git_repo, "api": api}, "web-ui"
+    )
 
-    assert "### Reference repo @api (read-only)" in brief
+    assert "### Repo @api" in brief
     assert "Address these files as @api/<path>" in brief
+    assert "files_to_create/files_to_modify" in brief  # the plan may name it
     assert "models/: cart.py [Cart]" in brief
 
 
-async def test_dispatch_hands_the_reference_roots_to_the_planner(
+async def test_dispatch_hands_every_repo_to_the_planner(
     git_repo: str, tmp_path, project_id, monkeypatch
 ):
     """End-to-end plumbing: daemon assembles the roots, the graph state
@@ -347,4 +354,5 @@ async def test_dispatch_hands_the_reference_roots_to_the_planner(
 
     await poll_once(sm)
 
-    assert seen["reference_roots"] == {"api": api}
+    assert seen["repo_roots"] == {"web-ui": git_repo, "api": api}
+    assert seen["default_label"] == "web-ui"

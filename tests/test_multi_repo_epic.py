@@ -49,6 +49,10 @@ def split_project(tmp_path, project_id):
     """One project, two repos, one epic with a UI story and an API story.
     The epic defaults to the UI repo; the API story overrides."""
     set_config("worktrees_base_dir", str(tmp_path / "worktrees"))
+    # The dev loop snapshots each file's pre-edit state under data_dir
+    # before touching it; the default is an absolute path no dev machine
+    # has, so an edit would fail for a reason unrelated to multi-repo.
+    set_config("data_dir", str(tmp_path / "data"))
     set_config("openai_api_key", "sk-test")
 
     ui = _make_repo(tmp_path, "web-ui")
@@ -120,16 +124,20 @@ def _owning_repo(worktree_path: str) -> str:
     return os.path.realpath(os.path.dirname(result.stdout.strip()))
 
 
-async def test_each_story_reads_the_other_repo_and_writes_only_its_own(split_project, monkeypatch):
-    """The two halves together: the API story's agents get the UI repo as a
-    read-only reference, and vice versa."""
+async def test_every_story_gets_the_whole_project_to_read(split_project, monkeypatch):
+    """No repo is bound to a story: the planner sees the whole project and
+    works out from the task which repos the change touches. Only the
+    default — the repo an unprefixed path means — differs per story."""
     import forge.orchestration.graph as graph_module
     from tests.conftest import fake_run_planner
 
     seen: dict[str, dict] = {}
 
     async def capturing_planner(**kwargs):
-        seen[kwargs["project_path"]] = kwargs.get("reference_roots") or {}
+        seen[kwargs["project_path"]] = {
+            "repo_roots": kwargs.get("repo_roots") or {},
+            "default_label": kwargs.get("default_label"),
+        }
         return await fake_run_planner(**kwargs)
 
     monkeypatch.setattr(graph_module, "run_planner", capturing_planner)
@@ -137,10 +145,12 @@ async def test_each_story_reads_the_other_repo_and_writes_only_its_own(split_pro
     await poll_once(split_project["sm"])
 
     ui, api = split_project["ui"], split_project["api"]
-    # Each story's writable repo is its project_path, and the OTHER repo is
-    # what it can read. Neither lists itself as a reference.
-    assert seen[ui] == {"api": api}
-    assert seen[api] == {"web-ui": ui}
+    whole_project = {"web-ui": ui, "api": api}
+
+    assert seen[ui]["repo_roots"] == whole_project
+    assert seen[api]["repo_roots"] == whole_project
+    assert seen[ui]["default_label"] == "web-ui"
+    assert seen[api]["default_label"] == "api"
 
 
 async def test_the_branch_and_commit_land_in_the_storys_own_repo(split_project, monkeypatch):
@@ -213,3 +223,96 @@ async def test_repo_override_route_refuses_a_story_already_in_flight(split_proje
         )
 
     assert response.status_code == 409
+
+
+# --- one story, several repos ------------------------------------------
+
+
+async def test_a_single_story_writes_every_repo_its_plan_names(split_project, monkeypatch):
+    """The model the user asked for: nothing binds a repo to the story.
+    The plan names a UI file and an API file, so dev gets a worktree in
+    both, writes both, and the story ends with a branch and a commit in
+    each."""
+    import forge.orchestration.graph as graph_module
+
+    plan = {
+        "feature_summary": "Show the cart total",
+        "files_to_create": [],
+        "files_to_modify": [{"path": "README.md"}, {"path": "@api/README.md"}],
+    }
+
+    async def planner_spanning_both(**kwargs):
+        return {
+            "questions": [],
+            "context_bundle": {},
+            "plan": plan,
+            "acceptance_criteria": [],
+            "messages": [],
+        }
+
+    async def dev_writes_both(**kwargs):
+        # The real dev loop is what creates the extra worktree, so drive
+        # the real one rather than faking its result.
+        from forge.agents.roles.dev_loop import run_dev
+
+        return await run_dev(**kwargs)
+
+    written: list[str] = []
+
+    class _FakeProvider:
+        name = "openai"
+
+        def __init__(self):
+            from forge.llm.base import Capabilities
+
+            self.capabilities = Capabilities()
+            self._turns = [
+                ("apply_edits_tool", {"edits": [
+                    {"path": "README.md", "target_content": "web-ui", "replacement_content": "web-ui + total"},
+                    {"path": "@api/README.md", "target_content": "api", "replacement_content": "api + total"},
+                ]}),
+                None,
+            ]
+
+        async def complete(self, request):
+            from forge.llm.types import LlmResponse, TextBlock, ToolCallBlock, Usage
+
+            step = self._turns.pop(0)
+            if step is None:
+                return LlmResponse(content=[TextBlock(text="done")], stop_reason="end_turn", usage=Usage(), model="m")
+            name, args = step
+            written.append(name)
+            return LlmResponse(
+                content=[ToolCallBlock(id="c1", name=name, arguments=args)],
+                stop_reason="tool_calls", usage=Usage(), model="m",
+            )
+
+    import forge.agents.roles.dev_loop as dev_loop_module
+
+    monkeypatch.setattr(graph_module, "run_planner", planner_spanning_both)
+    monkeypatch.setattr(graph_module, "run_dev", dev_writes_both)
+    monkeypatch.setattr(dev_loop_module, "get_provider", lambda: _FakeProvider())
+
+    sm = split_project["sm"]
+    await poll_once(sm)
+    sm.set_story_gate_approved("ENG-2")
+    await poll_once(sm)
+
+    worktrees = {e["repo_label"]: e for e in sm.list_story_worktrees("ENG-2")}
+
+    # A worktree, and a branch, in BOTH repos — from the plan alone.
+    assert set(worktrees) == {"web-ui", "api"}
+    assert worktrees["web-ui"]["repo_path"] == split_project["ui"]
+    assert worktrees["api"]["repo_path"] == split_project["api"]
+
+    # And the edit landed in each repo's own worktree.
+    assert "total" in open(os.path.join(worktrees["web-ui"]["worktree_path"], "README.md")).read()
+    assert "total" in open(os.path.join(worktrees["api"]["worktree_path"], "README.md")).read()
+
+    # Each repo carries its own commit, because git has no cross-repo one.
+    for entry in worktrees.values():
+        log = subprocess.run(
+            ["git", "-C", entry["worktree_path"], "log", "--oneline", "main..HEAD"],
+            capture_output=True, text=True, check=True,
+        )
+        assert "ENG-2" in log.stdout, entry["repo_label"]

@@ -99,8 +99,20 @@ def _branch_refs(project_path: str, branch: str) -> tuple[bool, bool]:
     return f"refs/heads/{branch}" in refs, f"refs/remotes/origin/{branch}" in refs
 
 
-def resolve_worktree_path(worktrees_base_dir: str, story_key: str) -> str:
-    return os.path.realpath(os.path.join(worktrees_base_dir, story_key.lower()))
+def resolve_worktree_path(worktrees_base_dir: str, story_key: str, repo_label: str | None = None) -> str:
+    """Where one story's worktree for one repo lives.
+
+    A story that writes several repos needs a worktree in each, so the
+    path nests the repo label under the story key. Nesting matters rather
+    than suffixing: putting a second worktree *inside* the first one's
+    directory would make it show up as untracked content in that repo's
+    `git status`, and every changed-file listing forge does would pick it
+    up. `repo_label=None` keeps the flat single-repo path for callers that
+    predate labels."""
+    story_dir = os.path.join(worktrees_base_dir, story_key.lower())
+    if repo_label:
+        return os.path.realpath(os.path.join(story_dir, repo_label))
+    return os.path.realpath(story_dir)
 
 
 def create_worktree(
@@ -110,12 +122,13 @@ def create_worktree(
     summary: str,
     worktrees_base_dir: str,
     base_ref: str | None = None,
+    repo_label: str | None = None,
 ) -> dict:
     if not os.path.isdir(os.path.join(project_path, ".git")):
         raise WorktreeError(f"Not a git repository: {project_path}")
 
     branch = branch_name_for(story_key, summary)
-    worktree_path = resolve_worktree_path(worktrees_base_dir, story_key)
+    worktree_path = resolve_worktree_path(worktrees_base_dir, story_key, repo_label)
 
     with _repo_lock(project_path):
         os.makedirs(os.path.dirname(worktree_path), exist_ok=True)

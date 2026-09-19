@@ -37,12 +37,17 @@ class FeatureRunState(TypedDict, total=False):
     project_path: str
     ticket_id: int | None
     worktree_path: str | None
-    # {label: path} for the project's OTHER repos, read-only
-    # (forge/tools/workspace.py). Assembled by the daemon, which owns the
-    # DB, and carried here as a plain dict because this state is JSON in a
-    # LangGraph checkpoint. Empty for a single-repo project, which is the
-    # case every path through the system still behaves identically for.
-    reference_roots: dict[str, str]
+    # The workspace (forge/tools/workspace.py): every repo on the project
+    # at its checkout, and the label an UNPREFIXED path belongs to. No repo
+    # is bound to the epic or the story — the approved plan names which
+    # repos it writes, and dev creates a worktree for each. Assembled by
+    # the daemon, which owns the DB, and carried as plain dicts because
+    # this state is JSON in a LangGraph checkpoint.
+    repo_roots: dict[str, str]
+    default_repo_label: str
+    # {label: {repo_path, worktree_path, branch}} — the worktrees this
+    # story has so far. Grows as the plan turns out to touch more repos.
+    story_worktrees: dict[str, dict[str, str]]
     workspace_mode: WorkspaceMode
     iteration: int
     max_iterations: int
@@ -114,7 +119,9 @@ def initial_state(run_id: str, user_request: str, project_path: str) -> FeatureR
         user_request=user_request,
         project_path=project_path,
         worktree_path=None,
-        reference_roots={},
+        repo_roots={},
+        default_repo_label="",
+        story_worktrees={},
         workspace_mode="worktree",
         iteration=0,
         max_iterations=3,

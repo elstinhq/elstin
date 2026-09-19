@@ -86,7 +86,8 @@ async def planner_node(state: FeatureRunState) -> dict:
         linked_issues_context=state.get("linked_issues_context"),
         acceptance_criteria_hint=state.get("acceptance_criteria_hint") or None,
         clarification_answers=state.get("clarification_answers") or None,
-        reference_roots=state.get("reference_roots") or None,
+        repo_roots=state.get("repo_roots") or None,
+        default_label=state.get("default_repo_label") or "",
         sdk_model=state.get("sdk_model"),
         sdk_effort=state.get("sdk_effort"),
     )
@@ -145,7 +146,9 @@ async def dev_node(state: FeatureRunState) -> dict:
             # module docstring). Takes precedence over verifier_report,
             # which may be stale from an earlier review round.
             gate_feedback=gate_feedback,
-            reference_roots=state.get("reference_roots") or None,
+            repo_roots=state.get("repo_roots") or None,
+            default_label=state.get("default_repo_label") or "",
+            story_worktrees=state.get("story_worktrees") or None,
             sdk_model=state.get("sdk_model"),
             sdk_effort=state.get("sdk_effort"),
         )
@@ -170,6 +173,9 @@ async def dev_node(state: FeatureRunState) -> dict:
         "messages": result.get("messages", []),
         "dev_history": result.get("dev_history", []),
         "dev_progress": result.get("dev_progress", []),
+        # Grows when the plan turned out to write a repo that had no
+        # worktree yet; the daemon records it after the run.
+        "story_worktrees": result.get("story_worktrees", {}),
         "dev_build_runner": result.get("dev_build_runner", {}),
         # Consumed — a later gate failure produces a fresh one.
         "gate_feedback": None,
@@ -196,6 +202,8 @@ async def gate_node(state: FeatureRunState) -> dict:
         project_path=state.get("project_path"),
         run_id=run_id or None,
         prior_build_runner=state.get("dev_build_runner") or None,
+        story_worktrees=state.get("story_worktrees") or None,
+        default_label=state.get("default_repo_label") or "",
     )
 
     record_run_outcome(run_id, gate_runs=1, gate_failures=0 if gate.get("passed") else 1)
@@ -264,6 +272,8 @@ async def verifier_node(state: FeatureRunState) -> dict:
             project_path=state.get("project_path"),
             run_id=run_id or None,
             prior_build_runner=state.get("dev_build_runner") or None,
+            story_worktrees=state.get("story_worktrees") or None,
+            default_label=state.get("default_repo_label") or "",
             # gate_node already ran the toolchain on this exact worktree state
             # — reuse its report rather than paying for a second run.
             precomputed_gate=state.get("tier1_gate") or None,

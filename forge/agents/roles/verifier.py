@@ -42,6 +42,7 @@ from forge.services.run_activity import append_activity
 from forge.services.usage import record_phase_usage
 from forge.tools import language_hooks
 from forge.tools.git_tools import get_all_diffs, list_changed_files, read_file_at_head
+from forge.tools.workspace import Workspace
 from forge.tools.worktree_sync import sync_planned_files_from_project
 
 logger = logging.getLogger("forge.verifier")
@@ -186,6 +187,88 @@ _GATE_FEEDBACK_MAX_ERROR_LINES = 25
 _PATH_LINE_RE = re.compile(r"(?<![\w/])((?:[\w.-]+/)*[\w.-]+\.[A-Za-z]{1,6}):\d+")
 
 
+def _split_plan_by_repo(plan: dict[str, Any], workspace: Workspace) -> dict[str, dict[str, Any]]:
+    """One plan per repo, each holding only that repo's files with the
+    `@label/` prefix stripped.
+
+    compare_to_plan checks planned files against ONE worktree and runs ONE
+    toolchain, which is correct per repo and meaningless across them: a
+    TypeScript UI and a Python API have different analyzers, and a planned
+    API file simply does not exist in the UI worktree. Partitioning first
+    is what lets the same gate serve a story that writes several repos."""
+    per_repo: dict[str, dict[str, Any]] = {}
+    for key in ("files_to_create", "files_to_modify"):
+        for entry in plan.get(key) or []:
+            raw = entry.get("path") if isinstance(entry, dict) else str(entry)
+            if not raw:
+                continue
+            try:
+                label, relative = workspace.split(str(raw))
+            except Exception:  # noqa: BLE001 — an unknown repo surfaces as a missing planned file
+                continue
+            slot = per_repo.setdefault(label, {k: [] for k in ("files_to_create", "files_to_modify")})
+            slot[key].append({**entry, "path": relative} if isinstance(entry, dict) else relative)
+    return per_repo
+
+
+def _merge_gate_reports(reports: dict[str, dict[str, Any]], workspace: Workspace) -> dict[str, Any]:
+    """Fold per-repo gate reports into the single shape every caller
+    already consumes, with paths and blockers re-prefixed so a failure
+    names the repo it came from."""
+    if len(reports) == 1 and workspace.default_label in reports:
+        return reports[workspace.default_label]
+
+    issues: list[dict[str, Any]] = []
+    required_fixes: list[str] = []
+    changed_files: list[str] = []
+    dev_targets: list[str] = []
+    profiles: dict[str, Any] = {}
+    coverage_gap = False
+    coverage_details: list[str] = []
+
+    for label, report in reports.items():
+        prefix = "" if label == workspace.default_label else f"[{label}] "
+        for issue in report.get("issues", []):
+            merged = dict(issue)
+            merged["reason"] = f"{prefix}{issue.get('reason', '')}"
+            if merged.get("file"):
+                merged["file"] = workspace.display_path(label, merged["file"])
+            merged["repo"] = label
+            issues.append(merged)
+        required_fixes.extend(f"{prefix}{fix}" for fix in report.get("required_fixes", []))
+        changed_files.extend(workspace.display_path(label, p) for p in report.get("changed_files", []))
+        dev_targets.extend(workspace.display_path(label, p) for p in report.get("dev_targets", []))
+        for profile_key, profile_report in (report.get("profiles") or {}).items():
+            profiles[f"{label}:{profile_key}"] = profile_report
+        if report.get("coverage_gap"):
+            coverage_gap = True
+            if report.get("coverage_gap_detail"):
+                coverage_details.append(f"{label}: {report['coverage_gap_detail']}")
+
+    return {
+        "passed": len(required_fixes) == 0,
+        "issues": issues,
+        "required_fixes": required_fixes,
+        "profiles": profiles,
+        "changed_files": sorted(changed_files),
+        "synced_from_project": [],
+        "dev_targets": sorted(dev_targets),
+        "coverage_gap": coverage_gap,
+        "coverage_gap_detail": "; ".join(coverage_details) or None,
+        "repos": sorted(reports),
+    }
+
+
+def _gate_workspace(worktree_path: str, story_worktrees: dict[str, Any] | None, default_label: str) -> Workspace:
+    roots = {
+        label: entry["worktree_path"]
+        for label, entry in (story_worktrees or {}).items()
+        if entry.get("worktree_path")
+    }
+    roots.setdefault(default_label, worktree_path)
+    return Workspace(default_label=default_label, roots=roots)
+
+
 async def run_deterministic_gate(
     *,
     plan: dict[str, Any],
@@ -194,17 +277,49 @@ async def run_deterministic_gate(
     project_path: str | None = None,
     run_id: str | None = None,
     prior_build_runner: dict[str, Any] | None = None,
+    story_worktrees: dict[str, Any] | None = None,
+    default_label: str = "",
 ) -> dict[str, Any]:
-    """Tier 1: compare_to_plan (planned-file presence, per-language
-    analyze/compile and the plan's tests — subprocesses, no model) run
-    off-thread. Returns the gate report; `passed` is the routing key."""
-    logger.info("Deterministic gate starting worktree=%s dev_targets=%s", worktree_path, sorted(_dev_target_paths(file_changes)))
+    """Tier 1: planned-file presence, per-language analyze/compile and the
+    plan's tests — subprocesses, no model — run in EVERY repo the plan
+    writes. Returns the gate report; `passed` is the routing key."""
+    workspace = _gate_workspace(worktree_path, story_worktrees, default_label)
+    logger.info(
+        "Deterministic gate starting repos=%s dev_targets=%s",
+        workspace.labels(), sorted(_dev_target_paths(file_changes)),
+    )
     if run_id:
         append_activity(run_id, type="status", phase="verifier", title="Running deterministic gate (build + planned tests)")
-    gate = await asyncio.to_thread(
-        compare_to_plan, plan, worktree_path, file_changes,
-        project_path=project_path, run_id=run_id, prior_verify_state=prior_build_runner,
-    )
+
+    per_repo_plan = _split_plan_by_repo(plan, workspace) or {workspace.default_label: plan}
+    per_repo_changes: dict[str, list[dict[str, Any]]] = {}
+    for change in file_changes or []:
+        try:
+            label, relative = workspace.split(str(change.get("path") or ""))
+        except Exception:  # noqa: BLE001
+            continue
+        per_repo_changes.setdefault(label, []).append({**change, "path": relative})
+
+    prior_state = prior_build_runner or {}
+    reports: dict[str, dict[str, Any]] = {}
+    for label, repo_plan in per_repo_plan.items():
+        root = workspace.roots.get(label)
+        if not root:
+            continue
+        # prior_build_runner is {profile: state} for a single-repo run and
+        # {label: {profile: state}} once the story spans repos.
+        repo_prior = prior_state.get(label) if label in prior_state else (prior_state if len(per_repo_plan) == 1 else None)
+        reports[label] = await asyncio.to_thread(
+            compare_to_plan, repo_plan, root, per_repo_changes.get(label, []),
+            project_path=project_path if label == workspace.default_label else None,
+            run_id=run_id, prior_verify_state=repo_prior,
+        )
+
+    gate = _merge_gate_reports(reports, workspace) if reports else {
+        "passed": True, "issues": [], "required_fixes": [], "profiles": {},
+        "changed_files": [], "synced_from_project": [], "dev_targets": [],
+        "coverage_gap": False, "coverage_gap_detail": None,
+    }
     if run_id:
         blockers = gate.get("required_fixes") or []
         append_activity(
@@ -377,6 +492,8 @@ async def run_verifier(
     run_id: str | None = None,
     prior_build_runner: dict[str, Any] | None = None,
     precomputed_gate: dict[str, Any] | None = None,
+    story_worktrees: dict[str, Any] | None = None,
+    default_label: str = "",
 ) -> dict[str, Any]:
     """prior_build_runner: kept as the historical param/field name for
     minimal churn to the LangGraph state schema (FeatureRunState.dev_build_runner) —
@@ -396,7 +513,14 @@ async def run_verifier(
         if precomputed_gate:
             gate = precomputed_gate
         else:
-            gate = await asyncio.to_thread(compare_to_plan, plan, worktree_path, file_changes, project_path=project_path, run_id=run_id, prior_verify_state=prior_build_runner)
+            # Only reached when the verifier is called outside the graph,
+            # which has already run the gate. Goes through the same
+            # per-repo path so the two cannot disagree.
+            gate = await run_deterministic_gate(
+                plan=plan, worktree_path=worktree_path, file_changes=file_changes,
+                project_path=project_path, run_id=run_id, prior_build_runner=prior_build_runner,
+                story_worktrees=story_worktrees, default_label=default_label,
+            )
         diffs = await asyncio.to_thread(get_all_diffs, worktree_path)
 
         if not gate["passed"]:

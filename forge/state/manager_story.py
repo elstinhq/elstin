@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from forge.db.engine import session_scope
-from forge.db.models import Epic, ProjectRepo, Story
+from forge.db.models import Epic, ProjectRepo, Story, StoryWorktree
 
 
 class _StoryMixin:
@@ -97,6 +97,69 @@ class _StoryMixin:
             if story is not None:
                 story.worktree_path = worktree_path
                 story.branch = branch
+
+    def record_story_worktree(
+        self,
+        jira_key: str,
+        *,
+        repo_label: str,
+        repo_path: str,
+        worktree_path: str,
+        branch: str,
+        project_repo_id: int | None = None,
+        is_default: bool = False,
+    ) -> None:
+        """Record one repo's worktree for a story, replacing any prior row
+        for that (story, repo).
+
+        `is_default` also mirrors the values onto Story.worktree_path /
+        Story.branch. That mirror is what keeps the dashboard and every
+        single-repo code path working unchanged now that a story can have
+        several worktrees — the table is the full picture, the two columns
+        are the default repo's."""
+        with session_scope() as session:
+            row = (
+                session.query(StoryWorktree)
+                .filter_by(story_key=jira_key, repo_label=repo_label)
+                .one_or_none()
+            )
+            if row is None:
+                row = StoryWorktree(story_key=jira_key, repo_label=repo_label)
+                session.add(row)
+            row.repo_path = repo_path
+            row.project_repo_id = project_repo_id
+            row.worktree_path = worktree_path
+            row.branch = branch
+
+            if is_default:
+                story = session.get(Story, jira_key)
+                if story is not None:
+                    story.worktree_path = worktree_path
+                    story.branch = branch
+
+    def list_story_worktrees(self, jira_key: str) -> list[dict]:
+        """Every repo this story has a worktree in, creation order.
+
+        Empty for a story dispatched before per-repo worktrees existed;
+        callers fall back to Story.worktree_path/branch, so an in-flight
+        story keeps working across the upgrade."""
+        with session_scope() as session:
+            rows = (
+                session.query(StoryWorktree)
+                .filter_by(story_key=jira_key)
+                .order_by(StoryWorktree.id)
+                .all()
+            )
+            return [
+                {
+                    "repo_label": r.repo_label,
+                    "repo_path": r.repo_path,
+                    "project_repo_id": r.project_repo_id,
+                    "worktree_path": r.worktree_path,
+                    "branch": r.branch,
+                }
+                for r in rows
+            ]
 
     def set_story_kind(self, jira_key: str, kind: str, *, reason: str = "manual") -> None:
         """A human correcting forge's sync-time guess. Records the reason as

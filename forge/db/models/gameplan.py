@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from forge.db.base import Base
@@ -170,14 +170,28 @@ class Story(Base):
     )
 
     epic: Mapped[Epic] = relationship(back_populates="stories")
-    pull_request: Mapped["PullRequest | None"] = relationship(back_populates="story", uselist=False, cascade="all, delete-orphan")
+    # One per repo the story wrote — see PullRequest's docstring.
+    pull_requests: Mapped[list["PullRequest"]] = relationship(back_populates="story", cascade="all, delete-orphan")
 
 
 class PullRequest(Base):
+    """One PR per (story, repo).
+
+    A story whose plan writes two repos produces two branches and so two
+    pull requests — that is git's constraint, not a forge choice. The
+    uniqueness is therefore on the pair, not on the story alone.
+
+    `repo_label` is the workspace label (forge/tools/workspace.py). The
+    empty string means "the story's default repo" and is what rows written
+    before per-repo PRs existed carry.
+    """
+
     __tablename__ = "pull_requests"
+    __table_args__ = (UniqueConstraint("story_key", "repo_label", name="uq_pull_requests_story_repo"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    story_key: Mapped[str] = mapped_column(ForeignKey("stories.jira_key"), nullable=False, unique=True)
+    story_key: Mapped[str] = mapped_column(ForeignKey("stories.jira_key"), nullable=False, index=True)
+    repo_label: Mapped[str] = mapped_column(String(64), default="", nullable=False)
 
     number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     url: Mapped[str | None] = mapped_column(String(512), nullable=True)
@@ -188,7 +202,7 @@ class PullRequest(Base):
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
     )
 
-    story: Mapped[Story] = relationship(back_populates="pull_request")
+    story: Mapped[Story] = relationship(back_populates="pull_requests")
 
 
 class JiraWatermark(Base):
