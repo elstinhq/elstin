@@ -26,12 +26,43 @@ export const STATUS_LABEL: Record<StoryStatus, string> = {
   merged: "merged",
   done: "done",
   failed: "failed",
-  awaiting_plan_approval: "awaiting plan approval",
-  awaiting_pr_open: "awaiting PR open approval",
-  awaiting_pr_review: "awaiting PR review",
+  awaiting_plan_approval: "plan needs approval",
+  awaiting_pr_open: "ready to open PR",
+  awaiting_pr_review: "PR needs review",
   dispatched: "dispatched",
   pending: "pending",
   skipped: "skipped",
+};
+
+// A story parks at one of three human gates, and the same click means a
+// different thing at each: approving a plan starts development, approving
+// the PR-open gate creates the pull request, approving the review merges it.
+// A bare "Approve" on all three made a row at the second gate read like one
+// at the third, so the button names what it does and says what it won't.
+export interface GateAction {
+  label: string;
+  hint: string;
+  // Shown in place of the button once the click has landed and the daemon
+  // has not picked it up yet.
+  approved: string;
+}
+
+export const GATE_ACTION: Partial<Record<StoryStatus, GateAction>> = {
+  awaiting_plan_approval: {
+    label: "Approve plan",
+    hint: "Approve the plan so the dev agent starts writing code.",
+    approved: "approved — starting dev",
+  },
+  awaiting_pr_open: {
+    label: "Open PR",
+    hint: "Open a pull request on GitHub for this branch. Nothing is merged yet.",
+    approved: "approved — opening PR",
+  },
+  awaiting_pr_review: {
+    label: "Approve & merge",
+    hint: "Approve this pull request. It is merged into the epic's integration branch once CI passes.",
+    approved: "approved — merging",
+  },
 };
 
 export const ACTIVITY_TYPE_LABEL: Record<string, string> = {

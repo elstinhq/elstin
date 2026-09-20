@@ -129,6 +129,27 @@ def test_sync_epic_404_when_jira_ticket_not_found(project_id, monkeypatch: pytes
         assert response.status_code == 404
 
 
+def test_epic_phase_is_read_off_its_stories(project_id):
+    """Nothing ever advances the stored phase past its "planning" default, so
+    an epic whose only story was waiting to open its PR still said planning."""
+    from forge.state.manager import StateManager
+
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2"]])
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0)
+
+    with _client() as client:
+        assert client.get("/api/epics/ENG-1").json()["phase"] == "planning"
+
+        sm.set_story_status("ENG-2", "awaiting_pr_open", parked_reason="pr_open_gate")
+        assert client.get("/api/epics/ENG-1").json()["phase"] == "implementing"
+        assert [e["phase"] for e in client.get("/api/epics").json()] == ["implementing"]
+        assert [e["phase"] for e in client.get(f"/api/projects/{project_id}/epics").json()] == ["implementing"]
+
+    # only what is reported changes: the daemon still polls on the stored phase
+    assert sm.get_epic("ENG-1")["phase"] == "planning"
+
+
 def test_sync_epic_fields_refreshes_prose(project_id, monkeypatch: pytest.MonkeyPatch):
     from forge.state.manager import StateManager
 

@@ -28,7 +28,7 @@ from forge.config.store import (
     list_project_config_for_display,
     set_project_config,
 )
-from forge.api.epic_routes import _story_with_pr
+from forge.api.epic_routes import _with_stories
 from forge.services.jira_filter import build_jql, preview_filter, sync_project_filter
 from forge.services.repo_clone import RepoCloneError, clone_repository
 from forge.services.ticket_source import known_sources
@@ -196,8 +196,7 @@ def list_project_epics(project_id: int) -> list[dict]:
         epic = sm.get_epic(epic_key)
         if epic is None or epic["project_id"] != project_id:
             continue
-        epic["stories"] = [_story_with_pr(sm, s["jira_key"]) for s in sm.list_stories_for_epic(epic_key)]
-        epics.append(epic)
+        epics.append(_with_stories(sm, epic))
     return epics
 
 

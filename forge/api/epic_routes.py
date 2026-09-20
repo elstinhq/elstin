@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 from jira import JIRAError
 from pydantic import BaseModel
 
+from forge.orchestration.reconciler import display_epic_phase
 from forge.services.epic_sync import sync_epic_fields_from_jira, sync_epic_from_jira
 from forge.services.usage import get_epic_usage
 from forge.state.manager import StateManager
@@ -37,6 +38,15 @@ def _story_with_pr(sm: StateManager, story_key: str) -> dict:
     return story
 
 
+def _with_stories(sm: StateManager, epic: dict) -> dict:
+    """The epic as the dashboard shows it: its stories attached, and its
+    phase read off them (see display_epic_phase for why the stored one can't
+    be shown as is)."""
+    epic["stories"] = [_story_with_pr(sm, s["jira_key"]) for s in sm.list_stories_for_epic(epic["jira_key"])]
+    epic["phase"] = display_epic_phase(epic["phase"], (s.get("status") for s in epic["stories"]))
+    return epic
+
+
 @router.get("")
 def list_epics() -> list[dict]:
     sm = StateManager()
@@ -45,8 +55,7 @@ def list_epics() -> list[dict]:
         epic = sm.get_epic(epic_key)
         if epic is None:
             continue
-        epic["stories"] = [_story_with_pr(sm, s["jira_key"]) for s in sm.list_stories_for_epic(epic_key)]
-        epics.append(epic)
+        epics.append(_with_stories(sm, epic))
     return epics
 
 
@@ -56,8 +65,7 @@ def get_epic(epic_key: str) -> dict:
     epic = sm.get_epic(epic_key)
     if epic is None:
         raise HTTPException(status_code=404, detail=f"No such epic: {epic_key}")
-    epic["stories"] = [_story_with_pr(sm, s["jira_key"]) for s in sm.list_stories_for_epic(epic_key)]
-    return epic
+    return _with_stories(sm, epic)
 
 
 @router.get("/{epic_key}/usage")

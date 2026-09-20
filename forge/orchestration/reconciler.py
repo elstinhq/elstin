@@ -16,11 +16,16 @@ the coarse status this module needs to decide what's next.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 # Statuses that mean "this story is done contributing to level progression" —
 # a level advances once every story in it is in one of these.
 _TERMINAL_OK = frozenset({"merged", "done", "skipped"})
+
+# Statuses of a story no implementation has started for: nothing is in flight
+# and no plan has been approved. A "skipped" story never will be.
+_NOT_STARTED = frozenset({"pending", "awaiting_plan_approval", "skipped"})
 
 
 @dataclass(frozen=True)
@@ -206,6 +211,26 @@ def describe_story_action(snapshot: EpicSnapshot, ctx: OrchestratorContext, stor
         return _intent_for(snapshot.stories[story_key], ctx)
 
     return Blocked(story_key, "epic_resolved")  # every level already terminal
+
+
+def display_epic_phase(stored_phase: str, story_statuses: Iterable[str]) -> str:
+    """The phase to show for an epic, read off its stories.
+
+    `Epic.phase` is stored, but only "complete"/"failed" (the daemon's
+    verdicts, which also decide whether the epic is polled at all) and a
+    retry's "implementing" are ever written — an epic whose work is well
+    under way still carries its creation default, "planning". So the two
+    non-terminal phases are derived instead: "planning" until some story has
+    got past plan approval, "implementing" from then on. A stored value that
+    is anything else is passed through untouched.
+
+    A story that is "dispatched" counts as implementing even during its
+    planner run — the status does not distinguish the two."""
+    if stored_phase not in ("planning", "implementing"):
+        return stored_phase
+    if any(status not in _NOT_STARTED for status in story_statuses):
+        return "implementing"
+    return "planning"
 
 
 def epic_completion_status(snapshot: EpicSnapshot) -> str | None:

@@ -1,4 +1,12 @@
-import { ClosedExternallyTag, CoverageGapTag, ExternalChangedTag, KindTag, PrOpenErrorTag, StatusTagFor } from "../shared/StatusTag";
+import {
+  ClosedExternallyTag,
+  CoverageGapTag,
+  ExternalChangedTag,
+  GATE_ACTION,
+  KindTag,
+  PrOpenErrorTag,
+  StatusTagFor,
+} from "../shared/StatusTag";
 import { Twisty } from "../shared/Twisty";
 import { useApproveStory, useRetryStory, useStartStory } from "../../hooks/useStories";
 import { useToast } from "../../lib/toast";
@@ -34,8 +42,7 @@ export function StoryRow({
   const { showToast } = useToast();
 
   const isOpen = expandedStories.has(story.jira_key);
-  const parked =
-    story.status === "awaiting_plan_approval" || story.status === "awaiting_pr_open" || story.status === "awaiting_pr_review";
+  const gate = GATE_ACTION[story.status];
 
   return (
     <>
@@ -69,7 +76,13 @@ export function StoryRow({
         <ExternalChangedTag story={story} />
         <ClosedExternallyTag story={story} />
 
-        {story.parked_reason ? <span className="text-muted-foreground text-xs">({story.parked_reason})</span> : null}
+        {/* The three gate reasons (plan_approval_gate, pr_open_gate,
+            pr_review_gate) only repeat what the status tag and the button
+            already say; any other reason (ci_pending, closed_externally, ...)
+            is new information and stays. */}
+        {story.parked_reason && !story.parked_reason.endsWith("_gate") ? (
+          <span className="text-muted-foreground text-xs">({story.parked_reason})</span>
+        ) : null}
 
         <span className="text-muted-foreground w-[34px] shrink-0 text-xs">{`W${story.wave}`}</span>
 
@@ -114,12 +127,19 @@ export function StoryRow({
           </Button>
         ) : null}
 
-        {parked ? (
+        {gate ? (
           story.gate_approved ? (
-            <span className="text-muted-foreground shrink-0 whitespace-nowrap text-xs">approved — waiting</span>
+            <span className="text-muted-foreground shrink-0 whitespace-nowrap text-xs">{gate.approved}</span>
           ) : (
-            <Button size="sm" className="shrink-0" loading={approveStory.isPending} onClick={() => approveStory.mutate(story.jira_key)}>
-              Approve
+            <Button
+              size="sm"
+              className="shrink-0"
+              title={gate.hint}
+              aria-label={`${gate.label} — ${displayKey(story)}`}
+              loading={approveStory.isPending}
+              onClick={() => approveStory.mutate(story.jira_key)}
+            >
+              {gate.label}
             </Button>
           )
         ) : story.status === "failed" ? (

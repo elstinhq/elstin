@@ -17,6 +17,7 @@ from forge.orchestration.reconciler import (
     ResumeStory,
     StorySnapshot,
     describe_story_action,
+    display_epic_phase,
     epic_completion_status,
     plan_orchestration,
 )
@@ -284,3 +285,28 @@ def test_epic_completion_status_complete_once_every_level_resolved():
 def test_epic_completion_status_failed_on_any_failed_story():
     snapshot = _snapshot([["ENG-2", "ENG-3"]], {"ENG-2": "merged", "ENG-3": "failed"})
     assert epic_completion_status(snapshot) == "failed"
+
+
+# --- display_epic_phase ------------------------------------------------
+
+
+def test_epic_phase_is_planning_until_a_story_gets_past_plan_approval():
+    for statuses in (["pending"], ["awaiting_plan_approval"], ["skipped", "pending"], []):
+        assert display_epic_phase("planning", statuses) == "planning"
+
+
+def test_epic_phase_is_implementing_once_any_story_is_under_way_or_further():
+    for status in ("dispatched", "awaiting_pr_open", "awaiting_pr_review", "merged", "done", "failed"):
+        assert display_epic_phase("planning", ["pending", status]) == "implementing"
+
+
+def test_epic_phase_derivation_covers_both_non_terminal_stored_phases():
+    # a retry stores "implementing" for a story that is back to pending
+    assert display_epic_phase("implementing", ["pending"]) == "planning"
+    assert display_epic_phase("implementing", ["dispatched"]) == "implementing"
+
+
+def test_a_stored_terminal_or_unknown_phase_is_passed_through():
+    assert display_epic_phase("complete", ["pending"]) == "complete"
+    assert display_epic_phase("failed", ["merged"]) == "failed"
+    assert display_epic_phase("building", ["merged"]) == "building"
