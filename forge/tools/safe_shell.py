@@ -34,9 +34,55 @@ def allowed_command_prefixes() -> list[tuple[str, ...]]:
 ALLOWED_COMMAND_PREFIXES = allowed_command_prefixes()
 
 
+# Git long options that reach outside the worktree even though the command
+# prefix is allowed: --output writes the diff to an arbitrary path (past the
+# plan-scope path guard), --no-index diffs arbitrary files on disk, and
+# --pathspec-from-file reads one, echoing its first line in the error. Git
+# accepts unambiguous abbreviations of long options, so a token is refused
+# when it is a prefix of one of these.
+#
+# --ext-diff / --textconv are deliberately not here: the program they run
+# comes from repo config (diff.external, diff.<driver>.textconv), never from
+# argv, and textconv is already on by default for `git diff`. The agent can
+# reach neither `git config` nor `git -c` through the allowlist.
+_GIT_BLOCKED_LONG_OPTIONS = ("--output", "--no-index", "--pathspec-from-file")
+
+
+def _escapes_worktree(arg: str) -> bool:
+    """`git diff <a> <b>` silently becomes a --no-index diff when the paths
+    lie outside the worktree, so any such path is as good as --no-index."""
+    return arg.startswith(("/", "~")) or ".." in arg.split("/")
+
+
+def _git_args_are_safe(tokens: list[str]) -> bool:
+    subcommand = tokens[1] if len(tokens) > 1 else ""
+    options_done = False
+    for arg in tokens[2:]:
+        if not options_done:
+            if arg == "--":
+                options_done = True
+                continue
+            if arg.startswith("--"):
+                name = arg.split("=", 1)[0]
+                if any(blocked.startswith(name) for blocked in _GIT_BLOCKED_LONG_OPTIONS):
+                    return False
+                continue
+            if arg.startswith("-"):
+                # -O<orderfile> reads an arbitrary path and may sit in a
+                # cluster (-pOfile). -S/-G swallow the rest of the token as
+                # their value, so a capital O there is just pickaxe text.
+                if subcommand == "diff" and not arg.startswith(("-S", "-G")) and "O" in arg:
+                    return False
+                continue
+        if subcommand == "diff" and _escapes_worktree(arg):
+            return False
+    return True
+
+
 def is_safe_command(cmd_str: str) -> bool:
-    """Check if a command matches the allowed prefixes and does not contain
-    dangerous characters."""
+    """Check if a command matches the allowed prefixes, does not contain
+    dangerous characters, and (for git) carries no flag that reads or writes
+    outside the worktree."""
     cmd_str = cmd_str.strip()
     if not cmd_str:
         return False
@@ -57,7 +103,7 @@ def is_safe_command(cmd_str: str) -> bool:
     for prefix in ALLOWED_COMMAND_PREFIXES:
         length = len(prefix)
         if len(tokens) >= length and tuple(tokens[:length]) == prefix:
-            return True
+            return tokens[0] != "git" or _git_args_are_safe(tokens)
 
     return False
 
