@@ -88,6 +88,7 @@ async def planner_node(state: FeatureRunState) -> dict:
         clarification_answers=state.get("clarification_answers") or None,
         repo_roots=state.get("repo_roots") or None,
         default_label=state.get("default_repo_label") or "",
+        project_guide=state.get("project_guide") or None,
         sdk_model=state.get("sdk_model"),
         sdk_effort=state.get("sdk_effort"),
     )

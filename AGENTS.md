@@ -145,6 +145,35 @@ PR must be green before the merge step) rather than pretending otherwise.
 Migrations: `20260919_0018_story_project_repo.py`,
 `20260919_0019_multi_repo_stories.py`.
 
+## Project guide (an AGENTS.md for the repos forge works on)
+
+The planner and dev prompts have a slot for the target repo's own guide —
+its layout, commands and what already exists — so the agents do not
+rediscover it every run (or get it wrong: one run planned a new codegen
+script for a repo that already had one). `services/project_guide.py` fills
+it, per repo, in this order: the repo's own `AGENTS.md`, then `CLAUDE.md`,
+then a guide forge generated and stored, then nothing.
+
+- Resolved by the daemon at first dispatch (`project_guide_for_run`) and
+  carried in `FeatureRunState.project_guide` → planner → `context_bundle`,
+  which is how dev reads it too. Several repos are joined under a heading
+  each; each guide is capped at `MAX_GUIDE_CHARS`.
+- **Generation is opt-in**: the project-overridable `generate_project_guide`
+  setting (off by default, it spends tokens) makes a run write a guide for
+  any repo that has neither its own nor a stored one. The same is available
+  on demand at `POST /api/projects/{id}/repos/{repo_id}/guide/generate`, and
+  from the Folders panel in the UI.
+- The generated guide lives on `ProjectRepo.generated_guide`. **forge never
+  writes it into the repo** — it does not edit checkouts it does not own —
+  and a repo that ships its own guide is never generated for, and cannot be
+  overwritten through the API (`409`).
+- It is one single-shot call over gathered facts (a shallow listing,
+  manifests, READMEs, CI workflows, a code skeleton), with a prompt that
+  forbids claiming anything is *missing* — the listing is a partial view.
+  A generation failure is logged and skipped, never a run failure.
+- The guide is read as authoritative, so a wrong line gets followed: the API
+  and UI let a person read, edit (`PUT .../guide`), regenerate or discard it.
+
 ## Story kinds and hierarchy
 
 ### `dev` vs `qa`
@@ -592,6 +621,7 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | Graph routing / gates | `orchestration/graph.py`, `config/store.py` |
 | Dispatch / PR / CI | `daemon/main.py`, `orchestration/integration.py` |
 | Agent behavior | `agents/roles/*` |
+| What the agents are told about a repo (its AGENTS.md, or one forge generates) | `services/project_guide.py`; routes in `api/project_routes.py` |
 | Persistence API | `state/manager_*.py` + Alembic |
 | UI | `ui-src/src/` (React/TS); rebuild with `cd ui-src && npm run build` |
 | Tests | Mirror package under `tests/`; extend `fake_agents` if graph entry points change |

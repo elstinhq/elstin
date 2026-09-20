@@ -45,6 +45,10 @@ class FeatureRunState(TypedDict, total=False):
     # this state is JSON in a LangGraph checkpoint.
     repo_roots: dict[str, str]
     default_repo_label: str
+    # The AGENTS.md-style guide the planner (and, through context_bundle, dev)
+    # reads first: {"found", "path", "content", "generated"}. Resolved by the
+    # daemon, which owns the DB; see forge/services/project_guide.py.
+    project_guide: dict[str, Any]
     # {label: {repo_path, worktree_path, branch}} — the worktrees this
     # story has so far. Grows as the plan turns out to touch more repos.
     story_worktrees: dict[str, dict[str, str]]
@@ -121,6 +125,7 @@ def initial_state(run_id: str, user_request: str, project_path: str) -> FeatureR
         worktree_path=None,
         repo_roots={},
         default_repo_label="",
+        project_guide={},
         story_worktrees={},
         workspace_mode="worktree",
         iteration=0,

@@ -27,3 +27,25 @@ export function useRemoveProjectRepo(projectId: number) {
     },
   });
 }
+
+export function useRepoGuide(projectId: number, repoId: number) {
+  return useQuery({ queryKey: queryKeys.repoGuide(projectId, repoId), queryFn: () => api.getRepoGuide(projectId, repoId) });
+}
+
+// Both mutations answer with the guide as it now stands, so the cache is set
+// from the response instead of refetched.
+export function useGenerateRepoGuide(projectId: number, repoId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.generateRepoGuide(projectId, repoId),
+    onSuccess: (guide) => queryClient.setQueryData(queryKeys.repoGuide(projectId, repoId), guide),
+  });
+}
+
+export function useSaveRepoGuide(projectId: number, repoId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (content: string) => api.saveRepoGuide(projectId, repoId, content),
+    onSuccess: (guide) => queryClient.setQueryData(queryKeys.repoGuide(projectId, repoId), guide),
+  });
+}

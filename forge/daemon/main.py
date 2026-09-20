@@ -55,6 +55,7 @@ from forge.orchestration.reconciler import (
 from forge.agents.roles.qa import format_qa_report_comment
 from forge.orchestration.state import initial_state
 from forge.services.github_service import GitHubService, parse_github_remote, push_branch
+from forge.services.project_guide import project_guide_for_run
 from forge.services.ticket_source import get_ticket_source, ticket_source_configured
 from forge.services.usage import record_run_outcome
 from forge.state.manager import StateManager
@@ -460,6 +461,7 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
             state["worktree_path"] = worktree_path
             state["repo_roots"] = repo_roots
             state["default_repo_label"] = default_label
+            state["project_guide"] = await project_guide_for_run(sm, epic["project_id"], repo_roots)
             state["story_worktrees"] = known_worktrees
             state["story_kind"] = story_kind
             if story_kind == "qa":

@@ -5,6 +5,7 @@ import type {
   ExternalChangeAction,
   Project,
   ProjectRepo,
+  RepoGuide,
   Story,
   StoryUsage,
   TicketFilter,
@@ -54,6 +55,14 @@ export const api = {
     request<{ repo_id: number; removed: boolean }>(`/api/projects/${projectId}/repos/${repoId}`, {
       method: "DELETE",
     }),
+
+  getRepoGuide: (projectId: number, repoId: number) =>
+    request<RepoGuide>(`/api/projects/${projectId}/repos/${repoId}/guide`),
+  generateRepoGuide: (projectId: number, repoId: number) =>
+    request<RepoGuide>(`/api/projects/${projectId}/repos/${repoId}/guide/generate`, { method: "POST" }),
+  // Empty content discards the generated guide.
+  saveRepoGuide: (projectId: number, repoId: number, content: string) =>
+    request<RepoGuide>(`/api/projects/${projectId}/repos/${repoId}/guide`, put({ content })),
 
   // -- project-scoped config --------------------------------------------
   getProjectConfig: (projectId: number) => request<ConfigField[]>(`/api/projects/${projectId}/config`),

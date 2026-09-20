@@ -6,6 +6,7 @@ export const queryKeys = {
   projects: () => ["projects"] as const,
   project: (id: number) => ["projects", id] as const,
   projectRepos: (id: number) => ["projects", id, "repos"] as const,
+  repoGuide: (projectId: number, repoId: number) => ["projects", projectId, "repos", repoId, "guide"] as const,
   projectEpics: (id: number) => ["projects", id, "epics"] as const,
   projectConfig: (id: number) => ["projects", id, "config"] as const,
   ticketFilter: (id: number) => ["projects", id, "ticket-filter"] as const,

@@ -30,6 +30,7 @@ from forge.config.store import (
 )
 from forge.api.epic_routes import _with_stories
 from forge.services.jira_filter import build_jql, preview_filter, sync_project_filter
+from forge.services.project_guide import MAX_GUIDE_CHARS, GuideError, generate_project_guide, read_repo_guide
 from forge.services.repo_clone import RepoCloneError, clone_repository
 from forge.services.ticket_source import known_sources
 from forge.state.manager import StateManager
@@ -155,6 +156,70 @@ def remove_project_repo(project_id: int, repo_id: int) -> dict:
     if not removed:
         raise HTTPException(status_code=400, detail="Folder is still assigned to an epic — reassign it first")
     return {"repo_id": repo_id, "removed": True}
+
+
+class RepoGuideRequest(BaseModel):
+    # The guide text; empty discards the generated guide.
+    content: str
+
+
+def _repo_of(sm: StateManager, project_id: int, repo_id: int) -> dict:
+    repo = sm.get_project_repo(repo_id)
+    if repo is None or repo["project_id"] != project_id:
+        raise HTTPException(status_code=404, detail=f"No such folder: {repo_id}")
+    return repo
+
+
+def _guide_view(repo: dict) -> dict:
+    """Which guide a run against this repo would read: the repo's own, else
+    the one forge generated, else none (see forge/services/project_guide.py)."""
+    own = read_repo_guide(repo["path"])
+    if own:
+        return {"source": "repo", "filename": own[0], "content": own[1], "generated_at": None}
+    if repo.get("generated_guide"):
+        return {"source": "generated", "filename": None, "content": repo["generated_guide"], "generated_at": repo["generated_guide_at"]}
+    return {"source": "none", "filename": None, "content": None, "generated_at": None}
+
+
+@router.get("/{project_id}/repos/{repo_id}/guide")
+def get_repo_guide(project_id: int, repo_id: int) -> dict:
+    return _guide_view(_repo_of(StateManager(), project_id, repo_id))
+
+
+@router.post("/{project_id}/repos/{repo_id}/guide/generate")
+async def generate_repo_guide(project_id: int, repo_id: int) -> dict:
+    """Writes (or rewrites) forge's own guide for a repo that ships none.
+    Runs whether or not the project's `generate_project_guide` setting is on:
+    that setting only decides whether a run does it automatically."""
+    sm = StateManager()
+    repo = _repo_of(sm, project_id, repo_id)
+    own = read_repo_guide(repo["path"])
+    if own:
+        raise HTTPException(
+            status_code=409, detail=f"This repo already has its own {own[0]}; forge only writes a guide for one that has none"
+        )
+    try:
+        guide = await generate_project_guide(repo["path"])
+    except GuideError as exc:
+        raise HTTPException(status_code=502, detail=f"Could not generate a guide: {exc}") from exc
+    sm.set_project_repo_guide(repo_id, guide)
+    return _guide_view(_repo_of(sm, project_id, repo_id))
+
+
+@router.put("/{project_id}/repos/{repo_id}/guide")
+def put_repo_guide(project_id: int, repo_id: int, body: RepoGuideRequest) -> dict:
+    """Edit or discard the generated guide — it is read as authoritative, so a
+    wrong line has to be fixable. Empty content discards it."""
+    sm = StateManager()
+    repo = _repo_of(sm, project_id, repo_id)
+    own = read_repo_guide(repo["path"])
+    if own:
+        raise HTTPException(status_code=409, detail=f"This repo ships its own {own[0]}; change it in the repo")
+    content = body.content.strip()
+    if len(content) > MAX_GUIDE_CHARS:
+        raise HTTPException(status_code=422, detail=f"A guide is capped at {MAX_GUIDE_CHARS} characters; this is {len(content)}")
+    sm.set_project_repo_guide(repo_id, content or None)
+    return _guide_view(_repo_of(sm, project_id, repo_id))
 
 
 @router.get("/{project_id}/config")

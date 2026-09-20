@@ -74,6 +74,11 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
     ConfigField("require_plan_approval", "Require plan approval before dev starts", False, "true", "bool"),
     ConfigField("require_pr_open_approval", "Require human approval before opening a PR", False, "true", "bool"),
     ConfigField("require_pr_review", "Require human PR review before merge", False, "true", "bool"),
+    ConfigField(
+        "generate_project_guide",
+        "Write an AGENTS.md-style guide (kept in forge, the repo is not touched) for a repo that has none, before its first plan",
+        False, "false", "bool",
+    ),
     ConfigField("dev_sdk_model", "Dev agent model", False, "gpt-5.1", "string"),
     ConfigField(
         "dev_web_access_enabled",
@@ -149,6 +154,7 @@ PROJECT_OVERRIDABLE_KEYS = frozenset({
     "require_plan_approval",
     "require_pr_open_approval",
     "require_pr_review",
+    "generate_project_guide",
 })
 
 _cache_lock = threading.Lock()

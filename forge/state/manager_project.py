@@ -76,6 +76,17 @@ class _ProjectMixin:
             repo = session.get(ProjectRepo, repo_id)
             return _project_repo_to_dict(repo) if repo is not None else None
 
+    def set_project_repo_guide(self, repo_id: int, guide: str | None) -> bool:
+        """Stores (or, with None/empty, discards) the guide forge generated
+        for this repo. False if the repo does not exist."""
+        with session_scope() as session:
+            repo = session.get(ProjectRepo, repo_id)
+            if repo is None:
+                return False
+            repo.generated_guide = guide or None
+            repo.generated_guide_at = _utcnow() if guide else None
+            return True
+
     def remove_project_repo(self, repo_id: int) -> bool:
         """Returns False (does not delete) if any epic still points at this
         folder — detaching it would silently orphan that epic's dispatch
@@ -189,6 +200,8 @@ def _project_repo_to_dict(repo: ProjectRepo) -> dict:
         "path": repo.path,
         "label": repo.label,
         "clone_url": repo.clone_url,
+        "generated_guide": repo.generated_guide,
+        "generated_guide_at": repo.generated_guide_at.isoformat() if repo.generated_guide_at else None,
         "created_at": repo.created_at.isoformat(),
     }
 

@@ -190,9 +190,19 @@ def test_project_and_project_repo_round_trip():
     assert sm.list_project_repos(project_id) == [
         {
             "id": repo_id, "project_id": project_id, "path": "/repo/widgets", "label": "widgets",
-            "clone_url": None, "created_at": sm.get_project_repo(repo_id)["created_at"],
+            "clone_url": None, "generated_guide": None, "generated_guide_at": None,
+            "created_at": sm.get_project_repo(repo_id)["created_at"],
         }
     ]
+
+    # a generated guide is stored, stamped, and can be discarded again
+    assert sm.set_project_repo_guide(repo_id, "the guide") is True
+    stored = sm.get_project_repo(repo_id)
+    assert stored["generated_guide"] == "the guide" and stored["generated_guide_at"]
+    assert sm.set_project_repo_guide(repo_id, None) is True
+    assert sm.get_project_repo(repo_id)["generated_guide"] is None
+    assert sm.get_project_repo(repo_id)["generated_guide_at"] is None
+    assert sm.set_project_repo_guide(repo_id + 999, "x") is False
 
     sm.create_epic("ENG-1", project_id=project_id)
     assert sm.get_project(project_id)["epic_count"] == 1

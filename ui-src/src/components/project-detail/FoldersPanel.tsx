@@ -8,6 +8,7 @@ import type { ProjectRepo } from "../../types/api";
 import { Button } from "../ui/button";
 import { Card } from "../ui/card";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
+import { RepoGuideControl } from "./RepoGuide";
 
 // Multi-repo projects (e.g. Vue admin + Spring API) need an explicit choice
 // per epic; only auto-wire when there is nowhere else to point.
@@ -26,6 +27,7 @@ function FolderRow({ projectId, repo }: { projectId: number; repo: ProjectRepo }
       <div className="min-w-0">
         <div className="truncate text-sm font-medium">{repo.label || repo.path}</div>
         {repo.clone_url ? <div className="text-muted-foreground truncate text-xs">{repo.clone_url}</div> : null}
+        <RepoGuideControl projectId={projectId} repoId={repo.id} />
       </div>
       <Button
         variant="ghost"

@@ -53,6 +53,12 @@ class ProjectRepo(Base):
     path: Mapped[str] = mapped_column(String(1024), nullable=False)
     label: Mapped[str | None] = mapped_column(String(256), nullable=True)
     clone_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # An AGENTS.md-style guide forge wrote for a repo that had none of its
+    # own (forge/services/project_guide.py). Lives here rather than in the
+    # repo so forge never edits a checkout it does not own; a guide the repo
+    # ships itself always wins over this one.
+    generated_guide: Mapped[str | None] = mapped_column(Text, nullable=True)
+    generated_guide_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 

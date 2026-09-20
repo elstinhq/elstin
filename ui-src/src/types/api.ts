@@ -15,6 +15,15 @@ export interface Project {
   repos?: ProjectRepo[]; // only present on GET /api/projects/{id}
 }
 
+// The guide a run against a repo would read (forge/services/project_guide.py):
+// the repo's own AGENTS.md/CLAUDE.md, else one forge generated, else none.
+export interface RepoGuide {
+  source: "repo" | "generated" | "none";
+  filename: string | null;
+  content: string | null;
+  generated_at: string | null;
+}
+
 export interface ProjectRepo {
   id: number;
   project_id: number;
