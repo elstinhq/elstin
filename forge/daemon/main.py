@@ -9,19 +9,28 @@ background asyncio task in the same process that serves the settings UI/API
 Dispatch is deliberately synchronous within one poll cycle — a story's
 LangGraph run is awaited to completion (or to its next interrupt) before
 moving to the next intent. That's a real simplification: two independent
-stories in the same wave dispatch one after another, not concurrently, so
-`OrchestratorContext.live_thread_ids` is always empty at the start of every
-cycle (nothing is ever "still running" between cycles) and a crash mid-cycle
-just means the next cycle's `ResumeStory` picks the story back up from its
-last checkpoint. Real per-story concurrency is a Phase 2 concern
-(asyncio.gather over a wave's DispatchStory/ResumeStory intents) — the
-reconciler already emits the full ready set for a wave in one call, so
+stories in the same wave dispatch one after another, not concurrently, and a
+crash mid-cycle just means the next cycle's `ResumeStory` picks the story
+back up from its last checkpoint. Real per-story concurrency is a Phase 2
+concern (asyncio.gather over a wave's DispatchStory/ResumeStory intents) —
+the reconciler already emits the full ready set for a wave in one call, so
 parallelizing the dispatch loop later doesn't change anything upstream of it.
+
+The poll loop is not the only caller, though: the API's /start and /approve
+routes run `execute_story_action` as a background task on the same event
+loop, so a second run for a story already in flight is possible while the
+first is awaited. Two things keep that from happening. A story is
+"dispatched" for exactly as long as its run is in flight (set when the run
+is claimed, replaced by the run's outcome when it ends), and the keys of the
+runs executing in this process are what `OrchestratorContext.live_thread_ids`
+carries — so the reconciler answers a "dispatched" story that is really
+running with NoOp, and one left "dispatched" by a crash with a resume.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 
 from forge.config.store import get_config, resolve_bool_config
 from forge.db.engine import get_database_url
@@ -113,11 +122,42 @@ def build_snapshot(sm: StateManager, epic_key: str) -> EpicSnapshot:
     )
 
 
+# Keys of the stories whose LangGraph run is executing in THIS process right
+# now. thread_id == story_key by construction, so these are also the live
+# thread ids the reconciler asks about. In-memory on purpose: a restart kills
+# every run, and the "dispatched" rows it leaves behind are exactly what the
+# reconciler resumes from their checkpoint. The lock is because the API's
+# sync routes call `build_context` from a worker thread while the event loop
+# claims and releases runs.
+_live_runs: set[str] = set()
+_live_runs_lock = threading.Lock()
+
+
+def live_run_keys() -> frozenset[str]:
+    with _live_runs_lock:
+        return frozenset(_live_runs)
+
+
+def _claim_run(story_key: str) -> bool:
+    """True if this caller now owns the story's run, False if one is already
+    in flight. Check-and-add under one lock, with no await between them."""
+    with _live_runs_lock:
+        if story_key in _live_runs:
+            return False
+        _live_runs.add(story_key)
+        return True
+
+
+def _release_run(story_key: str) -> None:
+    with _live_runs_lock:
+        _live_runs.discard(story_key)
+
+
 def build_context(sm: StateManager, epic: dict) -> OrchestratorContext:
     project_id = epic["project_id"]
     return OrchestratorContext(
         dispatch_paused=False,
-        live_thread_ids=frozenset(),
+        live_thread_ids=live_run_keys(),
         require_plan_approval=resolve_bool_config("require_plan_approval", project_id),
         require_pr_open_approval=resolve_bool_config("require_pr_open_approval", project_id),
         require_pr_review=resolve_bool_config("require_pr_review", project_id),
@@ -290,7 +330,61 @@ def _post_qa_report(sm: StateManager, epic: dict, story_key: str, qa_report: dic
         logger.warning("story %s: could not post QA report to the ticket source: %s", story_key, exc)
 
 
-async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, resume: bool) -> None:
+async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, resume: bool) -> bool:
+    """Runs a story's graph, keeping its status truthful while it runs.
+
+    The status is "dispatched" from the moment the run is claimed until the
+    run's outcome replaces it (`_execute_story_run`). Before this, a story
+    kept showing its previous status — "awaiting_plan_approval", with the
+    approval still set — for the whole run, which read as stuck, let a second
+    /start pick it up again, and made the ticket sync treat a story whose
+    plan was being implemented as not yet started.
+
+    The approval that unparked the run is consumed here, when it is acted on,
+    not after: it must not still be standing when the run lands on its next
+    gate, or a single click would clear that one too.
+
+    Returns False, having done nothing, if a run for this story is already in
+    flight in this process."""
+    story_key = story["jira_key"]
+    if not _claim_run(story_key):
+        logger.info("story %s: a run is already in flight — not starting a second", story_key)
+        return False
+    previous = (story["status"], story.get("parked_reason"), bool(story.get("gate_approved")))
+    try:
+        # thread_id == story_key by construction; recorded now, not after the
+        # run, so a snapshot taken mid-run already names the live thread.
+        sm.set_story_thread_id(story_key, story_key)
+        sm.set_story_gate_approved(story_key, False)
+        sm.set_story_status(story_key, "dispatched")
+        try:
+            await _execute_story_run(sm, epic, story, resume=resume)
+        except BaseException:  # BaseException: a shutdown cancels the run too
+            try:
+                _restore_unstarted(sm, story_key, previous)
+            except Exception:  # noqa: BLE001 — never mask the run's own error with a failed cleanup
+                logger.exception("story %s: could not restore its status after a failed run", story_key)
+            raise
+    finally:
+        _release_run(story_key)
+    return True
+
+
+def _restore_unstarted(sm: StateManager, story_key: str, previous: tuple[str, str | None, bool]) -> None:
+    """A run that raised before the story reached any new status goes back to
+    what it was — approval included — so the next cycle retries it exactly as
+    it would have before the run was claimed (a pending story is dispatched
+    again, an approved one resumed). A run that already wrote its outcome is
+    left alone: rolling that back would re-run finished work."""
+    current = sm.get_story(story_key)
+    if current is None or current["status"] != "dispatched":
+        return
+    status, parked_reason, approved = previous
+    sm.set_story_status(story_key, status, parked_reason=parked_reason)
+    sm.set_story_gate_approved(story_key, approved)
+
+
+async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resume: bool) -> None:
     story_key = story["jira_key"]
     story_kind = story.get("kind") or "dev"
     worktree_path = story.get("worktree_path")
@@ -372,8 +466,6 @@ async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, res
                 state["qa_context"] = await asyncio.to_thread(_build_qa_context, sm, epic, story)
             result = await graph.ainvoke(state, config)
 
-    sm.set_story_thread_id(story_key, story_key)
-
     # Record every repo the run turned out to write. dev creates a worktree
     # per repo the approved plan names, so this set is only known after the
     # run — that is the whole point of the plan deciding rather than
@@ -395,7 +487,16 @@ async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, res
     # "completed" vs "qa_completed" vs "awaiting_approval" are different
     # run shapes, and the mapping would flatten them.
     record_run_outcome(story_key, outcome=result.get("status"))
-    new_status = _GRAPH_STATUS_TO_STORY_STATUS.get(result.get("status"), "dispatched")
+    new_status = _GRAPH_STATUS_TO_STORY_STATUS.get(result.get("status"))
+    if new_status is None:
+        # A status the graph should never end on. Mapping it to "dispatched"
+        # (the old default) would have the reconciler resume it every cycle
+        # forever, re-spending tokens each time; failing is loud and a human
+        # can retry it.
+        logger.error(
+            "story %s: run ended on unexpected status %r — marking it failed", story_key, result.get("status")
+        )
+        new_status = "failed"
     # "run" — no PR exists yet at this point (a run only reaches
     # "awaiting_pr_open" on success), so retry_story's recovery for this
     # stage is a full redispatch. See forge/state/manager_story.py.
@@ -526,12 +627,11 @@ async def handle_intent(sm: StateManager, epic: dict, intent) -> None:
         await _run_or_resume_story(sm, epic, sm.get_story(intent.story_key), resume=False)
 
     elif isinstance(intent, ResumeStory):
+        # The approval that unparked this resume (if any) is consumed inside
+        # the run's claim — otherwise one approval click would silently clear
+        # every later gate for this story too (e.g. plan-approval also
+        # pre-clearing the PR-review gate it hasn't reached yet).
         await _run_or_resume_story(sm, epic, sm.get_story(intent.story_key), resume=True)
-        # The approval that unparked this resume (if any) is consumed —
-        # otherwise one approval click would silently clear every later
-        # gate for this story too (e.g. plan-approval also pre-clearing
-        # the PR-review gate it hasn't reached yet).
-        sm.set_story_gate_approved(intent.story_key, False)
 
     elif isinstance(intent, ParkForGate):
         story = sm.get_story(intent.story_key)

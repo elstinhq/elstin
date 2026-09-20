@@ -17,7 +17,7 @@ import subprocess
 
 import pytest
 
-from forge.config.store import set_config
+from forge.config.store import set_config, set_project_config
 from forge.daemon.main import poll_once
 from forge.state.manager import StateManager
 
@@ -194,11 +194,15 @@ async def test_the_branch_and_commit_land_in_the_storys_own_repo(split_project, 
 # --- the override API --------------------------------------------------
 
 
-async def test_repo_override_route_rejects_a_repo_from_another_project(split_project):
+async def test_repo_override_route_rejects_a_repo_from_another_project(split_project, project_id):
     from fastapi.testclient import TestClient
 
     from forge.app import create_app
 
+    # The app's lifespan starts the daemon poll loop, which would dispatch the
+    # pending story mid-request — and a dispatched story is (correctly) refused
+    # with a 409 before the repo is even looked at. Keep the poller out of it.
+    set_project_config(project_id, "auto_run_enabled", "false")
     other_project = split_project["sm"].create_project("other")
     foreign_repo_id = split_project["sm"].add_project_repo(other_project, "/srv/elsewhere")
 
