@@ -241,3 +241,17 @@ async def test_schema_is_forwarded_to_the_provider_when_supported(monkeypatch):
     assert provider.last_request.response_format is not None
     assert provider.last_request.response_format.name == "verifier_review"
     assert provider.last_request.response_format.strict is True
+
+
+async def test_a_caller_can_pick_the_model_and_the_default_is_the_verifier_qa_one(monkeypatch):
+    from forge.config.store import set_config
+
+    set_config("verifier_qa_model", "small-review-model")
+    provider = FakeProvider(response=_response('{"a": 1}'))
+    monkeypatch.setattr(generation, "get_provider", lambda: provider)
+
+    await generation.chat_completion_json(messages=[{"role": "user", "content": "go"}])
+    assert provider.last_request.model == "small-review-model"
+
+    await generation.chat_completion_json(messages=[{"role": "user", "content": "go"}], model="planner-model-x")
+    assert provider.last_request.model == "planner-model-x"

@@ -140,6 +140,7 @@ async def chat_completion_json(
     run_id: str | None = None,
     phase: str = "system",
     label: str = "LLM call",
+    model: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run a JSON-object chat completion, optionally recording activity +
     token usage. `messages` is OpenAI-shaped ({"role": "system"|"user", ...})
@@ -151,8 +152,13 @@ async def chat_completion_json(
     json_schema constraint (see forge/llm/types.py:ResponseFormat) rather
     than relying purely on the system prompt's "Return JSON" instruction —
     callers should still keep that instruction for providers/models where
-    structured output isn't honored."""
-    model = get_verifier_qa_model()
+    structured output isn't honored.
+
+    `model` overrides the verifier/QA model for a caller whose task needs a
+    stronger one (forge/services/project_guide.py writes a document the
+    planner then treats as authoritative, which the small model that suits a
+    pass/fail review does not do reliably)."""
+    model = model or get_verifier_qa_model()
     # Both callers (verifier, QA) reach a model only through here, so one
     # check covers them. A GenerationError is what the graph's verifier and
     # qa nodes already catch, so an exhausted ceiling becomes a failed

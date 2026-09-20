@@ -167,9 +167,13 @@ then a guide forge generated and stored, then nothing.
   writes it into the repo** — it does not edit checkouts it does not own —
   and a repo that ships its own guide is never generated for, and cannot be
   overwritten through the API (`409`).
-- It is one single-shot call over gathered facts (a shallow listing,
+- It is one single-shot call, **on the planner's model** (`planner_sdk_model`,
+  not the smaller verifier/QA one, which returned a title in place of the
+  document), over gathered facts (a shallow listing,
   manifests, READMEs, CI workflows, a code skeleton), with a prompt that
   forbids claiming anything is *missing* — the listing is a partial view.
+  A reply that is not a document (under 200 characters, or without section
+  headings) is retried once with the reason and then refused, never stored.
   A generation failure is logged and skipped, never a run failure.
 - The guide is read as authoritative, so a wrong line gets followed: the API
   and UI let a person read, edit (`PUT .../guide`), regenerate or discard it.

@@ -18,6 +18,10 @@ from forge.config.store import set_project_config
 from forge.services.generation import GenerationError
 from forge.state.manager import StateManager
 
+# Generating reads the configured model, so even the tests that never touch a
+# project need the config store.
+pytestmark = pytest.mark.usefixtures("forge_db")
+
 
 # --- the repo's own guide, and precedence ------------------------------
 
@@ -101,14 +105,42 @@ def test_an_empty_repo_has_no_facts(tmp_path):
 # --- generating ---------------------------------------------------------
 
 
-def _fake_model(monkeypatch, reply=None, error=None):
+_GOOD_GUIDE = """# AGENTS.md
+
+## Layout
+- `web/` is a React app; `api/` is a Spring Boot service.
+
+## Commands
+- `npm test`
+- `npm run generate:api` regenerates `web/src/schema.ts` from `web/openapi.json`; never edit it by hand.
+
+## Already exists — do not recreate
+- the `generate:api` script and `openapi.json`.
+"""
+
+# What a small model has actually returned in place of the guide.
+_TITLE_ONLY = "AGENTS.md for Retail Pricing Platform"
+_DESCRIPTION_ONLY = (
+    "AGENTS.md file for the repository, formatted in Markdown, containing sections on Overview, Layout, "
+    "Commands, Tests, Generated files, Already exists — do not recreate, and Conventions."
+)
+
+
+def _fake_model(monkeypatch, reply=None, error=None, replies=None):
+    """`replies` are returned in order (the last one repeats); otherwise every
+    call gets `reply`, or a good guide."""
     calls: list[dict] = []
+    queue = list(replies) if replies is not None else None
 
     async def fake(**kwargs):
         calls.append(kwargs)
         if error:
             raise error
-        return (reply if reply is not None else {"guide": "## Commands\n- `npm test`"}), {}
+        if queue is not None:
+            item = queue.pop(0) if len(queue) > 1 else queue[0]
+        else:
+            item = reply if reply is not None else {"guide": _GOOD_GUIDE}
+        return item, {}
 
     monkeypatch.setattr(pg, "chat_completion_json", fake)
     return calls
@@ -135,11 +167,81 @@ async def test_a_failed_or_empty_generation_raises_instead_of_storing_junk(tmp_p
         await pg.generate_project_guide(str(tmp_path))
 
     _fake_model(monkeypatch, reply={"guide": "   "})
-    with pytest.raises(pg.GuideError, match="empty"):
+    with pytest.raises(pg.GuideError, match="usable guide"):
         await pg.generate_project_guide(str(tmp_path))
 
     with pytest.raises(pg.GuideError, match="no files"):
         await pg.generate_project_guide(str(tmp_path / "nowhere"))
+
+
+@pytest.mark.asyncio
+async def test_the_guide_is_written_by_the_planners_model_not_the_verifier_qa_one(tmp_path, monkeypatch):
+    """The verifier/QA model returned a title in place of the document; the
+    guide is for the planner, so it is written on the planner's model."""
+    from forge.config.store import set_config
+
+    _monorepo(tmp_path)
+    set_config("planner_sdk_model", "planner-model-x")
+    set_config("verifier_qa_model", "small-review-model")
+    calls = _fake_model(monkeypatch)
+
+    await pg.generate_project_guide(str(tmp_path))
+
+    assert calls[0]["model"] == "planner-model-x"
+
+
+def test_with_no_planner_model_configured_the_helpers_default_applies(monkeypatch):
+    from forge.config.store import set_config
+
+    set_config("planner_sdk_model", "  ")
+    assert pg._guide_model() is None  # chat_completion_json then uses the verifier/QA model
+
+
+@pytest.mark.asyncio
+async def test_a_good_first_reply_costs_one_call(tmp_path, monkeypatch):
+    _monorepo(tmp_path)
+    calls = _fake_model(monkeypatch)
+
+    await pg.generate_project_guide(str(tmp_path))
+
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [_TITLE_ONLY, _DESCRIPTION_ONLY, "x" * 400])
+async def test_a_reply_that_is_not_a_guide_is_retried_with_the_reason_and_then_accepted(tmp_path, monkeypatch, bad):
+    """A small model returned a title, and another a sentence about the
+    sections, in the `guide` field; both used to be stored as the repo's
+    authoritative guide."""
+    _monorepo(tmp_path)
+    calls = _fake_model(monkeypatch, replies=[{"guide": bad}, {"guide": _GOOD_GUIDE}])
+
+    guide = await pg.generate_project_guide(str(tmp_path))
+
+    assert "npm run generate:api" in guide and bad not in guide
+    assert len(calls) == 2
+    second = calls[1]["messages"][1]["content"]
+    assert "Your previous reply was rejected" in second and "not a title or a description" in second
+
+
+@pytest.mark.asyncio
+async def test_two_bad_replies_in_a_row_fail_rather_than_store_the_second(tmp_path, monkeypatch):
+    _monorepo(tmp_path)
+    calls = _fake_model(monkeypatch, replies=[{"guide": _TITLE_ONLY}, {"guide": _DESCRIPTION_ONLY}])
+
+    with pytest.raises(pg.GuideError, match=r"did not produce a usable guide \(it is only \d+ characters\)"):
+        await pg.generate_project_guide(str(tmp_path))
+
+    assert len(calls) == 2  # one retry, not a loop
+
+
+def test_what_counts_as_a_guide():
+    long_prose = "word " * 100  # long enough, but no headings
+    assert pg._guide_problem(long_prose) == "it has no section headings, so it is not a document"
+    assert pg._guide_problem("# A\n## B\n") == "it is only 9 characters"
+    assert pg._guide_problem("# A\n" + "x" * 300) == "it has no section headings, so it is not a document"  # one heading is not enough
+    assert pg._guide_problem(_GOOD_GUIDE) is None
+    assert pg._guide_problem("# A\n\n## B\n" + "x" * 200) is None
 
 
 # --- when a run generates one ------------------------------------------
@@ -200,6 +302,18 @@ async def test_a_generation_failure_never_fails_the_run(repo_on_project, monkeyp
     guide = await pg.project_guide_for_run(sm, project_id, {"widgets": str(root)})
     assert guide == {"found": False}
     assert sm.get_project_repo(repo_id)["generated_guide"] is None  # nothing half-written to trust later
+
+
+@pytest.mark.asyncio
+async def test_a_run_never_stores_a_reply_that_is_not_a_guide(repo_on_project, monkeypatch):
+    sm, project_id, repo_id, root = repo_on_project
+    set_project_config(project_id, "generate_project_guide", "true")
+    _fake_model(monkeypatch, reply={"guide": _TITLE_ONLY})
+
+    guide = await pg.project_guide_for_run(sm, project_id, {"widgets": str(root)})
+
+    assert guide == {"found": False}
+    assert sm.get_project_repo(repo_id)["generated_guide"] is None  # so the next run tries again
 
 
 # --- the planner sees it -----------------------------------------------
@@ -309,6 +423,17 @@ def test_a_generation_failure_is_a_502_and_stores_nothing(guide_api, monkeypatch
     with _client() as client:
         response = client.post(f"{url}/generate")
     assert response.status_code == 502 and "no model configured" in response.json()["detail"]
+    assert sm.get_project_repo(repo_id)["generated_guide"] is None
+
+
+def test_generating_through_the_api_refuses_a_reply_that_is_not_a_guide(guide_api, monkeypatch):
+    sm, _pid, repo_id, _root, url = guide_api
+    _fake_model(monkeypatch, reply={"guide": _TITLE_ONLY})
+
+    with _client() as client:
+        response = client.post(f"{url}/generate")
+
+    assert response.status_code == 502 and "did not produce a usable guide" in response.json()["detail"]
     assert sm.get_project_repo(repo_id)["generated_guide"] is None
 
 

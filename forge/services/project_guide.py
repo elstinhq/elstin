@@ -11,7 +11,7 @@ guide forge generated and stored for it, then nothing. A guide the repo
 ships always wins — a human wrote it — and forge never writes into a
 checkout: the generated guide lives on `ProjectRepo.generated_guide`.
 
-Generation is one single-shot model call over facts gathered by walking the
+Generation is one single-shot call to the planner's model over facts gathered by walking the
 repo (`gather_repo_facts`): a shallow listing, manifests, READMEs, CI
 workflows and a code skeleton. The prompt is built around the failure that
 made this worth having — a guide that says something is *missing* when the
@@ -25,9 +25,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from typing import Any
 
-from forge.config.store import resolve_bool_config
+from forge.config.store import get_config, resolve_bool_config
 from forge.llm.registry import LlmNotConfiguredError
 from forge.services.generation import GenerationError, chat_completion_json
 from forge.tools.codebase_skeleton import build_codebase_skeleton
@@ -66,6 +67,19 @@ _FACTS_CHARS = 26_000
 # paths ("ios/build"), which a per-name check can't use.
 _SKIP_DIRS = frozenset(name for name in DEFAULT_EXCLUDES if "/" not in name) | {"target", "dist", ".idea", ".gradle"}
 
+# What a reply must look like to be stored. A guide is read as authoritative on
+# every planner turn, so a reply that merely names or describes one is worse
+# than none — and a small model does produce those: one returned the title
+# "AGENTS.md for Retail Pricing Platform", another a sentence about the sections
+# it would contain. Real guides are several sections of markdown; these bounds
+# are loose enough for a tiny repo's.
+_MIN_GUIDE_CHARS = 200
+_MIN_GUIDE_HEADINGS = 2
+_HEADING = re.compile(r"(?m)^#{1,4}\s+\S")
+# One retry, with the reason it was refused. More would just re-spend on a
+# model that is not going to manage it.
+_GUIDE_ATTEMPTS = 2
+
 _GUIDE_SCHEMA = {
     "type": "object",
     "properties": {"guide": {"type": "string"}},
@@ -82,7 +96,8 @@ Rules:
 - Include an "Already exists — do not recreate" section naming the scripts, config files, generated files and test setups the material shows, so an agent does not add a second copy.
 - If a file is generated (a header says so, or a README or script names its source), say how to regenerate it and that it must not be edited by hand.
 - Omit any section you have no evidence for. Short and correct beats long and complete.
-- Markdown, about 60 lines at most, no preamble. Suggested sections: Overview, Layout, Commands, Tests, Generated files, Already exists — do not recreate."""
+- Markdown, about 60 lines at most, no preamble. Suggested sections: Overview, Layout, Commands, Tests, Generated files, Already exists — do not recreate.
+- The "guide" field must hold the complete AGENTS.md document itself — headings and content — never a title, a summary, or a description of what it would contain."""
 
 
 class GuideError(RuntimeError):
@@ -101,6 +116,24 @@ def read_repo_guide(repo_path: str) -> tuple[str, str] | None:
             continue
         if text:
             return name, text
+    return None
+
+
+def _guide_model() -> str | None:
+    """The model that writes a guide: the planner's. The guide is written for
+    the planner and dev to treat as authoritative, and the verifier/QA model
+    (the default for a single-shot call, chosen for cheap pass/fail review)
+    returned a title, or a sentence about the sections, in place of the
+    document. None falls back to that default when no planner model is set."""
+    return (get_config("planner_sdk_model") or "").strip() or None
+
+
+def _guide_problem(body: str) -> str | None:
+    """Why this reply is not a usable guide, or None if it is."""
+    if len(body) < _MIN_GUIDE_CHARS:
+        return f"it is only {len(body)} characters"
+    if len(_HEADING.findall(body)) < _MIN_GUIDE_HEADINGS:
+        return "it has no section headings, so it is not a document"
     return None
 
 
@@ -217,25 +250,34 @@ async def generate_project_guide(repo_path: str) -> str:
     facts = await asyncio.to_thread(gather_repo_facts, repo_path)
     if not facts:
         raise GuideError("the repository has no files to describe")
-    try:
-        parsed, _usage = await chat_completion_json(
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": f"Write AGENTS.md for this repository.\n\n{facts}"},
-            ],
-            response_schema=_GUIDE_SCHEMA,
-            response_schema_name="project_guide",
-            label="project guide",
-        )
-    except LlmNotConfiguredError as exc:
-        raise GuideError(str(exc)) from exc
-    except GenerationError as exc:
-        raise GuideError(str(exc)) from exc
+    problem: str | None = None
+    for attempt in range(1, _GUIDE_ATTEMPTS + 1):
+        request = f"Write AGENTS.md for this repository.\n\n{facts}"
+        if problem:
+            request = (
+                f"Your previous reply was rejected: {problem}. The `guide` field must hold the complete AGENTS.md "
+                f"document itself — markdown, starting with a heading and with several sections — not a title or a "
+                f"description of it.\n\n{request}"
+            )
+        try:
+            parsed, _usage = await chat_completion_json(
+                messages=[{"role": "system", "content": _SYSTEM_PROMPT}, {"role": "user", "content": request}],
+                response_schema=_GUIDE_SCHEMA,
+                response_schema_name="project_guide",
+                label="project guide",
+                model=_guide_model(),
+            )
+        except LlmNotConfiguredError as exc:
+            raise GuideError(str(exc)) from exc
+        except GenerationError as exc:
+            raise GuideError(str(exc)) from exc
 
-    body = str((parsed or {}).get("guide") or "").strip()
-    if not body:
-        raise GuideError("the model returned an empty guide")
-    return _cap(f"{GENERATED_HEADER}\n\n{body}")
+        body = str((parsed or {}).get("guide") or "").strip()
+        problem = _guide_problem(body)
+        if problem is None:
+            return _cap(f"{GENERATED_HEADER}\n\n{body}")
+        logger.warning("project guide: attempt %d/%d rejected for %s: %s", attempt, _GUIDE_ATTEMPTS, repo_path, problem)
+    raise GuideError(f"the model did not produce a usable guide ({problem})")
 
 
 async def project_guide_for_run(sm, project_id: int, repo_roots: dict[str, str]) -> dict[str, Any]:
