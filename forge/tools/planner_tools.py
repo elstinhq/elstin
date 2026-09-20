@@ -12,15 +12,12 @@ plan-scoped write tools.
 """
 from __future__ import annotations
 
-import fnmatch
-import os
-
-from forge.tools.grep import DEFAULT_EXCLUDES, MAX_READ_LINES, grep_codebase, read_file
+from forge.tools.find_files import FIND_FILES_DESCRIPTION, MAX_FIND_RESULTS, find_files
+from forge.tools.grep import MAX_READ_LINES, grep_codebase, read_file
 from forge.tools.path_guard import PathGuardError
 from forge.tools.workspace import Workspace
 
 _MAX_GREP_RESULTS = 50
-_MAX_FIND_RESULTS = 200
 
 # Every planner tool is read-only by construction (module docstring), so
 # forge/agents/loop.py may run any consecutive batch of them concurrently.
@@ -97,31 +94,8 @@ def make_planner_tools(
         suffix = "\n... [truncated — narrow your pattern]" if len(lines) >= cap else ""
         return "\n".join(lines) + suffix
 
-    def find_files_tool(glob_pattern: str, max_results: int = _MAX_FIND_RESULTS) -> str:
-        matches: list[str] = []
-        for label, repo_root in workspace.read_roots():
-            root = os.path.realpath(repo_root)
-            found: list[str] = []
-            for dirpath, dirnames, filenames in os.walk(root):
-                rel_dir = os.path.relpath(dirpath, root)
-                dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in DEFAULT_EXCLUDES]
-                for name in filenames:
-                    rel_path = name if rel_dir == "." else f"{rel_dir}/{name}"
-                    if fnmatch.fnmatch(rel_path, glob_pattern) or fnmatch.fnmatch(name, glob_pattern):
-                        found.append(workspace.display_path(label, rel_path))
-                        if len(found) + len(matches) >= max_results:
-                            break
-                if len(found) + len(matches) >= max_results:
-                    break
-            # Sorted per root so the primary repo's files stay grouped
-            # ahead of each reference repo's.
-            matches.extend(sorted(found))
-            if len(matches) >= max_results:
-                break
-        if not matches:
-            return "No files matched."
-        suffix = "\n... [truncated — narrow your pattern]" if len(matches) >= max_results else ""
-        return "\n".join(matches) + suffix
+    def find_files_tool(glob_pattern: str, max_results: int = MAX_FIND_RESULTS) -> str:
+        return find_files(workspace, glob_pattern, max_results)
 
     functions = {"read_file_tool": read_file_tool, "grep_tool": grep_tool, "find_files_tool": find_files_tool}
     schemas = [
@@ -172,16 +146,12 @@ def make_planner_tools(
             "type": "function",
             "function": {
                 "name": "find_files_tool",
-                "description": (
-                    "Find files by name/path glob pattern (e.g. '*.py', '**/test_*.py', "
-                    "'lib/**/*.dart'). Use this to discover what exists before reading or "
-                    "searching it." + workspace_note
-                ),
+                "description": FIND_FILES_DESCRIPTION + workspace_note,
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "glob_pattern": {"type": "string", "description": "Glob pattern matched against the file name or its project-relative path"},
-                        "max_results": {"type": "integer", "description": f"Maximum paths to return (capped at {_MAX_FIND_RESULTS})"},
+                        "max_results": {"type": "integer", "description": f"Maximum paths to return (capped at {MAX_FIND_RESULTS})"},
                     },
                     "required": ["glob_pattern"],
                     "additionalProperties": False,

@@ -86,3 +86,108 @@ def test_read_past_the_end_of_a_file_says_so(tmp_path):
     result = _tools(str(tmp_path))["read_file_tool"]("big.py", offset=5000)
 
     assert result == "[file has 300 line(s); offset 5000 is past the end]"
+
+
+# --- finding files: what dev used to attempt with ls/find ---------------
+
+
+def _touch(root, *rels: str) -> None:
+    for rel in rels:
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write("x\n")
+
+
+def test_find_files_tool_lists_a_folder_by_globbing_under_it(tmp_path):
+    """The exact ask that was refused three times in a failed run:
+    `ls pricing-api/src/main/resources/db/migration`."""
+    root = str(tmp_path)
+    _touch(root, "api/db/migration/V1_1__create.sql", "api/db/migration/V1_2__seed.sql", "api/application.yaml")
+
+    result = _tools(root)["find_files_tool"]("api/db/migration/*")
+
+    assert result.splitlines() == ["api/db/migration/V1_1__create.sql", "api/db/migration/V1_2__seed.sql"]
+
+
+def test_find_files_tool_finds_by_name_anywhere_and_skips_dependency_and_hidden_folders(tmp_path):
+    root = str(tmp_path)
+    _touch(root, "src/a/Price.java", "src/b/Price.java", "node_modules/x/Price.java", ".git/Price.java", "build/Price.java")
+
+    result = _tools(root)["find_files_tool"]("Price.java")
+
+    assert result.splitlines() == ["src/a/Price.java", "src/b/Price.java"]
+
+
+def test_find_files_tool_sees_a_file_created_during_the_run(tmp_path):
+    root = str(tmp_path)
+    tools = _tools(root)
+    assert tools["find_files_tool"]("*.tsx") == "No files matched."
+
+    _touch(root, "web/New.tsx")
+
+    assert tools["find_files_tool"]("*.tsx") == "web/New.tsx"
+
+
+def test_find_files_tool_caps_its_output_and_says_so(tmp_path):
+    root = str(tmp_path)
+    _touch(root, *(f"d/f{i}.txt" for i in range(10)))
+
+    result = _tools(root)["find_files_tool"]("*.txt", 3)
+
+    lines = result.splitlines()
+    assert lines[:3] == ["d/f0.txt", "d/f1.txt", "d/f2.txt"] and "truncated" in lines[3]
+
+
+def test_find_files_tool_is_offered_read_only_and_the_shell_says_it_cannot_list():
+    schemas = {s["function"]["name"]: s["function"] for s in TOOL_SCHEMAS}
+
+    assert "find_files_tool" in READ_ONLY_TOOLS and "find_files_tool" in schemas
+    assert "cannot list" in schemas["run_command_tool"]["description"]
+    assert "find_files_tool" in schemas["run_command_tool"]["description"]
+
+
+# --- a refused command says what to use instead --------------------------
+
+
+def _run(tmp_path, command: str) -> str:
+    return _tools(str(tmp_path))["run_command_tool"](command)
+
+
+def test_a_refused_ls_points_at_find_files_tool(tmp_path):
+    result = _run(tmp_path, "ls pricing-api/src/main/resources/db/migration")
+
+    assert result.startswith("Return Code: -1")
+    assert "blocked by safety policy" in result
+    assert "find_files_tool" in result and "some/folder/*" in result
+
+
+def test_a_refused_find_with_a_pipe_gets_both_the_list_hint_and_the_pipe_rule(tmp_path):
+    result = _run(tmp_path, "find src -maxdepth 3 -type f | sort")
+
+    assert "find_files_tool" in result and "Pipes, redirects and command chaining are never allowed" in result
+
+
+def test_a_refused_grep_points_at_search_and_read(tmp_path):
+    result = _run(tmp_path, "grep -rn currency src")
+
+    assert "search_codebase_tool" in result and "read_file_tool" in result
+
+
+def test_a_refused_git_history_command_explains_what_git_does_run(tmp_path):
+    result = _run(tmp_path, "git show HEAD:src/PriceRecord.java")
+
+    assert "git status, git diff" in result and "read_file_tool" in result
+
+
+def test_an_unknown_refused_command_gets_the_general_guidance(tmp_path):
+    result = _run(tmp_path, "curl https://example.com")
+
+    assert "build, test and codegen commands" in result and "find_files_tool" in result
+
+
+def test_a_command_that_ran_is_not_decorated_with_a_hint(tmp_path):
+    result = _run(tmp_path, "git status")  # allowed; fails here only because tmp_path is not a repo
+
+    assert "blocked by safety policy" not in result
+    assert "find_files_tool" not in result

@@ -9,6 +9,12 @@ from typing import NamedTuple
 from forge.tools import language_hooks
 
 
+# run_safe_command's returncode for a command the allowlist refused (nothing
+# ran). Distinct from -2 (timeout) and -3 (internal error) so a caller can tell
+# "not permitted" from "ran and failed".
+BLOCKED_RETURN_CODE = -1
+
+
 class SafeShellResult(NamedTuple):
     returncode: int
     stdout: str
@@ -66,7 +72,7 @@ def run_safe_command(worktree_path: str, command: str, timeout_seconds: int = 18
     """Execute a whitelisted shell command within the specified worktree path."""
     if not is_safe_command(command):
         return SafeShellResult(
-            returncode=-1, stdout="", stderr=f"Command execution blocked by safety policy: '{command}'"
+            returncode=BLOCKED_RETURN_CODE, stdout="", stderr=f"Command execution blocked by safety policy: '{command}'"
         )
 
     try:

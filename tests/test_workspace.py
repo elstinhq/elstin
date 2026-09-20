@@ -252,6 +252,13 @@ def _dev(ui: str, api: str | None, allowed=frozenset({"src/cart.ts"}), writes_ap
     )
 
 
+def test_dev_find_files_spans_every_repo_and_prefixes_the_others(two_repos):
+    ui, api = two_repos
+    functions, _ = _dev(ui, api)
+
+    assert functions["find_files_tool"]("*cart*").splitlines() == ["src/cart.ts", "@api/models/cart.py"]
+
+
 def test_dev_read_and_search_reach_every_repo(two_repos):
     """Readable regardless of whether the plan writes it — a UI change
     still has to be written against the API contract it matches."""
@@ -322,5 +329,5 @@ def test_the_prefix_aware_tools_are_the_reads_and_the_writes(two_repos):
     advertised = {s["function"]["name"] for s in schemas if "spans several repos" in s["function"]["description"]}
 
     assert advertised == {
-        "read_file_tool", "search_codebase_tool", "write_file_tool", "edit_file_tool", "apply_edits_tool",
+        "read_file_tool", "search_codebase_tool", "find_files_tool", "write_file_tool", "edit_file_tool", "apply_edits_tool",
     }

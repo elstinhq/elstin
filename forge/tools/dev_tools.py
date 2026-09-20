@@ -19,12 +19,13 @@ from typing import Any
 from forge.tools import language_hooks
 from forge.tools.docs_tool import lookup_sdk_symbol
 from forge.tools.edit_file import EditFileError, edit_file
+from forge.tools.find_files import FIND_FILES_DESCRIPTION, MAX_FIND_RESULTS, find_files
 from forge.tools.filesystem import roll_back_file, snapshot_baseline, write_file
 from forge.tools.grep import MAX_READ_LINES, grep_codebase, read_file
 from forge.tools.language_hooks import run_analyze
 from forge.tools.path_guard import PathGuardError
 from forge.tools.progress import PROGRESS_STATUSES, merge_progress_update, render_progress
-from forge.tools.safe_shell import run_safe_command
+from forge.tools.safe_shell import BLOCKED_RETURN_CODE, run_safe_command
 from forge.tools.web_tools import fetch_url, search_web
 from forge.tools.workspace import Workspace
 
@@ -36,7 +37,9 @@ _RUN_COMMAND_STDERR_TAIL = 1000
 # analyze_changed_files_tool is deliberately NOT here: a compiler check
 # can write build output (Java's target/, Dart's .dart_tool/), so two
 # overlapping runs could trip over each other.
-READ_ONLY_TOOLS: frozenset[str] = frozenset({"read_file_tool", "search_codebase_tool", "lookup_sdk_symbol_tool"})
+READ_ONLY_TOOLS: frozenset[str] = frozenset(
+    {"read_file_tool", "search_codebase_tool", "find_files_tool", "lookup_sdk_symbol_tool"}
+)
 
 # Tools whose execution counts as implementation progress for the loop's
 # idle-turn budget (forge/agents/loop.py's LoopConfig.progress_tools).
@@ -176,6 +179,44 @@ def _scoped_analyze(workspace: Workspace, analyze_targets: list[str]) -> str:
         },
         indent=2,
     )
+
+
+# Shell habits a model brings with it, and what to do here instead. The shell
+# is an allowlist of build/test/codegen commands (safe_shell.py), so these are
+# refused — and a bare refusal leaves the model retrying variants of the same
+# command, each one a turn with no edit toward the idle-turn budget.
+_LIST_COMMANDS = frozenset({"ls", "find", "tree", "dir", "fd", "locate"})
+_READ_COMMANDS = frozenset({"cat", "head", "tail", "less", "more", "grep", "rg", "ag", "ack", "sed", "awk", "wc", "sort", "xargs"})
+_SHELL_OPERATORS = (";", "&&", "||", "|", "`", "$", "(", ")", "<", ">")
+
+
+def _blocked_command_hint(command: str) -> str:
+    """What to use instead of a command the shell refused."""
+    try:
+        first = (shlex.split(command) or [""])[0]
+    except ValueError:
+        first = command.split()[0] if command.split() else ""
+
+    if first in _LIST_COMMANDS:
+        hint = (
+            "To see what files exist use find_files_tool: give it a glob, e.g. 'some/folder/*' to list a folder "
+            "or '**/*.ext' to find files by name."
+        )
+    elif first in _READ_COMMANDS:
+        hint = "To search file contents use search_codebase_tool; to read a file use read_file_tool."
+    elif first == "git":
+        hint = (
+            "Only git status, git diff, git add and git checkout run here. The worktree already is the branch's HEAD, "
+            "so read_file_tool shows the committed content of any file you have not edited, and git diff shows what you changed."
+        )
+    else:
+        hint = (
+            "run_command_tool only runs this project's build, test and codegen commands. To explore the repo use "
+            "find_files_tool (names), search_codebase_tool (contents) and read_file_tool (one file)."
+        )
+    if any(op in command for op in _SHELL_OPERATORS):
+        hint += " Pipes, redirects and command chaining are never allowed: run one command at a time."
+    return hint
 
 
 def _guard_run_command(
@@ -338,6 +379,22 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "find_files_tool",
+            "description": FIND_FILES_DESCRIPTION + " This is how you list a folder or find a file by name; the shell cannot.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "glob_pattern": {"type": "string", "description": "Glob matched against the file name or its project-relative path"},
+                    "max_results": {"type": "integer", "description": f"Maximum paths to return (capped at {MAX_FIND_RESULTS})"},
+                },
+                "required": ["glob_pattern"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "lookup_sdk_symbol_tool",
             "description": (
                 "Look up the exact signature and docstring of an SDK/framework API "
@@ -398,7 +455,9 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "name": "run_command_tool",
             "description": (
                 "Run a whitelisted shell command (e.g. 'dart run build_runner build', "
-                "'mvn -q dependency:resolve'). Do NOT use for the project's analyze/compile "
+                "'mvn -q dependency:resolve'). It cannot list, find or read files (no ls, find, "
+                "grep, cat) and takes no pipes: use find_files_tool, search_codebase_tool and "
+                "read_file_tool for that. Do NOT use for the project's analyze/compile "
                 "command (e.g. 'flutter analyze', 'mvn compile') — use "
                 "analyze_changed_files_tool instead. Running the project's test command is "
                 "only allowed when the plan includes test files."
@@ -417,6 +476,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 _WORKSPACE_AWARE_TOOLS = (
     "read_file_tool",
     "search_codebase_tool",
+    "find_files_tool",
     "write_file_tool",
     "edit_file_tool",
     "apply_edits_tool",
@@ -616,6 +676,12 @@ def make_dev_tools(
         except Exception as exc:
             return f"Error searching codebase: {exc}"
 
+    def find_files_tool(glob_pattern: str, max_results: int | None = None) -> str:
+        try:
+            return find_files(read_workspace, glob_pattern, max_results or MAX_FIND_RESULTS)
+        except Exception as exc:
+            return f"Error finding files: {exc}"
+
     def lookup_sdk_symbol_tool(query: str) -> str:
         try:
             return lookup_sdk_symbol(worktree_path, query)
@@ -645,6 +711,8 @@ def make_dev_tools(
             return guard_result
         try:
             res = run_safe_command(worktree_path, safe_command)
+            if res.returncode == BLOCKED_RETURN_CODE:
+                return f"Return Code: {res.returncode}\nSTDOUT:\n\nSTDERR:\n{res.stderr}\n{_blocked_command_hint(command)}"
             return f"Return Code: {res.returncode}\nSTDOUT:\n{_truncate_tail(res.stdout, _RUN_COMMAND_STDOUT_TAIL)}\nSTDERR:\n{_truncate_tail(res.stderr, _RUN_COMMAND_STDERR_TAIL)}"
         except Exception as exc:
             return f"Error running command: {exc}"
@@ -656,6 +724,7 @@ def make_dev_tools(
         "apply_edits_tool": apply_edits_tool,
         "roll_back_file_tool": roll_back_file_tool,
         "search_codebase_tool": search_codebase_tool,
+        "find_files_tool": find_files_tool,
         "lookup_sdk_symbol_tool": lookup_sdk_symbol_tool,
         "analyze_changed_files_tool": analyze_changed_files_tool,
         "update_progress_tool": update_progress_tool,

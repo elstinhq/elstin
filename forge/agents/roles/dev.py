@@ -31,7 +31,8 @@ you created and modified — do not call any more tools.
 CRITICAL — Issue independent tool calls TOGETHER in a single turn:
 - You can return SEVERAL tool calls in one response. Any calls that do not depend on each other's results MUST go out together.
 - Creating planned files: when the plan lists several files to create and you know what goes in them, issue ALL those "write_file" calls in ONE turn. Do NOT write one file per turn.
-- Exploring: issue all the "read_file" / "search_codebase" calls you need at once rather than one at a time.
+- Exploring: issue all the "read_file" / "search_codebase" / "find_files" calls you need at once rather than one at a time.
+- To see what is in a folder or find a file by name, use "find_files" (e.g. 'some/folder/*' or '**/*.ext'). The shell ("run_command") cannot list, find or read files and takes no pipes — do not try ls, find, grep or cat there.
 - Only split across turns when a call genuinely needs an earlier call's result (e.g. read a file, then edit it based on what you read).
 - Every extra turn re-sends the entire conversation so far, so one turn with five calls costs far less than five turns with one call.
 
