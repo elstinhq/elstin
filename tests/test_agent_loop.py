@@ -705,6 +705,86 @@ async def test_idle_budget_is_off_without_progress_tools():
     assert result.terminal_reason == TERMINAL_END_TURN
 
 
+def _trailing_text(request) -> str:
+    """The text of the request's last message, or "" when that message is a
+    tool result (no reminder or warning was appended this turn)."""
+    return getattr(request.messages[-1].content[0], "text", "")
+
+
+async def test_the_last_turns_before_an_idle_stop_carry_a_warning_that_is_never_stored():
+    """The stop used to be silent: a model mid-way through reading a big
+    codebase was simply cut off. Two turns out it is told, and how many it
+    has left."""
+    provider = FakeProvider(script=[
+        _tool_call_response("read_file_tool", {"path": f"f{i}"}, call_id=f"c{i}") for i in range(5)
+    ] + [_text_response("never reached")])
+    result = await run_agent_loop(
+        _config(
+            provider, tool_fns={"read_file_tool": lambda path: "x"},
+            progress_tools=frozenset({"edit_file_tool", "write_file_tool"}), max_idle_turns=5,
+        ),
+        [text_message("user", "go")],
+    )
+
+    assert result.turns_used == 5 and len(provider.calls) == 5
+    assert not any("IDLE WARNING" in _trailing_text(r) for r in provider.calls[:3])
+    assert "IDLE WARNING: 3 turn(s)" in _trailing_text(provider.calls[3]) and "stops after 2 more" in _trailing_text(provider.calls[3])
+    assert "stops after 1 more" in _trailing_text(provider.calls[4])
+    # it names what counts as writing, generically
+    assert "edit_file_tool, write_file_tool" in _trailing_text(provider.calls[3])
+    # and, like the reminder it rides with, it never enters history
+    assert "IDLE WARNING" not in str(result.history)
+
+
+async def test_the_warning_clears_once_the_model_writes():
+    provider = FakeProvider(script=[
+        _tool_call_response("read_file_tool", {"path": "a"}, call_id="c1"),
+        _tool_call_response("read_file_tool", {"path": "b"}, call_id="c2"),
+        _tool_call_response("edit_file_tool", {"path": "a"}, call_id="c3"),
+        _text_response("done"),
+    ])
+    await run_agent_loop(
+        _config(
+            provider, tool_fns={"read_file_tool": lambda path: "x", "edit_file_tool": lambda path: "edited"},
+            progress_tools=frozenset({"edit_file_tool"}), max_idle_turns=4,
+        ),
+        [text_message("user", "go")],
+    )
+
+    assert "IDLE WARNING" in _trailing_text(provider.calls[2])  # two idle turns in, two left
+    assert "IDLE WARNING" not in _trailing_text(provider.calls[3])  # the edit reset it
+
+
+async def test_the_warning_shares_one_trailing_message_with_the_reminder():
+    provider = FakeProvider(script=[
+        _tool_call_response("read_file_tool", {"path": "a"}, call_id="c1"),
+        _text_response("done"),
+    ])
+    await run_agent_loop(
+        _config(
+            provider, tool_fns={"read_file_tool": lambda path: "x"},
+            progress_tools=frozenset({"edit_file_tool"}), max_idle_turns=2, trailing_reminder=lambda: "THE BOARD",
+        ),
+        [text_message("user", "go")],
+    )
+
+    trailing = _trailing_text(provider.calls[1])
+    assert trailing.startswith("THE BOARD") and "IDLE WARNING" in trailing
+    assert [m.role for m in provider.calls[1].messages].count("user") == 2  # the brief, plus one trailing message
+
+
+async def test_no_warning_without_an_idle_budget():
+    provider = FakeProvider(script=[
+        _tool_call_response("read_file_tool", {"path": f"f{i}"}, call_id=f"c{i}") for i in range(4)
+    ] + [_text_response("done")])
+    await run_agent_loop(
+        _config(provider, tool_fns={"read_file_tool": lambda path: "x"}, max_idle_turns=2),  # no progress_tools
+        [text_message("user", "go")],
+    )
+
+    assert not any("IDLE WARNING" in _trailing_text(r) for r in provider.calls)
+
+
 # --- trailing reminder --------------------------------------------------
 
 

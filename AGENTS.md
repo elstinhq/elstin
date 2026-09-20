@@ -255,7 +255,14 @@ same loop drives GPT, DeepSeek, or a local vLLM/Ollama endpoint):
   mutating call.
 - **Idle-turn budget** (dev only, `dev_sdk_max_idle_turns`): N consecutive
   tool turns with no `PROGRESS_TOOLS` call end the run as a soft stop
-  (`no_progress`), same handling as a turn cap.
+  (`no_progress`), same handling as a turn cap. The configured N is the
+  base for a small plan: `idle_budget_for_plan` (`agents/roles/dev_loop.py`)
+  adds one turn per two further planned files, capped at 4× the base — a
+  15-file change cannot be understood in the turns that suit a one-file fix,
+  and a run cut off mid-exploration wrote nothing three rounds running. The
+  cap keeps it a bound on a model that is only looping. In the last
+  `IDLE_WARNING_WINDOW` turns before the stop, the trailing message also
+  says how many are left (`_idle_warning`), so the cut-off is never a surprise.
 - **Trailing reminder** (`LoopConfig.trailing_reminder`): a callable
   re-evaluated each turn whose text is appended to the *request* as a
   final user message and never stored in `history`. That is what keeps it

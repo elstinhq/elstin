@@ -90,7 +90,8 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
     ConfigField("dev_sdk_max_budget_usd", "Dev agent max spend per run in USD (0 = unbounded)", False, "0", "string"),
     ConfigField(
         "dev_sdk_max_idle_turns",
-        "Dev agent: stop early after this many consecutive turns with no file edit (0 = off; anti-looping guard for weaker models)",
+        "Dev agent: stop early after this many consecutive turns with no file edit (0 = off; anti-looping guard for weaker models). "
+        "This is the base for a small plan; a plan touching many files gets more (+1 per 2 extra files, up to 4x)",
         False, "4", "string",
     ),
     ConfigField("planner_sdk_model", "Planner agent model", False, "gpt-5.1", "string"),

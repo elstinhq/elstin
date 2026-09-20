@@ -94,6 +94,27 @@ def classify_loop_result(terminal_reason: str | None, is_error: bool) -> DevLoop
     return "success"
 
 
+# The idle-turn budget (turns in a row without writing a file before the run
+# is stopped) is configured as a flat number, but how much reading a run needs
+# before its first write grows with the plan: a fifteen-file change spanning an
+# API and a UI cannot be understood in the four turns that suit a one-file
+# fix, and a run that read 35 files in four turns and was then cut off before
+# writing any of them failed three fix rounds in a row. So the configured
+# value is the base for a small plan and grows by one turn per two further
+# planned files, up to _IDLE_BUDGET_CAP_FACTOR times the base — enough room to
+# explore a big change, still a bound on a model that is only looping.
+_IDLE_TURNS_PER_EXTRA_FILES = 2
+_IDLE_BUDGET_CAP_FACTOR = 4
+
+
+def idle_budget_for_plan(base: int, planned_files: int) -> int:
+    """The idle-turn budget for a plan of this many files. 0 (off) stays off."""
+    if base <= 0:
+        return 0
+    extra = max(0, planned_files - 1) // _IDLE_TURNS_PER_EXTRA_FILES
+    return min(base + extra, base * _IDLE_BUDGET_CAP_FACTOR)
+
+
 def _build_prompt(*, continuing: bool, plan: dict[str, Any], context_bundle: dict[str, Any], brief: str) -> str:
     if continuing:
         return brief
@@ -334,6 +355,9 @@ async def run_dev(
 
         initial_messages = (history_from_json(prior_history) if prior_history else []) + [text_message("user", prompt)]
 
+        idle_budget = idle_budget_for_plan(get_int_config("dev_sdk_max_idle_turns", 4), len(progress_items))
+        logger.info("Dev idle budget run_id=%s planned_files=%d turns=%d", run_id, len(progress_items), idle_budget)
+
         config = LoopConfig(
             provider=provider,
             model=resolved_model,
@@ -347,7 +371,7 @@ async def run_dev(
             read_only_tools=READ_ONLY_TOOLS | WEB_TOOLS,
             progress_tools=PROGRESS_TOOLS,
             bookkeeping_tools=BOOKKEEPING_TOOLS,
-            max_idle_turns=get_int_config("dev_sdk_max_idle_turns", 4),
+            max_idle_turns=idle_budget,
             # Re-shown at the end of every request, never stored in
             # history — see forge/agents/loop.py's trailing_reminder.
             trailing_reminder=lambda: render_progress(progress_items),

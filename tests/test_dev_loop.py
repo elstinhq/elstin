@@ -244,6 +244,60 @@ async def test_run_dev_no_progress_stop_is_a_soft_stop(git_repo: str, monkeypatc
     assert result["dev_history"]
 
 
+@pytest.mark.parametrize(
+    "base,files,expected",
+    [
+        (4, 0, 4), (4, 1, 4), (4, 2, 4),  # a small plan keeps the configured budget
+        (4, 3, 5), (4, 5, 6), (4, 15, 11),  # +1 turn per two further files
+        (4, 200, 16),  # but bounded: a looping model must still be stopped
+        (2, 15, 8),
+        (0, 15, 0), (-1, 5, 0),  # off stays off
+    ],
+)
+def test_idle_budget_grows_with_the_plan_and_is_bounded(base, files, expected):
+    from forge.agents.roles.dev_loop import idle_budget_for_plan
+
+    assert idle_budget_for_plan(base, files) == expected
+
+
+async def _run_with_read_only_turns(git_repo: str, monkeypatch: pytest.MonkeyPatch, *, planned_files: int, read_turns: int):
+    """A dev run that explores for `read_turns` turns and then finishes
+    without ever writing — the shape of the run that failed three fix rounds."""
+    import forge.agents.roles.dev_loop as dev_loop_module
+    from forge.config.store import set_config
+
+    set_config("openai_api_key", "sk-test")
+    set_config("dev_sdk_max_idle_turns", "2")
+    monkeypatch.setattr(
+        dev_loop_module, "get_provider",
+        lambda: FakeProvider(script=[
+            _tool_call_response("search_codebase_tool", {"query": f"q{i}"}, call_id=f"c{i}") for i in range(read_turns)
+        ] + [_text_response("done")]),
+    )
+    plan = {"files_to_create": [{"path": f"new_{i}.py"} for i in range(planned_files)]}
+    return await run_dev(plan=plan, context_bundle={}, worktree_path=git_repo, project_path=git_repo)
+
+
+async def test_a_multi_file_plan_is_not_cut_off_by_the_exploration_a_small_one_would_be(
+    git_repo: str, monkeypatch: pytest.MonkeyPatch
+):
+    """Five read-only turns with a base budget of 2: one planned file gets 2
+    and is stopped; twelve get 2 + 5 = 7 and are still reading when they
+    finish. The base is the same — the plan size is the difference."""
+    small = await _run_with_read_only_turns(git_repo, monkeypatch, planned_files=1, read_turns=5)
+    large = await _run_with_read_only_turns(git_repo, monkeypatch, planned_files=12, read_turns=5)
+
+    assert small["truncated"] is True
+    assert large["truncated"] is False
+
+
+async def test_a_multi_file_plan_that_only_loops_is_still_stopped(git_repo: str, monkeypatch: pytest.MonkeyPatch):
+    """Scaling must not remove the guard: 12 files allows 7 idle turns, not 20."""
+    result = await _run_with_read_only_turns(git_repo, monkeypatch, planned_files=12, read_turns=20)
+
+    assert result["truncated"] is True
+
+
 async def test_dev_run_seeds_the_checklist_from_the_plan_and_reshows_it_each_turn(
     git_repo: str, monkeypatch: pytest.MonkeyPatch
 ):

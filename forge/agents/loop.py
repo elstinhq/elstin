@@ -58,7 +58,9 @@ model does:
    without executing any file-modifying tool ends early with
    TERMINAL_NO_PROGRESS — a soft stop, like a turn cap, since whatever was
    done so far is real. Opt-in per role (the planner never modifies files,
-   so it leaves both unset).
+   so it leaves both unset). In the last IDLE_WARNING_WINDOW turns before
+   the stop the trailing message also carries a warning saying how many are
+   left, so the cut-off is never a surprise.
 
 5. **A trailing reminder** (LoopConfig.trailing_reminder). A callable
    re-evaluated every turn whose text is appended to the *request* as a
@@ -476,6 +478,32 @@ async def _dispatch_tool_calls(config: LoopConfig, tool_calls: list[ToolCallBloc
 # --- the loop ------------------------------------------------------------
 
 
+# How many turns before the idle budget runs out the model starts being told.
+IDLE_WARNING_WINDOW = 2
+
+
+def _idle_warning(idle_turns: int, config: LoopConfig) -> str:
+    """A nudge for a run that is close to being stopped for not writing.
+
+    The idle-turn budget used to end a run silently: the model, mid-way
+    through reading a large codebase, was simply cut off, and never had the
+    chance to act on it. In the last IDLE_WARNING_WINDOW turns before the stop
+    this says how many are left and what counts, so a run that has explored
+    enough can start writing instead. Empty when the budget is off, when the
+    last turn made progress, or while there is still plenty of room."""
+    if not (config.max_idle_turns and config.progress_tools) or idle_turns <= 0:
+        return ""
+    remaining = config.max_idle_turns - idle_turns
+    if remaining > IDLE_WARNING_WINDOW:
+        return ""
+    writers = ", ".join(sorted(config.progress_tools))
+    return (
+        f"IDLE WARNING: {idle_turns} turn(s) in a row without writing a file — reading and searching do not count. "
+        f"The run stops after {remaining} more such turn(s). You have explored enough: write the planned files now "
+        f"({writers}), and go back to reading only when a specific edit needs it."
+    )
+
+
 async def run_agent_loop(config: LoopConfig, initial_messages: list[Message]) -> LoopResult:
     history: list[Message] = list(initial_messages)
     usage_total = Usage()
@@ -502,6 +530,7 @@ async def run_agent_loop(config: LoopConfig, initial_messages: list[Message]) ->
         # Appended to the request only. Everything before it is unchanged
         # from last turn, so the cached prefix survives.
         turn_messages = list(history)
+        reminder = ""
         if config.trailing_reminder:
             try:
                 reminder = config.trailing_reminder()
@@ -513,8 +542,13 @@ async def run_agent_loop(config: LoopConfig, initial_messages: list[Message]) ->
                 # remaining epic for the cycle.
                 logger.warning("trailing_reminder raised — continuing without it this turn", exc_info=True)
                 reminder = ""
-            if reminder:
-                turn_messages.append(Message(role="user", content=[TextBlock(text=reminder)]))
+        # Rides in the same trailing message, so it is just as cheap and just
+        # as absent from history — see _idle_warning.
+        warning = _idle_warning(idle_turns, config)
+        if warning:
+            reminder = f"{reminder}\n\n{warning}" if reminder else warning
+        if reminder:
+            turn_messages.append(Message(role="user", content=[TextBlock(text=reminder)]))
 
         request = LlmRequest(
             model=config.model,
