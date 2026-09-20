@@ -231,7 +231,11 @@ async def gate_node(state: FeatureRunState) -> dict:
             "messages": [{"role": "gate", "content": "Deterministic gate failed; retries exhausted."}],
         }
 
-    feedback = format_gate_feedback(gate, attempt=attempts, max_attempts=max_attempts)
+    # file_changes is git's view of every worktree the story writes, so empty
+    # means nothing on disk has changed — not merely that dev claims nothing.
+    feedback = format_gate_feedback(
+        gate, attempt=attempts, max_attempts=max_attempts, wrote_nothing=not state.get("file_changes"),
+    )
     logger.warning("gate failed run_id=%s attempt=%d/%d -> dev: %s", run_id, attempts, max_attempts, "; ".join(map(str, blockers[:5])))
     return {
         "status": "developing",

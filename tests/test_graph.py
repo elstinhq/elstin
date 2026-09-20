@@ -272,6 +272,53 @@ async def test_gate_failure_routes_back_to_dev_with_feedback_and_never_enters_th
     assert result["gate_attempts"] == 0  # reset by the pass
 
 
+async def test_gate_feedback_says_nothing_was_written_only_while_the_worktree_is_untouched(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+):
+    """Round one writes nothing, round two writes a file but not the rest:
+    dev is told it wrote nothing the first time and not the second."""
+    import forge.orchestration.graph as graph_module
+
+    unwritten = {
+        "passed": False,
+        "issues": [{"severity": "blocker", "file": "b.py", "reason": "Dev did not modify target file: b.py", "kind": "unmodified_target"}],
+        "required_fixes": ["Dev did not modify target file: b.py"],
+    }
+    gate_results = [unwritten, unwritten, {"passed": True, "issues": [], "required_fixes": []}]
+    dev_results = [
+        {"file_changes": [], "truncated": True, "messages": [], "dev_history": [], "dev_build_runner": {}},
+        {"file_changes": [{"path": "a.py"}], "truncated": False, "messages": [], "dev_history": [], "dev_build_runner": {}},
+        {"file_changes": [{"path": "a.py"}, {"path": "b.py"}], "truncated": False, "messages": [], "dev_history": [], "dev_build_runner": {}},
+    ]
+    dev_calls: list[dict] = []
+
+    async def scripted_gate(**kwargs) -> dict:
+        return gate_results.pop(0)
+
+    async def scripted_dev(**kwargs) -> dict:
+        dev_calls.append(kwargs)
+        return dev_results.pop(0)
+
+    async def passing_verifier(**kwargs) -> dict:
+        return {"verifier_report": {"passed": True}, "diffs": [], "messages": []}
+
+    monkeypatch.setattr(graph_module, "run_deterministic_gate", scripted_gate)
+    monkeypatch.setattr(graph_module, "run_dev", scripted_dev)
+    monkeypatch.setattr(graph_module, "run_verifier", passing_verifier)
+
+    thread_id = str(uuid.uuid4())
+    state = initial_state(thread_id, "Add a widget", "/repo")
+    state["worktree_path"] = "/repo-worktrees/eng-1"
+    async with checkpointer_from_url(postgres_url) as checkpointer:
+        graph = compile_graph(checkpointer, require_plan_approval=False)
+        await graph.ainvoke(state, {"configurable": {"thread_id": thread_id}})
+
+    assert len(dev_calls) == 3
+    assert "wrote NO files" in dev_calls[1]["gate_feedback"]
+    assert "Change these with edit_file_tool" in dev_calls[1]["gate_feedback"]
+    assert "wrote NO files" not in dev_calls[2]["gate_feedback"]
+
+
 async def test_gate_failing_every_time_fails_the_run_without_a_verifier_call(
     postgres_url: str, monkeypatch: pytest.MonkeyPatch
 ):

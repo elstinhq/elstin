@@ -57,6 +57,17 @@ def _planned_paths(items: list[Any]) -> list[str]:
     return paths
 
 
+# What a plan-coverage blocker is about, as a field rather than something to
+# parse back out of its message. These are the failures where dev has simply
+# not written a file the approved plan names — as opposed to an analyzer or
+# test failure in code it did write — and format_gate_feedback tells dev to
+# write them, not to investigate.
+KIND_MISSING_NEW_FILE = "missing_new_file"  # a planned new file does not exist
+KIND_UNMODIFIED_TARGET = "unmodified_target"  # a planned modification was never made
+KIND_MISSING_TARGET = "missing_target"  # a planned modify target is not in the worktree
+_UNWRITTEN_KINDS = (KIND_MISSING_NEW_FILE, KIND_UNMODIFIED_TARGET, KIND_MISSING_TARGET)
+
+
 def _dev_target_paths(file_changes: list[dict[str, Any]] | None) -> set[str]:
     return {path.lstrip("/") for path in (_planned_paths(file_changes or []))}
 
@@ -87,7 +98,7 @@ def compare_to_plan(
         abs_path = os.path.join(worktree_path, rel)
         if not os.path.isfile(abs_path):
             msg = f"Missing planned new file: {rel}"
-            issues.append({"severity": "blocker", "file": rel, "reason": msg})
+            issues.append({"severity": "blocker", "file": rel, "reason": msg, "kind": KIND_MISSING_NEW_FILE})
             required_fixes.append(msg)
 
     # Every planned file_to_modify is checked against `changed` regardless
@@ -100,11 +111,11 @@ def compare_to_plan(
         abs_path = os.path.join(worktree_path, rel)
         if not os.path.isfile(abs_path):
             msg = f"Dev target missing in worktree: {rel}"
-            issues.append({"severity": "blocker", "file": rel, "reason": msg})
+            issues.append({"severity": "blocker", "file": rel, "reason": msg, "kind": KIND_MISSING_TARGET})
             required_fixes.append(msg)
         elif rel not in changed:
             msg = f"Dev did not modify target file: {rel}"
-            issues.append({"severity": "blocker", "file": rel, "reason": msg})
+            issues.append({"severity": "blocker", "file": rel, "reason": msg, "kind": KIND_UNMODIFIED_TARGET})
             required_fixes.append(msg)
         else:
             profile = language_hooks.profile_for_path(worktree_path, rel)
@@ -180,6 +191,9 @@ _FAILED_OUTPUT_TAIL = 1_500
 # stdout tail is where this cap bites.
 _GATE_FEEDBACK_DETAIL_CHARS = 1_500
 _GATE_FEEDBACK_MAX_ISSUES = 8
+# Planned files listed per group before "and N more" — the checklist dev is
+# shown every turn names them all, so the message need not.
+_GATE_FEEDBACK_MAX_UNWRITTEN = 20
 _GATE_FEEDBACK_MAX_ERROR_LINES = 25
 
 # `path:line` / `path:line:col` in analyzer/test output — every toolchain
@@ -346,19 +360,44 @@ def _gate_issue_details(gate: dict[str, Any], issue: dict[str, Any]) -> str:
     return ""
 
 
-def format_gate_feedback(gate: dict[str, Any], *, attempt: int, max_attempts: int) -> str:
+def format_gate_feedback(gate: dict[str, Any], *, attempt: int, max_attempts: int, wrote_nothing: bool = False) -> str:
     """The user message the graph sends dev when Tier 1 fails — one
     targeted fix brief in place of a verifier review. Leads with a
     headline a weak model can act on ("2 problem(s) in auth_service.dart,
     login_page.dart"), then each blocker with its verbatim toolchain
-    output, then exactly what to do next."""
+    output, then exactly what to do next.
+
+    Two kinds of failure need opposite instructions. An analyzer or test
+    failure is in code dev wrote: fix it, minimally. A plan-coverage failure
+    (a planned file never created or changed) is code dev has NOT written:
+    the only fix is to write it. Told the second in the first's terms — "fix
+    these specific failures", "do not rewrite files from scratch" — a model
+    that had spent its turns reading went back to reading, and a run wrote
+    nothing across three attempts. So the unwritten files are pulled out of
+    the numbered list into their own section that names the tool for each
+    and says to write now, and the closing instruction changes to match.
+
+    `wrote_nothing`: the worktree has no changes at all. Said outright, with
+    a warning on the last attempt, because in that state the model's own
+    account of what it has done cannot be trusted to match the disk."""
     issues = [i for i in (gate.get("issues") or []) if isinstance(i, dict)]
     if not issues:
         issues = [{"reason": str(fix)} for fix in (gate.get("required_fixes") or [])]
 
     files: list[str] = []
+    unwritten: dict[str, list[str]] = {kind: [] for kind in _UNWRITTEN_KINDS}
+    others: list[dict[str, Any]] = []
+    for issue in issues:
+        kind = issue.get("kind")
+        if kind in unwritten and issue.get("file"):
+            unwritten[kind].append(str(issue["file"]))
+            files.append(str(issue["file"]))
+        else:
+            others.append(issue)
+    has_unwritten = any(unwritten.values())
+
     numbered: list[str] = []
-    for idx, issue in enumerate(issues[:_GATE_FEEDBACK_MAX_ISSUES], 1):
+    for idx, issue in enumerate(others[:_GATE_FEEDBACK_MAX_ISSUES], 1):
         reason = str(issue.get("reason") or "unspecified failure").strip()
         details = _gate_issue_details(gate, issue)
         if issue.get("file"):
@@ -375,21 +414,56 @@ def format_gate_feedback(gate: dict[str, Any], *, attempt: int, max_attempts: in
     seen: set[str] = set()
     unique_files = [f for f in files if not (f in seen or seen.add(f))]
     where = f" in {', '.join(unique_files[:6])}" if unique_files else ""
-    omitted = len(issues) - len(numbered)
+    omitted = len(others) - len(numbered)
 
-    lines = [
-        f"Deterministic checks FAILED with {len(issues)} problem(s){where} (fix attempt {attempt}/{max_attempts}).",
-        "The analyzer/test runner ran on your worktree before any review. Fix these specific failures — nothing else:",
-        "",
-        *numbered,
-    ]
+    lines = [f"Deterministic checks FAILED with {len(issues)} problem(s){where} (fix attempt {attempt}/{max_attempts})."]
+    if wrote_nothing:
+        lines.append(
+            "Your last attempt wrote NO files: the worktree is unchanged, so none of the planned work exists yet."
+            + (" This is your last attempt — if the next check fails, the story fails." if attempt >= max_attempts - 1 else "")
+        )
+
+    if has_unwritten:
+        total = sum(len(paths) for paths in unwritten.values())
+        lines += ["", f"PLANNED FILES STILL NOT WRITTEN ({total}):"]
+        groups = (
+            (KIND_MISSING_NEW_FILE, "Create these with write_file_tool:"),
+            (KIND_UNMODIFIED_TARGET, "Change these with edit_file_tool / apply_edits_tool:"),
+            (KIND_MISSING_TARGET, "These paths are not in the worktree — check the path in the plan, or create the file with write_file_tool if the plan means a new one:"),
+        )
+        for kind, heading in groups:
+            paths = unwritten[kind]
+            if not paths:
+                continue
+            lines.append(f"  {heading}")
+            lines.extend(f"    - {path}" for path in paths[:_GATE_FEEDBACK_MAX_UNWRITTEN])
+            if len(paths) > _GATE_FEEDBACK_MAX_UNWRITTEN:
+                lines.append(f"    ... and {len(paths) - _GATE_FEEDBACK_MAX_UNWRITTEN} more (your PROGRESS CHECKLIST lists every planned file)")
+        if numbered:
+            lines += ["", "The analyzer/test runner also reported these — fix them as well:", "", *numbered]
+    else:
+        lines += [
+            "The analyzer/test runner ran on your worktree before any review. Fix these specific failures — nothing else:",
+            "",
+            *numbered,
+        ]
     if omitted > 0:
         lines.append(f"... and {omitted} more problem(s); run analyze_changed_files_tool to see them all.")
-    lines.extend([
-        "",
-        "Apply the fixes with edit_file_tool/apply_edits_tool (do not rewrite files from scratch; do not touch files outside the plan), "
-        "then run analyze_changed_files_tool. When it passes for your files, respond with a plain-text summary.",
-    ])
+
+    if has_unwritten:
+        lines.extend([
+            "",
+            "Your next turn must be write_file_tool / edit_file_tool / apply_edits_tool calls for these files — several independent "
+            "calls in ONE turn, not one file per turn. Do not explore or re-read first: the plan is above and you have already "
+            "explored; read a file only when an edit must copy its exact text. "
+            "Then run analyze_changed_files_tool; when it passes for your files, respond with a plain-text summary.",
+        ])
+    else:
+        lines.extend([
+            "",
+            "Apply the fixes with edit_file_tool/apply_edits_tool (do not rewrite files from scratch; do not touch files outside the plan), "
+            "then run analyze_changed_files_tool. When it passes for your files, respond with a plain-text summary.",
+        ])
     return "\n".join(lines)
 
 

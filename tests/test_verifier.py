@@ -256,3 +256,119 @@ async def test_run_verifier_reuses_a_precomputed_gate_instead_of_rerunning_the_t
     assert result["verifier_report"]["passed"] is True
     assert result["verifier_report"]["deterministic_gate"] is gate
     assert not [c for c in calls if c[0] == "analyze"]
+
+
+# --- plan-coverage feedback: tell dev to WRITE, not to investigate -------
+
+
+def _coverage_issue(kind: str, path: str) -> dict:
+    reasons = {
+        verifier.KIND_MISSING_NEW_FILE: f"Missing planned new file: {path}",
+        verifier.KIND_UNMODIFIED_TARGET: f"Dev did not modify target file: {path}",
+        verifier.KIND_MISSING_TARGET: f"Dev target missing in worktree: {path}",
+    }
+    return {"severity": "blocker", "file": path, "reason": reasons[kind], "kind": kind}
+
+
+def _gate_of(*issues: dict) -> dict:
+    return {"passed": False, "issues": list(issues), "required_fixes": [i["reason"] for i in issues]}
+
+
+def test_compare_to_plan_tags_each_plan_coverage_blocker_with_what_it_is(git_repo):
+    plan = {"files_to_create": [{"path": "new_file.py"}], "files_to_modify": [{"path": "README.md"}, {"path": "nowhere.py"}]}
+
+    issues = {i["file"]: i["kind"] for i in verifier.compare_to_plan(plan, git_repo)["issues"]}
+
+    assert issues == {
+        "new_file.py": verifier.KIND_MISSING_NEW_FILE,
+        "README.md": verifier.KIND_UNMODIFIED_TARGET,
+        "nowhere.py": verifier.KIND_MISSING_TARGET,
+    }
+
+
+def test_the_kind_survives_the_per_repo_merge_with_the_repo_prefix_dev_needs():
+    from forge.tools.workspace import Workspace
+
+    workspace = Workspace(default_label="ui", roots={"ui": "/w/ui", "api": "/w/api"})
+    reports = {
+        "ui": {"issues": [_coverage_issue(verifier.KIND_MISSING_NEW_FILE, "src/A.tsx")], "required_fixes": ["x"]},
+        "api": {"issues": [_coverage_issue(verifier.KIND_UNMODIFIED_TARGET, "src/B.java")], "required_fixes": ["y"]},
+    }
+
+    merged = {i["kind"]: i["file"] for i in verifier._merge_gate_reports(reports, workspace)["issues"]}
+
+    assert merged == {verifier.KIND_MISSING_NEW_FILE: "src/A.tsx", verifier.KIND_UNMODIFIED_TARGET: "@api/src/B.java"}
+
+
+def test_feedback_for_a_run_that_wrote_nothing_lists_the_files_by_the_tool_to_use_and_says_write_now():
+    """The shape of the run that failed three rounds: one planned new file
+    and 25 planned modifications, none touched."""
+    gate = _gate_of(
+        _coverage_issue(verifier.KIND_MISSING_NEW_FILE, "pricing-web/scripts/generate.js"),
+        *(_coverage_issue(verifier.KIND_UNMODIFIED_TARGET, f"pricing-api/src/File{i}.java") for i in range(25)),
+    )
+
+    text = verifier.format_gate_feedback(gate, attempt=1, max_attempts=3, wrote_nothing=True)
+
+    assert text.splitlines()[0].startswith("Deterministic checks FAILED with 26 problem(s)")
+    assert "Your last attempt wrote NO files" in text
+    assert "This is your last attempt" not in text  # attempt 1 of 3
+    assert "PLANNED FILES STILL NOT WRITTEN (26):" in text
+    assert "Create these with write_file_tool:\n    - pricing-web/scripts/generate.js" in text
+    assert "Change these with edit_file_tool / apply_edits_tool:\n    - pricing-api/src/File0.java" in text
+    assert "pricing-api/src/File19.java" in text and "pricing-api/src/File20.java" not in text
+    assert "... and 5 more" in text
+    # the 26 near-identical lines are not also repeated as a numbered list
+    assert "1. Dev did not modify target file" not in text
+    assert "Your next turn must be write_file_tool / edit_file_tool / apply_edits_tool" in text
+    assert "ONE turn" in text and "Do not explore or re-read first" in text
+    # the advice that fits an analyzer error is wrong for a file that does not exist
+    assert "do not rewrite files from scratch" not in text
+
+
+def test_the_last_attempt_says_the_story_fails_if_it_ends_the_same_way():
+    gate = _gate_of(_coverage_issue(verifier.KIND_UNMODIFIED_TARGET, "a.py"))
+
+    assert "This is your last attempt" in verifier.format_gate_feedback(gate, attempt=2, max_attempts=3, wrote_nothing=True)
+    assert "This is your last attempt" not in verifier.format_gate_feedback(gate, attempt=1, max_attempts=3, wrote_nothing=True)
+
+
+def test_feedback_does_not_claim_nothing_was_written_when_something_was():
+    gate = _gate_of(_coverage_issue(verifier.KIND_UNMODIFIED_TARGET, "b.py"))
+
+    text = verifier.format_gate_feedback(gate, attempt=1, max_attempts=3, wrote_nothing=False)
+
+    assert "wrote NO files" not in text
+    assert "PLANNED FILES STILL NOT WRITTEN (1):" in text and "Your next turn must be write_file_tool" in text
+
+
+def test_a_path_that_is_not_in_the_worktree_is_told_to_check_the_path_first():
+    gate = _gate_of(_coverage_issue(verifier.KIND_MISSING_TARGET, "src/Typo.java"))
+
+    text = verifier.format_gate_feedback(gate, attempt=1, max_attempts=3)
+
+    assert "not in the worktree — check the path in the plan" in text and "src/Typo.java" in text
+
+
+def test_analyzer_failures_alongside_unwritten_files_are_kept_and_numbered_from_one():
+    gate = _gate_of(
+        _coverage_issue(verifier.KIND_MISSING_NEW_FILE, "new.py"),
+        {"severity": "blocker", "file": None, "reason": "alpha: analyze failed", "details": "foo.alpha:1:1: boom"},
+    )
+
+    text = verifier.format_gate_feedback(gate, attempt=1, max_attempts=3)
+
+    assert "PLANNED FILES STILL NOT WRITTEN (1):" in text
+    assert "also reported these — fix them as well:" in text
+    assert "1. alpha: analyze failed" in text and "   foo.alpha:1:1: boom" in text
+    assert "Your next turn must be write_file_tool" in text
+
+
+def test_feedback_with_no_unwritten_files_is_the_fix_these_failures_message_it_always_was():
+    gate = _gate_of({"severity": "blocker", "file": None, "reason": "alpha: analyze failed", "details": "foo.alpha:1:1: boom"})
+
+    text = verifier.format_gate_feedback(gate, attempt=1, max_attempts=3, wrote_nothing=False)
+
+    assert "Fix these specific failures — nothing else:" in text
+    assert "do not rewrite files from scratch" in text
+    assert "PLANNED FILES STILL NOT WRITTEN" not in text and "wrote NO files" not in text
