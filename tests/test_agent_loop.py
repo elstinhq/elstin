@@ -237,6 +237,64 @@ async def test_retries_exhausted_ends_loop_as_error(monkeypatch):
     assert len(provider.calls) == 3
 
 
+async def test_a_timed_out_call_is_retried_once_and_the_hook_says_so(monkeypatch):
+    import forge.agents.loop as loop_mod
+    from forge.llm.errors import LlmTimeoutError
+
+    monkeypatch.setattr(loop_mod, "retry_backoff_seconds", lambda attempt: 0)
+    provider = FakeProvider(script=[LlmTimeoutError("no response within 900s"), _text_response("ok now")])
+    seen: list[tuple[int, str]] = []
+
+    result = await run_agent_loop(
+        _config(provider, on_retry=lambda attempt, error, delay: seen.append((attempt, str(error)))),
+        [text_message("user", "go")],
+    )
+
+    assert result.is_error is False and result.final_text == "ok now"
+    assert seen == [(1, "no response within 900s")]
+
+
+async def test_a_second_timeout_ends_the_turn_instead_of_waiting_out_a_third(monkeypatch):
+    """A provider that stalled once tends to stall again, and each attempt
+    costs the whole deadline: two tries, not three."""
+    import forge.agents.loop as loop_mod
+    from forge.llm.errors import LlmTimeoutError
+
+    monkeypatch.setattr(loop_mod, "retry_backoff_seconds", lambda attempt: 0)
+    provider = FakeProvider(script=[LlmTimeoutError("t1"), LlmTimeoutError("t2"), _text_response("never reached")])
+
+    result = await run_agent_loop(_config(provider), [text_message("user", "go")])
+
+    assert result.is_error is True and "t2" in result.error_message
+    assert len(provider.calls) == 2
+
+
+async def test_a_timeout_does_not_use_up_the_retries_other_errors_are_owed(monkeypatch):
+    import forge.agents.loop as loop_mod
+    from forge.llm.errors import LlmTimeoutError
+
+    monkeypatch.setattr(loop_mod, "retry_backoff_seconds", lambda attempt: 0)
+    provider = FakeProvider(script=[LlmTimeoutError("t"), LlmRateLimitError("429"), _text_response("made it")])
+
+    result = await run_agent_loop(_config(provider), [text_message("user", "go")])
+
+    assert result.final_text == "made it" and len(provider.calls) == 3
+
+
+async def test_a_failing_retry_hook_never_costs_the_run(monkeypatch):
+    import forge.agents.loop as loop_mod
+
+    monkeypatch.setattr(loop_mod, "retry_backoff_seconds", lambda attempt: 0)
+    provider = FakeProvider(script=[LlmRateLimitError("429"), _text_response("fine")])
+
+    def boom(*args):
+        raise RuntimeError("hook bug")
+
+    result = await run_agent_loop(_config(provider, on_retry=boom), [text_message("user", "go")])
+
+    assert result.final_text == "fine"
+
+
 async def test_structured_output_surfaced_on_natural_end():
     response = LlmResponse(
         content=[TextBlock(text='{"a": 1}')], stop_reason="end_turn", usage=Usage(),

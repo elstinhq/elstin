@@ -17,6 +17,8 @@ class _StoryMixin:
         description: str | None = None,
         kind: str = "dev",
         kind_reason: str | None = None,
+        issue_type: str | None = None,
+        labels: list[str] | None = None,
         parent_key: str | None = None,
         status: str = "pending",
         external_source: str | None = None,
@@ -29,6 +31,7 @@ class _StoryMixin:
                 jira_key=jira_key, epic_key=epic_key, wave=wave, status=status,
                 summary=summary, description=description,
                 kind=kind, kind_reason=kind_reason, parent_key=parent_key,
+                issue_type=issue_type, labels=list(labels) if labels else None,
                 external_source=external_source, external_id=external_id,
             ))
 
@@ -186,6 +189,37 @@ class _StoryMixin:
             if story is not None:
                 story.gate_approved = approved
 
+    def set_story_clarification_questions(self, jira_key: str, questions: list[dict] | None) -> None:
+        """The planner's pending questions, persisted so the API/UI can
+        show them and a human's answer can survive past this process (see
+        forge/api/run_routes.py's /answer endpoint). Called on every run
+        completion, not only when questions exist — None clears a stale
+        form left over from an earlier round."""
+        with session_scope() as session:
+            story = session.get(Story, jira_key)
+            if story is not None:
+                story.clarification_questions = list(questions) if questions else None
+
+    def set_story_clarification_answers(self, jira_key: str, answers: list[dict]) -> bool:
+        """A human's resolved answers to `clarification_questions` (see
+        forge/api/run_routes.py's /answer endpoint, which resolves each
+        submitted option against the question that actually offered it).
+
+        Clears clarification_questions — it is no longer pending — and sets
+        gate_approved the same way /approve does: the reconciler cannot
+        tell an awaiting_clarification story apart from an ordinary
+        plan-approval one (both map to "awaiting_plan_approval" in
+        forge/daemon/main.py's _GRAPH_STATUS_TO_STORY_STATUS), so answering
+        clears the same gate. Returns False for an unknown story."""
+        with session_scope() as session:
+            story = session.get(Story, jira_key)
+            if story is None:
+                return False
+            story.clarification_answers = list(answers)
+            story.clarification_questions = None
+            story.gate_approved = True
+            return True
+
     def set_story_coverage_gap(self, jira_key: str, coverage_gap: bool, *, detail: str | None = None) -> None:
         with session_scope() as session:
             story = session.get(Story, jira_key)
@@ -284,6 +318,8 @@ def _story_to_dict(session, story: Story) -> dict:
         "parent_key": story.parent_key,
         "summary": story.summary,
         "description": story.description,
+        "issue_type": story.issue_type,
+        "labels": list(story.labels or []),
         "wave": story.wave,
         "status": story.status,
         "kind": story.kind,
@@ -293,6 +329,8 @@ def _story_to_dict(session, story: Story) -> dict:
         "branch": story.branch,
         "parked_reason": story.parked_reason,
         "gate_approved": story.gate_approved,
+        "clarification_questions": list(story.clarification_questions or []),
+        "clarification_answers": list(story.clarification_answers or []),
         "coverage_gap": story.coverage_gap,
         "coverage_gap_detail": story.coverage_gap_detail,
         "pr_open_error": story.pr_open_error,

@@ -13,7 +13,7 @@ avoid repeating.
 """
 from __future__ import annotations
 
-from forge.config.store import get_config
+from forge.config.store import get_config, get_float_config
 from forge.llm.base import LlmProvider
 from forge.llm.openai_compat import OpenAiCompatProvider
 
@@ -36,5 +36,10 @@ def get_provider() -> LlmProvider:
                 "No OpenAI API key configured — set one at /settings before running planner/dev/verifier/qa."
             )
         base_url = get_config("llm_base_url") or None
-        return OpenAiCompatProvider(api_key=api_key, base_url=base_url, name="openai")
+        return OpenAiCompatProvider(
+            api_key=api_key,
+            base_url=base_url,
+            name="openai",
+            request_timeout_seconds=get_float_config("llm_request_timeout_seconds", 900.0),
+        )
     raise LlmNotConfiguredError(f"Unknown llm_provider {provider_name!r} — only 'openai' is wired today.")

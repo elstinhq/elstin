@@ -99,6 +99,25 @@ export interface PullRequest {
   state: string;
 }
 
+// Work counters for a story's run (forge/services/usage.py's
+// StoryRunOutcome) — null until the story's first dispatch. Accumulate
+// across every retry under the same run_id, so on a retried story these
+// are the run's lifetime totals, not just the latest attempt.
+export interface RunOutcome {
+  run_id: string;
+  planner_turns: number;
+  explorer_count: number;
+  dev_passes: number;
+  dev_turns: number;
+  dev_soft_stops: number;
+  gate_runs: number;
+  gate_failures: number;
+  verifier_runs: number;
+  verifier_rejections: number;
+  dev_terminal_reason: string | null;
+  outcome: string | null;
+}
+
 export type StoryStatus =
   | "pending"
   | "dispatched"
@@ -123,6 +142,50 @@ export interface ExternalPending {
 
 export type ExternalChangeAction = "accept" | "replan" | "dismiss";
 
+// A design decision the planner found genuinely ambiguous — see
+// forge/agents/roles/planner.py's CLARIFICATION QUESTIONS rules. Answered
+// via POST /api/stories/{key}/answer, one option id per question.
+export interface ClarificationOption {
+  id: string;
+  label: string;
+  description: string | null;
+}
+
+export interface ClarificationQuestion {
+  id: string;
+  question: string;
+  context: string | null;
+  options: ClarificationOption[];
+}
+
+// A human's resolved answer, as recorded server-side — not what the form
+// submits (that's {question_id, option_id} against ClarificationQuestion).
+export interface ClarificationAnswer {
+  question: string;
+  option_label: string;
+  option_description: string | null;
+}
+
+// The planner's structured output (forge/agents/roles/planner.py), read
+// back from the story's LangGraph checkpoint — see GET
+// /api/stories/{key}/plan. Deliberately loose: this is whatever the LLM
+// returned as JSON, and the UI only ever reads plan_markdown/feature_summary
+// off it rather than depending on the full shape.
+export interface Plan {
+  feature_summary?: string;
+  plan_markdown?: string;
+  reasoning?: string;
+  [key: string]: unknown;
+}
+
+export interface StoryPlan {
+  story_key: string;
+  // Null before the story's first run has reached the planner (no
+  // thread_id yet, or a checkpoint whose plan is still the {} the graph
+  // seeds it with) — and always null for a "qa" story, which never plans.
+  plan: Plan | null;
+}
+
 export interface Story {
   jira_key: string;
   epic_key: string;
@@ -138,6 +201,8 @@ export interface Story {
   branch: string | null;
   parked_reason: string | null;
   gate_approved: boolean;
+  clarification_questions: ClarificationQuestion[];
+  clarification_answers: ClarificationAnswer[];
   coverage_gap: boolean;
   coverage_gap_detail: string | null;
   pr_open_error: string | null;
@@ -150,6 +215,7 @@ export interface Story {
   external_pending: ExternalPending | null;
   external_changed_at: string | null;
   pull_request: PullRequest | null;
+  run_outcome: RunOutcome | null;
 }
 
 export type EpicPhase = "planning" | "implementing" | "complete" | "failed";
@@ -157,6 +223,29 @@ export type EpicPhase = "planning" | "implementing" | "complete" | "failed";
 export interface EpicLevel {
   wave: number;
   story_keys: string[];
+}
+
+// What removing a ticket did, and what it deliberately did not touch
+// (forge/daemon/ticket_removal.py). Removal is local only.
+export interface RemoveTicketReport {
+  epic: string;
+  removed: {
+    stories: number;
+    pull_request_records: number;
+    activity_events: number;
+    usage_rows: number;
+    run_outcomes: number;
+    checkpoint_threads: number;
+    worktrees: string[];
+    branches: string[];
+    directories: string[];
+  };
+  left_on_remote: {
+    pull_requests: { story_key: string; number: number; url: string | null; state: string }[];
+    branches_that_may_be_pushed: string[];
+  };
+  ticket_filter_may_readd: boolean;
+  warnings: string[];
 }
 
 export interface Epic {
@@ -194,7 +283,7 @@ export interface ActivityEvent {
   // after a reconnect.
   id: number;
   type: "status" | "thinking" | "tool_use" | "llm_call" | "error";
-  phase: "planner" | "dev" | "verifier" | "qa" | null;
+  phase: "planner" | "dev" | "verifier" | "qa" | "system" | null;
   title: string;
   detail: string | null;
   ts: string;

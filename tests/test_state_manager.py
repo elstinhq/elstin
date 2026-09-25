@@ -79,6 +79,59 @@ def test_story_lifecycle_and_listing(project_id):
     assert story["parked_reason"] == "plan_approval_gate"
 
 
+def test_clarification_answer_resolves_the_gate_and_clears_the_question(project_id):
+    """set_story_clarification_answers is what POST /api/stories/{key}/answer
+    calls after resolving a human's picks against the pending questions —
+    see forge/api/run_routes.py. It must clear the pending question (no
+    stale form on the next read) and clear the same gate /approve does,
+    since the reconciler cannot tell this state apart from an ordinary
+    plan-approval one."""
+    from forge.state.manager import StateManager
+
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id)
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0)
+    questions = [{
+        "id": "q0", "question": "Which store should own this?", "context": "seen in cart.ts",
+        "options": [{"id": "A", "label": "Redux", "description": "existing store"}],
+    }]
+    sm.set_story_clarification_questions("ENG-2", questions)
+
+    story = sm.get_story("ENG-2")
+    assert story["clarification_questions"] == questions
+    assert story["gate_approved"] is False
+
+    answers = [{"question": "Which store should own this?", "option_label": "Redux", "option_description": "existing store"}]
+    assert sm.set_story_clarification_answers("ENG-2", answers) is True
+
+    story = sm.get_story("ENG-2")
+    assert story["clarification_answers"] == answers
+    assert story["clarification_questions"] == []  # no longer pending
+    assert story["gate_approved"] is True
+
+
+def test_clarification_questions_defaults_to_empty_and_clears_on_none(project_id):
+    from forge.state.manager import StateManager
+
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id)
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0)
+
+    assert sm.get_story("ENG-2")["clarification_questions"] == []
+
+    sm.set_story_clarification_questions("ENG-2", [{"id": "q0", "question": "Which?", "context": None, "options": []}])
+    assert len(sm.get_story("ENG-2")["clarification_questions"]) == 1
+
+    sm.set_story_clarification_questions("ENG-2", None)
+    assert sm.get_story("ENG-2")["clarification_questions"] == []
+
+
+def test_setting_clarification_answers_on_an_unknown_story_returns_false(project_id):
+    from forge.state.manager import StateManager
+
+    assert StateManager().set_story_clarification_answers("ENG-999", []) is False
+
+
 def test_retry_story_run_failure_redispatches(project_id):
     """failure_stage="run" (or unset) goes back to "pending" — a full
     redispatch, since a run failure never reaches a PR to preserve."""

@@ -57,6 +57,12 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         False, None, "string",
     ),
     ConfigField("llm_provider", "LLM provider (only 'openai' is wired today)", False, "openai", "string"),
+    ConfigField(
+        "llm_request_timeout_seconds",
+        "Give up on a single model call after this many seconds (0 = never). A timed-out call is retried once. "
+        "The slowest legitimate dev step seen took about 7.5 minutes",
+        False, "900", "string",
+    ),
     ConfigField("openai_api_key", "OpenAI API key", True, None, "string"),
     ConfigField(
         "llm_base_url",

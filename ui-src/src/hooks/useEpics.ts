@@ -26,20 +26,19 @@ export function useSyncEpicFields(projectId: number) {
   });
 }
 
-export function useSetEpicRepo(projectId: number) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ epicKey, projectRepoId }: { epicKey: string; projectRepoId: number }) =>
-      api.setEpicRepo(epicKey, projectRepoId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) }),
-  });
-}
-
 export function useSetEpicGate(projectId: number) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ epicKey, manualGate }: { epicKey: string; manualGate: boolean }) =>
       api.setEpicGate(epicKey, manualGate),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) }),
+  });
+}
+
+export function useRemoveEpic(projectId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (epicKey: string) => api.removeEpic(epicKey),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) }),
   });
 }

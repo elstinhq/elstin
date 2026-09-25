@@ -40,14 +40,19 @@ def parse_github_remote(project_path: str) -> tuple[str, str] | None:
     return None
 
 
-def _push_auth_env() -> tuple[dict[str, str], str | None]:
-    """Extra subprocess env for a push against a GitHub-hosted `origin`
-    rewritten to the `x-access-token@github.com` form (see the module
-    docstring above `_REMOTE_URL_PATTERNS`). That rewrite's askpass script
-    only lives for the duration of the clone itself
-    (repo_clone._resolve_auth deletes it right after), so any later push
-    has nothing to authenticate with unless this supplies fresh
-    credentials the same way."""
+def git_auth_env() -> tuple[dict[str, str], str | None]:
+    """Extra subprocess env for a git command that talks to a GitHub-hosted
+    `origin` rewritten to the `x-access-token@github.com` form (see the
+    module docstring above `_REMOTE_URL_PATTERNS`). That rewrite's askpass
+    script only lives for the duration of the clone itself
+    (repo_clone._resolve_auth deletes it right after), so any later push or
+    fetch has nothing to authenticate with unless this supplies fresh
+    credentials the same way.
+
+    Returns (env, askpass_path); the caller deletes `askpass_path` when the
+    command is done. `GIT_TERMINAL_PROMPT=0` is part of the env on purpose:
+    without it a rejected credential makes git ask on the daemon's own
+    terminal, and the command hangs there for good."""
     token = get_config("github_token")
     if not token:
         return {}, None
@@ -58,11 +63,23 @@ def _push_auth_env() -> tuple[dict[str, str], str | None]:
     return {"GIT_ASKPASS": path, "FORGE_PUSH_GIT_TOKEN": token, "GIT_TERMINAL_PROMPT": "0"}, path
 
 
+def git_auth_env_for(project_path: str) -> tuple[dict[str, str], str | None]:
+    """`git_auth_env()`, but only when `project_path`'s `origin` is on
+    github.com. Anything that runs against every project's clone (a fetch)
+    must use this: the configured token is a GitHub token, and an askpass
+    script answers whichever host asks, so handing it to a GitLab or
+    self-hosted `origin` would send that host a credential it has no
+    business seeing."""
+    if parse_github_remote(project_path) is None:
+        return {}, None
+    return git_auth_env()
+
+
 def push_branch(project_path: str, branch: str) -> tuple[bool, str | None]:
     """(success, error). `error` is git's own stderr — the caller persists
     it (Story.pr_open_error) so a permission/auth failure is visible in the
     UI instead of only in this process's logs."""
-    extra_env, askpass_path = _push_auth_env()
+    extra_env, askpass_path = git_auth_env()
     env = {**os.environ, **extra_env} if extra_env else None
     try:
         proc = subprocess.run(

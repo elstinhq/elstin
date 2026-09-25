@@ -258,6 +258,54 @@ async def test_run_verifier_reuses_a_precomputed_gate_instead_of_rerunning_the_t
     assert not [c for c in calls if c[0] == "analyze"]
 
 
+async def test_run_verifier_refuses_to_pass_a_run_with_nothing_to_verify(git_repo, registered_fake_profiles, monkeypatch):
+    """The vacuous pass, end to end. An empty plan makes compare_to_plan
+    check nothing and report passed, and the review is then asked to reject
+    only a "planned acceptance criterion clearly unmet" — of which an empty
+    plan has none. Both halves agree on a story that produced no work. The
+    reviewer is never asked: the LLM call here would raise, and the test
+    passes only because the guard returns before it."""
+    monkeypatch.setattr(verifier, "get_int_config", lambda key, default=0: 0)  # no trivial-diff skip
+    gate = {"passed": True, "issues": [], "required_fixes": [], "profiles": {}, "changed_files": [], "dev_targets": []}
+
+    result = await verifier.run_verifier(
+        plan={"feature_summary": "Show the currency", "files_to_create": [], "files_to_modify": []},
+        acceptance_criteria=[], worktree_path=git_repo, file_changes=[], precomputed_gate=gate,
+    )
+
+    report = result["verifier_report"]
+    assert report["passed"] is False
+    assert report["nothing_to_verify"] is True
+    assert "Nothing to verify" in report["required_fixes"][0]
+
+
+async def test_a_declared_already_satisfied_file_still_reaches_the_reviewer(git_repo, registered_fake_profiles, monkeypatch):
+    """A run whose only outcome is "this file already does the job" has an
+    empty diff too, but that claim is exactly what the review exists to
+    judge — the guard must not swallow it."""
+    reviewed = {}
+
+    async def fake_review(**kwargs):
+        reviewed["called"] = True
+        return {"passed": True, "issues": [], "required_fixes": []}, {"model": "fake"}
+
+    monkeypatch.setattr(verifier, "get_int_config", lambda key, default=0: 0)
+    monkeypatch.setattr(verifier, "chat_completion_json", fake_review)
+    gate = {
+        "passed": True, "issues": [], "required_fixes": [], "profiles": {}, "changed_files": [], "dev_targets": [],
+        "assumed_satisfied": [{"path": "foo.alpha", "reason": "already formats the currency"}],
+    }
+
+    result = await verifier.run_verifier(
+        plan={"files_to_create": [], "files_to_modify": []}, acceptance_criteria=[],
+        worktree_path=git_repo, file_changes=[], precomputed_gate=gate,
+    )
+
+    assert reviewed.get("called") is True
+    assert result["verifier_report"]["passed"] is True
+    assert "nothing_to_verify" not in result["verifier_report"]
+
+
 # --- plan-coverage feedback: tell dev to WRITE, not to investigate -------
 
 

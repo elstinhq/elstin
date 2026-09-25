@@ -19,6 +19,7 @@ import subprocess
 import pytest
 
 from forge.config.store import set_config, set_project_config
+from forge.orchestration.integration import integration_branch_name
 from forge.daemon.main import check_story_action, execute_story_action, poll_once
 from forge.orchestration.reconciler import Blocked, DispatchStory
 from forge.state.manager import StateManager
@@ -87,7 +88,7 @@ async def test_epic_flows_through_both_waves(git_repo: str, tmp_path, project_id
     assert sm.get_story("ENG-2")["status"] == "merged"
     assert sm.get_story("ENG-3")["status"] == "merged"
     assert sm.get_pull_request("ENG-2")["state"] == "merged"
-    assert sm.get_epic("ENG-1")["integration_branch"] == "agent/epic-eng-1"
+    assert sm.get_epic("ENG-1")["integration_branch"] == integration_branch_name("ENG-1")
 
     # the merge really happened — both story branches' README edits are on
     # the integration branch (both stub dev nodes wrote no files, so what's
@@ -97,7 +98,7 @@ async def test_epic_flows_through_both_waves(git_repo: str, tmp_path, project_id
     import subprocess
 
     log = subprocess.run(
-        ["git", "log", "--oneline", "agent/epic-eng-1"], cwd=git_repo, capture_output=True, text=True, check=True
+        ["git", "log", "--oneline", integration_branch_name("ENG-1")], cwd=git_repo, capture_output=True, text=True, check=True
     )
     assert log.returncode == 0
 

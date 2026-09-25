@@ -95,6 +95,8 @@ class FeatureRunState(TypedDict, total=False):
     # verifier fix rounds so a second pass resumes the same bookkeeping
     # instead of starting from "nothing done".
     dev_progress: list[dict[str, str]]
+    # {planned path: reason} — files dev declared already satisfy the ticket.
+    declared_unchanged: dict[str, str]
     tier1_gate: dict[str, Any]
     gate_attempts: int
     max_gate_attempts: int
@@ -142,6 +144,7 @@ def initial_state(run_id: str, user_request: str, project_path: str) -> FeatureR
         messages=[],
         dev_history=[],
         dev_progress=[],
+        declared_unchanged={},
         tier1_gate={},
         gate_attempts=0,
         max_gate_attempts=3,

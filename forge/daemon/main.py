@@ -56,6 +56,7 @@ from forge.agents.roles.qa import format_qa_report_comment
 from forge.orchestration.state import initial_state
 from forge.services.github_service import GitHubService, parse_github_remote, push_branch
 from forge.services.project_guide import project_guide_for_run
+from forge.services.run_activity import append_activity
 from forge.services.ticket_source import get_ticket_source, ticket_source_configured
 from forge.services.usage import record_run_outcome
 from forge.state.manager import StateManager
@@ -139,7 +140,7 @@ def live_run_keys() -> frozenset[str]:
         return frozenset(_live_runs)
 
 
-def _claim_run(story_key: str) -> bool:
+def claim_run(story_key: str) -> bool:
     """True if this caller now owns the story's run, False if one is already
     in flight. Check-and-add under one lock, with no await between them."""
     with _live_runs_lock:
@@ -149,9 +150,53 @@ def _claim_run(story_key: str) -> bool:
         return True
 
 
-def _release_run(story_key: str) -> None:
+def release_run(story_key: str) -> None:
     with _live_runs_lock:
         _live_runs.discard(story_key)
+        _run_tasks.pop(story_key, None)
+        _cancel_requested.discard(story_key)
+
+
+# The asyncio task executing each live run's graph, and the stories a person
+# has asked to cancel. Each run gets its own task (see _run_or_resume_story)
+# precisely so it can be cancelled without cancelling whatever awaits it — the
+# daemon's poll loop awaits runs inline, and cancelling *that* would stop the
+# daemon. Guarded by the same lock as the claims.
+_run_tasks: dict[str, asyncio.Task] = {}
+_cancel_requested: set[str] = set()
+
+
+def _register_run_task(story_key: str, task: asyncio.Task) -> None:
+    with _live_runs_lock:
+        _run_tasks[story_key] = task
+
+
+def _request_cancel(story_key: str) -> asyncio.Task | None:
+    """Ask the story's run to stop. Returns its task, or None if there is no
+    run in flight in this process. Must be called on the event loop's thread
+    (asyncio's cancel is not thread-safe) — an `async def` route does."""
+    with _live_runs_lock:
+        task = _run_tasks.get(story_key)
+        if task is None or task.done():
+            return None
+        _cancel_requested.add(story_key)
+    task.cancel()
+    return task
+
+
+async def cancel_run(story_key: str, *, wait_seconds: float = 30.0) -> bool:
+    """Cancel a story's run and wait for it to be wound down, so the caller
+    sees the story's final state. False if there was no run to cancel.
+
+    The run stops at its next await: a model call is abandoned at once. A tool
+    already executing in a worker thread (a build, a test run) cannot be
+    interrupted and is left to finish — its result is discarded."""
+    if _request_cancel(story_key) is None:
+        return False
+    deadline = asyncio.get_running_loop().time() + wait_seconds
+    while story_key in live_run_keys() and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.05)
+    return True
 
 
 def build_context(sm: StateManager, epic: dict) -> OrchestratorContext:
@@ -348,7 +393,7 @@ async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, res
     Returns False, having done nothing, if a run for this story is already in
     flight in this process."""
     story_key = story["jira_key"]
-    if not _claim_run(story_key):
+    if not claim_run(story_key):
         logger.info("story %s: a run is already in flight — not starting a second", story_key)
         return False
     previous = (story["status"], story.get("parked_reason"), bool(story.get("gate_approved")))
@@ -358,17 +403,51 @@ async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, res
         sm.set_story_thread_id(story_key, story_key)
         sm.set_story_gate_approved(story_key, False)
         sm.set_story_status(story_key, "dispatched")
+        # Its own task, so a person can cancel this run without cancelling the
+        # caller that awaits it (see cancel_run).
+        run = asyncio.create_task(_execute_story_run(sm, epic, story, resume=resume), name=f"story-run:{story_key}")
+        _register_run_task(story_key, run)
         try:
-            await _execute_story_run(sm, epic, story, resume=resume)
-        except BaseException:  # BaseException: a shutdown cancels the run too
-            try:
-                _restore_unstarted(sm, story_key, previous)
-            except Exception:  # noqa: BLE001 — never mask the run's own error with a failed cleanup
-                logger.exception("story %s: could not restore its status after a failed run", story_key)
+            await run
+        except asyncio.CancelledError:
+            with _live_runs_lock:
+                asked = story_key in _cancel_requested
+            # cancelling() counts cancel() calls made on THIS task: zero means the
+            # run was cancelled underneath us by a person; anything else is the
+            # caller being cancelled (a shutdown), which must still unwind.
+            if asked and not asyncio.current_task().cancelling():
+                _mark_cancelled(sm, story_key)
+                return True
+            _unwind_failed_run(sm, story_key, previous)
+            raise
+        except BaseException:
+            _unwind_failed_run(sm, story_key, previous)
             raise
     finally:
-        _release_run(story_key)
+        release_run(story_key)
     return True
+
+
+def _unwind_failed_run(sm: StateManager, story_key: str, previous: tuple[str, str | None, bool]) -> None:
+    try:
+        _restore_unstarted(sm, story_key, previous)
+    except Exception:  # noqa: BLE001 — never mask the run's own error with a failed cleanup
+        logger.exception("story %s: could not restore its status after a failed run", story_key)
+
+
+def _mark_cancelled(sm: StateManager, story_key: str) -> None:
+    """A person cancelled the run: the story is failed, with the reason, so the
+    existing Retry (a full redispatch) and Remove both apply. If the run had
+    already written its outcome before the cancel landed, that outcome stands."""
+    try:
+        current = sm.get_story(story_key)
+        if current is None or current["status"] != "dispatched":
+            return
+        sm.set_story_status(story_key, "failed", parked_reason="cancelled", failure_stage="run")
+        append_activity(story_key, type="status", phase="system", title="Run cancelled", detail="Stopped by a person. Retry starts it over from planning.")
+        logger.warning("story %s: run cancelled by a person", story_key)
+    except Exception:  # noqa: BLE001 — the run is stopped either way
+        logger.exception("story %s: could not record the cancellation", story_key)
 
 
 def _restore_unstarted(sm: StateManager, story_key: str, previous: tuple[str, str | None, bool]) -> None:
@@ -418,6 +497,13 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
             story_key=story_key,
             summary=story["summary"] or story_key,
             worktrees_base_dir=worktrees_base_dir,
+            # The ticket's own type/labels and its short reference, so the
+            # branch reads `feat/3-show-the-currency` rather than naming
+            # the internal story key (forge/tools/worktree.py).
+            issue_type=story.get("issue_type"),
+            labels=story.get("labels"),
+            external_source=story.get("external_source"),
+            external_id=story.get("external_id"),
             base_ref=epic.get("integration_branch"),
             repo_label=default_label,
         )
@@ -444,6 +530,14 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
                 "repo_roots": repo_roots,
                 "default_repo_label": default_label,
                 "story_worktrees": known_worktrees,
+                # Empty on every resume except the one right after a human
+                # answers (POST /api/stories/{key}/answer, forge/state/
+                # manager_story.py's set_story_clarification_answers) — a
+                # plain plan-approval resume has nothing here, same as
+                # before this existed. Harmless to re-supply on a later,
+                # unrelated resume of the same thread: only planner_node
+                # reads it, and planner only ever runs once per run.
+                "clarification_answers": story.get("clarification_answers") or [],
             }
             if story_kind == "qa":
                 # Rebuilt rather than reused from the checkpoint: more
@@ -499,10 +593,32 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
             "story %s: run ended on unexpected status %r — marking it failed", story_key, result.get("status")
         )
         new_status = "failed"
+    # Nothing to commit, review or merge: dev declared the planned files already
+    # do what the ticket needs, the gate accepted that and the reviewer did not
+    # object, and the worktree has no changes. That is a finished story, not one
+    # waiting to open an empty pull request (which GitHub would refuse).
+    finished_reason: str | None = None
+    declared = result.get("declared_unchanged") or {}
+    if new_status == "awaiting_pr_open" and declared and not result.get("file_changes"):
+        new_status, finished_reason = "done", "already_satisfied"
+        append_activity(
+            story_key, type="status", phase="system", title="Finished with no changes: the ticket is already satisfied",
+            detail="\n".join(f"{path}: {reason}" for path, reason in sorted(declared.items()))[:4000],
+        )
     # "run" — no PR exists yet at this point (a run only reaches
     # "awaiting_pr_open" on success), so retry_story's recovery for this
     # stage is a full redispatch. See forge/state/manager_story.py.
-    sm.set_story_status(story_key, new_status, failure_stage="run" if new_status == "failed" else None)
+    sm.set_story_status(
+        story_key, new_status, parked_reason=finished_reason, failure_stage="run" if new_status == "failed" else None,
+    )
+    # The graph's own status, not new_status: "awaiting_clarification" and a
+    # plain "awaiting_approval" both collapse to "awaiting_plan_approval"
+    # above, but only the former has a question worth showing. Set on every
+    # completion (None otherwise) so a story that plans cleanly on a later
+    # run does not keep showing a question from an earlier one.
+    sm.set_story_clarification_questions(
+        story_key, result.get("clarification_questions") if result.get("status") == "awaiting_clarification" else None,
+    )
     if new_status == "failed":
         logger.error("story %s failed: %s", story_key, result.get("error"))
     else:
@@ -625,6 +741,13 @@ def _maybe_open_pull_request(
 async def handle_intent(sm: StateManager, epic: dict, intent) -> None:
     epic_key = epic["jira_key"]
 
+    # The intents were planned from a snapshot; a ticket removed since (see
+    # forge/daemon/ticket_removal.py) no longer has the story they name.
+    story_key = getattr(intent, "story_key", None)
+    if story_key and not isinstance(intent, NoOp) and sm.get_story(story_key) is None:
+        logger.info("story %s no longer exists — skipping %s", story_key, type(intent).__name__)
+        return
+
     if isinstance(intent, DispatchStory):
         await _run_or_resume_story(sm, epic, sm.get_story(intent.story_key), resume=False)
 
@@ -668,7 +791,8 @@ async def handle_intent(sm: StateManager, epic: dict, intent) -> None:
         targets = _story_repo_targets(sm, epic, story)
         results = [
             await asyncio.to_thread(
-                merge_story_into_integration, entry["repo_path"], epic_key, entry["branch"], worktrees_base_dir
+                merge_story_into_integration, entry["repo_path"], epic_key, entry["branch"], worktrees_base_dir,
+                branch=epic.get("integration_branch") or None,
             )
             for entry in targets
         ]
@@ -685,7 +809,9 @@ async def handle_intent(sm: StateManager, epic: dict, intent) -> None:
                     _maybe_merge_pull_request, sm, epic, intent.story_key, entry["repo_path"], entry["repo_label"]
                 )
             if not epic.get("integration_branch"):
-                sm.set_integration_branch(epic_key, integration_branch_name(epic_key))
+                sm.set_integration_branch(epic_key, integration_branch_name(
+                    epic_key, external_source=epic.get("external_source"), external_id=epic.get("external_id"),
+                ))
             logger.info("story %s merged into %s", intent.story_key, integration_branch_name(epic_key))
         else:
             # "merge" — the run itself already succeeded (a PR may already
@@ -720,6 +846,8 @@ async def execute_story_action(sm: StateManager, epic: dict, intent: Intent) -> 
     run), so callers must not await it inline in the request path."""
     epic_key = epic["jira_key"]
     await handle_intent(sm, epic, intent)
+    if sm.get_epic(epic_key) is None:  # removed while the action ran
+        return
     completion = epic_completion_status(build_snapshot(sm, epic_key))
     if completion == "complete":
         sm.set_epic_phase(epic_key, "complete")
@@ -855,8 +983,20 @@ async def poll_once(sm: StateManager | None = None) -> None:
     for epic_key in sm.list_active_epic_keys():
         epic = sm.get_epic(epic_key)
         if not epic["repo"]:
-            logger.info("epic %s has no folder assigned yet — skipping (set one via PUT /api/epics/%s/repo)", epic_key, epic_key)
-            continue
+            # No repo is bound to an epic or a story (forge/tools/workspace.py)
+            # — this is only the default for unprefixed paths, and
+            # forge/services/epic_sync.py already assigns it automatically
+            # from most syncs. This is the safety net for the epic that
+            # slips through that — synced before its project had any repo,
+            # or before this backfill existed — so dispatch is never stuck
+            # on a human picking a folder that no longer has a UI control.
+            repos = sm.list_project_repos(epic["project_id"]) if epic.get("project_id") else []
+            if repos:
+                sm.set_epic_project_repo(epic_key, repos[0]["id"])
+                epic = sm.get_epic(epic_key)
+            else:
+                logger.info("epic %s: project has no repo cloned yet — skipping", epic_key)
+                continue
         if not resolve_bool_config("auto_run_enabled", epic["project_id"]):
             # This project runs in manual mode — nothing here autopicks
             # ready work. Progress happens only via the /start route and

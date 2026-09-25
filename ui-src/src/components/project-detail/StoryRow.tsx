@@ -1,13 +1,16 @@
 import {
   ClosedExternallyTag,
+  CodeWrittenTag,
   CoverageGapTag,
   ExternalChangedTag,
   GATE_ACTION,
   KindTag,
+  PARKED_REASON_LABEL,
   PrOpenErrorTag,
   StatusTagFor,
 } from "../shared/StatusTag";
 import { Twisty } from "../shared/Twisty";
+import { CancelRunButton } from "./CancelRunButton";
 import { useApproveStory, useRetryStory, useStartStory } from "../../hooks/useStories";
 import { useToast } from "../../lib/toast";
 import type { Story } from "../../types/api";
@@ -73,6 +76,7 @@ export function StoryRow({
         <CoverageGapTag story={story} />
         <PrOpenErrorTag story={story} />
         <StatusTagFor status={story.status} />
+        <CodeWrittenTag story={story} />
         <ExternalChangedTag story={story} />
         <ClosedExternallyTag story={story} />
 
@@ -81,7 +85,7 @@ export function StoryRow({
             already say; any other reason (ci_pending, closed_externally, ...)
             is new information and stays. */}
         {story.parked_reason && !story.parked_reason.endsWith("_gate") ? (
-          <span className="text-muted-foreground text-xs">({story.parked_reason})</span>
+          <span className="text-muted-foreground text-xs">({PARKED_REASON_LABEL[story.parked_reason] ?? story.parked_reason})</span>
         ) : null}
 
         <span className="text-muted-foreground w-[34px] shrink-0 text-xs">{`W${story.wave}`}</span>
@@ -127,9 +131,20 @@ export function StoryRow({
           </Button>
         ) : null}
 
+        {story.status === "dispatched" && !isSubtask ? (
+          <CancelRunButton projectId={projectId} storyKey={story.jira_key} label={displayKey(story)} />
+        ) : null}
+
         {gate ? (
           story.gate_approved ? (
             <span className="text-muted-foreground shrink-0 whitespace-nowrap text-xs">{gate.approved}</span>
+          ) : story.clarification_questions.length ? (
+            // The planner is waiting on a decision, not a plain plan review —
+            // answering means picking an option per question, which needs the
+            // detail dialog's form, not a one-click approve here.
+            <Button size="sm" variant="outline" className="shrink-0" onClick={() => onOpenStory(story.jira_key)}>
+              Answer questions
+            </Button>
           ) : (
             <Button
               size="sm"

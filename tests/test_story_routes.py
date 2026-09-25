@@ -84,6 +84,23 @@ def test_get_story_exposes_kind_and_its_reason(epic):
     assert "kind_reason" in story
 
 
+def test_get_story_exposes_run_outcome_once_dispatched(epic):
+    from forge.services.usage import record_run_outcome
+
+    with _client() as client:
+        # Never dispatched: no thread_id yet, nothing to report.
+        assert client.get("/api/stories/ENG-2").json()["run_outcome"] is None
+
+    epic.set_story_thread_id("ENG-2", "ENG-2")
+    record_run_outcome("ENG-2", dev_passes=4, gate_runs=4, gate_failures=3, verifier_runs=1, outcome="failed")
+
+    with _client() as client:
+        run_outcome = client.get("/api/stories/ENG-2").json()["run_outcome"]
+    assert run_outcome["dev_passes"] == 4
+    assert run_outcome["gate_failures"] == 3
+    assert run_outcome["outcome"] == "failed"
+
+
 def test_retry_story_redispatches_a_run_failure(epic):
     epic.set_epic_phase("ENG-1", "failed")
     epic.set_story_status("ENG-2", "failed", failure_stage="run")
@@ -124,6 +141,68 @@ def test_retry_non_failed_story_is_refused(epic):
 def test_retry_unknown_story_is_a_404():
     with _client() as client:
         response = client.post("/api/stories/ENG-999/retry")
+    assert response.status_code == 404
+
+
+_QUESTIONS = [
+    {
+        "id": "q0", "question": "Which store should own the cart total?", "context": "seen in cart.ts",
+        "options": [
+            {"id": "A", "label": "Redux", "description": "the existing global store"},
+            {"id": "B", "label": "Local component state", "description": None},
+        ],
+    },
+]
+
+
+def test_answering_a_clarification_question_resolves_it_and_clears_the_gate(epic):
+    epic.set_story_status("ENG-2", "awaiting_plan_approval")
+    epic.set_story_clarification_questions("ENG-2", _QUESTIONS)
+
+    with _client() as client:
+        response = client.post("/api/stories/ENG-2/answer", json={"answers": [{"question_id": "q0", "option_id": "A"}]})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["clarification_questions"] == []
+    assert body["clarification_answers"] == [
+        {"question": "Which store should own the cart total?", "option_label": "Redux", "option_description": "the existing global store"},
+    ]
+    assert body["gate_approved"] is True
+
+
+def test_answering_with_no_pending_questions_is_refused(epic):
+    with _client() as client:
+        response = client.post("/api/stories/ENG-2/answer", json={"answers": [{"question_id": "q0", "option_id": "A"}]})
+
+    assert response.status_code == 409
+
+
+def test_answering_leaves_a_missing_question_unanswered_as_a_422(epic):
+    epic.set_story_clarification_questions("ENG-2", _QUESTIONS)
+
+    with _client() as client:
+        response = client.post("/api/stories/ENG-2/answer", json={"answers": []})
+
+    assert response.status_code == 422
+    assert "q0" in response.json()["detail"]
+    # Nothing committed on a rejected, partial submission.
+    assert epic.get_story("ENG-2")["clarification_questions"] == _QUESTIONS
+
+
+def test_answering_with_an_option_the_question_never_offered_is_a_422(epic):
+    epic.set_story_clarification_questions("ENG-2", _QUESTIONS)
+
+    with _client() as client:
+        response = client.post("/api/stories/ENG-2/answer", json={"answers": [{"question_id": "q0", "option_id": "Z"}]})
+
+    assert response.status_code == 422
+    assert epic.get_story("ENG-2")["clarification_questions"] == _QUESTIONS
+
+
+def test_answer_unknown_story_is_a_404():
+    with _client() as client:
+        response = client.post("/api/stories/ENG-999/answer", json={"answers": []})
     assert response.status_code == 404
 
 

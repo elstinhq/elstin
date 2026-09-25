@@ -33,10 +33,18 @@ class _EpicMixin:
         manual_gate: bool = True,
         external_source: str | None = None,
         external_id: str | None = None,
+        project_repo_id: int | None = None,
     ) -> None:
         """Insert a new epic row on first sync. Starts paused (`manual_gate=True`)
         so the daemon does not auto-run until a human resumes. Re-sync calls
-        are idempotent — they must not reset phase, levels, or manual_gate."""
+        are idempotent — they must not reset phase, levels, or manual_gate.
+
+        `project_repo_id` is the caller's choice of default repo (typically
+        the project's first-added one — see epic_sync.py); it is only a
+        default for unprefixed paths (forge/tools/workspace.py), never a
+        binding, but dispatch still needs *some* real repo path to create
+        the story's first worktree from, so a project with repos always
+        gets one assigned rather than waiting on a human to pick."""
         with session_scope() as session:
             if session.get(Epic, jira_key) is not None:
                 return
@@ -44,6 +52,7 @@ class _EpicMixin:
                 jira_key=jira_key, project_id=project_id, levels=levels, phase="planning",
                 summary=summary, description=description, manual_gate=manual_gate,
                 external_source=external_source, external_id=external_id,
+                project_repo_id=project_repo_id,
             ))
 
     def set_epic_project_repo(self, jira_key: str, project_repo_id: int | None) -> None:

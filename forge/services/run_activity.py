@@ -29,7 +29,7 @@ from forge.db.models import ActivityEvent
 from forge.services.activity_stream import publish
 
 ActivityType = Literal["status", "thinking", "tool", "llm", "token"]
-ActivityPhase = Literal["planner", "dev", "verifier", "qa"]
+ActivityPhase = Literal["planner", "dev", "verifier", "qa", "system"]
 
 logger = logging.getLogger("forge.activity")
 

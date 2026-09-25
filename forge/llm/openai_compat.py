@@ -18,6 +18,7 @@ drift.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -123,8 +124,20 @@ class OpenAiCompatProvider:
     (pass `base_url` to reach one). One instance per (api_key, base_url)
     pair — see forge/llm/registry.py."""
 
-    def __init__(self, *, api_key: str, base_url: str | None = None, name: str = "openai") -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str | None = None,
+        name: str = "openai",
+        request_timeout_seconds: float | None = None,
+    ) -> None:
         self.name = name
+        # An overall wall-clock deadline for one call (0/None = none). The SDK's
+        # own timeout is per read, and a gateway that answers a slow request
+        # with keep-alive bytes never trips it — one run's single model call
+        # sat for 2h39m. This bounds the whole call, whatever arrives on the wire.
+        self._request_timeout = request_timeout_seconds if request_timeout_seconds and request_timeout_seconds > 0 else None
         self.capabilities = Capabilities(
             supports_structured_output=True,
             # No server-side compaction on Chat Completions, so
@@ -143,8 +156,13 @@ class OpenAiCompatProvider:
 
     async def complete(self, request: LlmRequest) -> LlmResponse:
         kwargs = self._build_kwargs(request)
+        call = self._client.chat.completions.create(**kwargs)
         try:
-            completion = await self._client.chat.completions.create(**kwargs)
+            completion = await (asyncio.wait_for(call, timeout=self._request_timeout) if self._request_timeout else call)
+        except asyncio.TimeoutError as exc:  # the deadline above; the SDK's own timeout is APITimeoutError
+            raise LlmTimeoutError(
+                f"no response from the model within {self._request_timeout:g}s — the request was abandoned"
+            ) from exc
         except AuthenticationError as exc:
             raise LlmAuthError(str(exc)) from exc
         except RateLimitError as exc:

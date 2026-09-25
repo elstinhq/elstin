@@ -5,14 +5,23 @@ import type {
   ExternalChangeAction,
   Project,
   ProjectRepo,
+  RemoveTicketReport,
   RepoGuide,
   Story,
+  StoryPlan,
   StoryUsage,
   TicketFilter,
   TicketFilterInput,
   TicketFilterPreview,
   TicketFilterSyncResult,
 } from "../types/api";
+
+// One selection per pending ClarificationQuestion, submitted to
+// POST /api/stories/{key}/answer.
+export interface ClarificationAnswerInput {
+  question_id: string;
+  option_id: string;
+}
 
 export class ApiError extends Error {
   status: number;
@@ -101,6 +110,9 @@ export const api = {
   syncEpicFields: (epicKey: string) => request<Epic>(`/api/epics/${encodeURIComponent(epicKey)}/sync`, { method: "POST" }),
   setEpicRepo: (epicKey: string, projectRepoId: number) =>
     request<Epic>(`/api/epics/${encodeURIComponent(epicKey)}/repo`, put({ project_repo_id: projectRepoId })),
+  // Local only: nothing is changed in GitHub or JIRA. Answers with what went and what was left.
+  removeEpic: (epicKey: string) =>
+    request<RemoveTicketReport>(`/api/epics/${encodeURIComponent(epicKey)}`, { method: "DELETE" }),
   setEpicGate: (epicKey: string, manualGate: boolean) =>
     request<Epic>(`/api/epics/${encodeURIComponent(epicKey)}/gate`, put({ manual_gate: manualGate })),
   getEpicUsage: (epicKey: string) => request<EpicUsage>(`/api/epics/${encodeURIComponent(epicKey)}/usage`),
@@ -115,7 +127,11 @@ export const api = {
     request<{ story_key: string; gate_approved: boolean }>(`/api/stories/${encodeURIComponent(storyKey)}/approve`, {
       method: "POST",
     }),
+  answerStoryQuestions: (storyKey: string, answers: ClarificationAnswerInput[]) =>
+    request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/answer`, json({ answers })),
   retryStory: (storyKey: string) => request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/retry`, { method: "POST" }),
+  // Stops a run in flight; the story is left failed ("cancelled") so Retry starts it over.
+  cancelStory: (storyKey: string) => request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/cancel`, { method: "POST" }),
   setStoryKind: (storyKey: string, kind: string) =>
     request<{ story_key: string; kind: string; epic_key: string }>(
       `/api/stories/${encodeURIComponent(storyKey)}/kind`,
@@ -130,4 +146,5 @@ export const api = {
   // ask for one when the stream opens with the same history.)
   storyActivityStreamUrl: (storyKey: string) => `/api/stories/${encodeURIComponent(storyKey)}/stream`,
   getStoryUsage: (storyKey: string) => request<StoryUsage>(`/api/stories/${encodeURIComponent(storyKey)}/usage`),
+  getStoryPlan: (storyKey: string) => request<StoryPlan>(`/api/stories/${encodeURIComponent(storyKey)}/plan`),
 };

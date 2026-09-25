@@ -133,11 +133,37 @@ class Story(Base):
     kind: Mapped[str] = mapped_column(String(16), default="dev", nullable=False)
     kind_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    # The ticket's own type and labels, as the source reports them. Kept
+    # because the signals behind `kind` are worth more than the verdict:
+    # branch naming reads them to choose feat/fix/docs/chore
+    # (forge/tools/worktree.py's branch_type_for), and for a GitHub issue
+    # the labels are the only place that distinction exists at all.
+    issue_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    labels: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
     # Cleared by a human via POST /api/stories/{key}/approve — the daemon
     # reads this into OrchestratorContext.approved_story_keys each poll
     # cycle. Whichever gate currently applies (plan-approval or PR-review)
     # is the one this clears; a story is only ever waiting on one at a time.
     gate_approved: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    # The planner's pending clarification question(s) — see alembic
+    # revision 20260922_0024. Straight from run_planner's `questions` field:
+    # [{id, question, context, options: [{id, label, description}]}]. NULL
+    # means nothing is pending; set on every run completion
+    # (forge/daemon/main.py), not only when a question exists, so a story
+    # that plans cleanly never shows a stale form. The reconciler cannot
+    # tell this state apart from an ordinary plan-approval gate — both map
+    # to "awaiting_plan_approval" — so POST /api/stories/{key}/answer clears
+    # gate_approved the same way /approve does.
+    clarification_questions: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # A human's resolved answers — [{question, option_label,
+    # option_description}], the shape forge/agents/roles/planner_loop.py's
+    # _build_prompt_text expects. Written alongside clearing
+    # clarification_questions, and re-supplied into the graph state patch on
+    # the next resume (forge/daemon/main.py), same as worktree_path/
+    # story_kind/etc.
+    clarification_answers: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     # LangGraph checkpointer thread id for this story's run — set at first
     # dispatch, used to resume (`graph.ainvoke(None, {"configurable":

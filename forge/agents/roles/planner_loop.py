@@ -49,6 +49,7 @@ from typing import Any
 from forge.agents.loop import LoopConfig, run_agent_loop, tool_defs_from_schemas
 from forge.agents.roles import explorer as explorer_defaults
 from forge.agents.roles.explorer import gather_exploration
+from forge.agents.roles.plan_gate import blocking, check_plan, check_questions, format_plan_feedback
 from forge.agents.roles.planner import _format_prior_work_block, build_planner_system
 from forge.config.store import get_bool_config, get_config, get_float_config, get_int_config
 from forge.llm.errors import LlmError
@@ -57,6 +58,7 @@ from forge.llm.types import ImageBlock, LlmResponse, Message, ResponseFormat, Te
 from forge.services.run_activity import append_activity
 from forge.services.usage import effective_budget_usd, record_phase_usage, record_run_outcome
 from forge.tools.planner_tools import READ_ONLY_TOOLS, make_planner_tools
+from forge.tools.workspace import Workspace
 
 logger = logging.getLogger("forge.planner_loop")
 
@@ -275,6 +277,13 @@ async def run_planner(
             if thinking:
                 append_activity(run_id, type="thinking", phase="planner", title="Planner thinking", detail=thinking[:4000])
 
+    def _on_retry(attempt: int, error: LlmError, delay: float) -> None:
+        if run_id:
+            append_activity(
+                run_id, type="status", phase="planner", title="Model call failed — retrying",
+                detail=f"Attempt {attempt} failed: {error}. Trying again in {delay:.0f}s.", meta={"attempt": attempt},
+            )
+
     def _on_turn(turn: int, response: LlmResponse) -> None:
         nonlocal usage_cost_usd
         usage = response.usage
@@ -352,6 +361,12 @@ async def run_planner(
                 content_blocks.append(block)
 
         tool_fns, tool_schemas = make_planner_tools(project_path=project_path, repo_roots=repo_roots, default_label=default_label)
+        # The same roots make_planner_tools resolves reads through, so the
+        # gate judges a path exactly as the planner's own tools would have
+        # — a path the planner could have read is never called missing.
+        gate_workspace = Workspace(
+            default_label=default_label, roots=dict(repo_roots or {default_label: project_path})
+        )
 
         config = LoopConfig(
             provider=provider,
@@ -378,15 +393,18 @@ async def run_planner(
             read_only_tools=READ_ONLY_TOOLS,
             on_block=_on_block,
             on_turn=_on_turn,
+            on_retry=_on_retry,
         )
 
         max_attempts = max(1, get_int_config("planner_sdk_max_retries", 2) + 1)
         last_detail: str | None = None
         plan: dict[str, Any] | None = None
+        correction: str | None = None
 
         for attempt in range(1, max_attempts + 1):
+            blocks = content_blocks if correction is None else [*content_blocks, TextBlock(text=correction)]
             try:
-                result = await run_agent_loop(config, [Message(role="user", content=content_blocks)])
+                result = await run_agent_loop(config, [Message(role="user", content=blocks)])
             except LlmError as exc:
                 raise PlannerLoopError(f"Planner agent loop failed: {exc}") from exc
 
@@ -397,20 +415,56 @@ async def run_planner(
                 run_id, attempt, max_attempts, result.terminal_reason, result.is_error, result.structured_output is not None,
             )
             if not result.is_error and isinstance(result.structured_output, dict):
-                plan = result.structured_output
-                break
+                candidate = result.structured_output
+                questions_field = candidate.get("questions") or []
+                # A clarification round-trip's plan fields (files, criteria)
+                # are allowed to be thin: the plan is a placeholder until the
+                # human answers, and planner_node parks the run at
+                # awaiting_clarification instead of handing it to dev. The
+                # prompt says so too (PLANNER_SYSTEM_CORE). But the questions
+                # themselves are what reaches the human, so they get their
+                # own check instead of no check at all — see
+                # plan_gate.check_questions's docstring for the failure this
+                # closes.
+                defects = check_questions(questions_field) if questions_field else check_plan(candidate, gate_workspace)
+                blockers = blocking(defects)
+                if not blockers:
+                    plan = candidate
+                    # A warning does not cost a retry, but it is exactly what
+                    # the human at the approval gate wants to know: this plan
+                    # cites files that are not where it says they are.
+                    if defects and run_id:
+                        append_activity(
+                            run_id, type="status", phase="planner",
+                            title=f"Plan gate: {len(defects)} warning(s) — the plan is usable but check its evidence",
+                            detail="\n".join(f"- {d['reason']}" for d in defects)[:4000],
+                        )
+                    break
+                last_detail = "plan gate rejected the plan: " + "; ".join(str(d["reason"]) for d in blockers[:4])
+                # The warnings ride along in the correction: the attempt is
+                # being re-run anyway, so it may as well fix them too.
+                correction = format_plan_feedback(defects, attempt=attempt, max_attempts=max_attempts)
+                if run_id:
+                    append_activity(
+                        run_id, type="status", phase="planner",
+                        title=f"Plan gate rejected the plan: {len(blockers)} problem(s)",
+                        detail="\n".join(f"- {d['reason']}" for d in defects)[:4000],
+                        meta={"kinds": sorted({str(d["kind"]) for d in blockers})},
+                    )
+            else:
+                # A loop that ended in error already exhausted forge/agents/
+                # loop.py's own retries for anything retryable, so whatever
+                # killed it (bad request, auth, a refusal, a truncated turn)
+                # will kill an identical retry too — raise now instead of
+                # paying for the same failure max_attempts times. Retrying is
+                # only worth it for the other case: the run completed fine but
+                # the model just didn't emit a valid plan object.
+                last_detail = result.error_message or f"no structured plan produced (terminal_reason={result.terminal_reason!r})"
+                if result.is_error:
+                    logger.warning("Planner attempt %d/%d failed run_id=%s: %s", attempt, max_attempts, run_id, last_detail)
+                    raise PlannerLoopError(f"Planner agent loop failed: {last_detail}")
 
-            # A loop that ended in error already exhausted forge/agents/
-            # loop.py's own retries for anything retryable, so whatever
-            # killed it (bad request, auth, a refusal, a truncated turn)
-            # will kill an identical retry too — raise now instead of
-            # paying for the same failure max_attempts times. Retrying is
-            # only worth it for the other case: the run completed fine but
-            # the model just didn't emit a valid plan object.
-            last_detail = result.error_message or f"no structured plan produced (terminal_reason={result.terminal_reason!r})"
             logger.warning("Planner attempt %d/%d failed run_id=%s: %s", attempt, max_attempts, run_id, last_detail)
-            if result.is_error:
-                raise PlannerLoopError(f"Planner agent loop failed: {last_detail}")
             if attempt >= max_attempts:
                 raise PlannerLoopError(f"Planner agent loop failed after {max_attempts} attempt(s): {last_detail}")
             if run_id:

@@ -17,6 +17,7 @@ serializing.
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -25,6 +26,8 @@ import threading
 from contextlib import contextmanager
 
 from forge.tools.language_hooks import ensure_dependencies
+
+logger = logging.getLogger("forge.worktree")
 
 
 class WorktreeError(RuntimeError):
@@ -49,8 +52,93 @@ def slugify(text: str, *, max_len: int = 40) -> str:
     return slug[:max_len].rstrip("-") or "story"
 
 
-def branch_name_for(story_key: str, summary: str) -> str:
-    return f"{story_key.upper()}-{slugify(summary)}"
+# Conventional-commit style prefixes, chosen from the ticket's own labels
+# and issue type. Labels are checked first and beat the issue type, the
+# same precedence forge/services/story_kind.py uses and for the same
+# reason: a label is the one signal a human set on purpose, whereas an
+# issue type is often whatever the project template defaulted to. A
+# GitHub issue is the clearest case — its `issue_type` is the literal
+# "Issue" for everything, and `enhancement` vs `bug` lives in the labels.
+_TYPE_PREFIXES: tuple[tuple[str, frozenset[str]], ...] = (
+    ("fix", frozenset({"bug", "bugfix", "defect", "fix", "hotfix", "regression", "incident"})),
+    ("docs", frozenset({"docs", "doc", "documentation"})),
+    ("chore", frozenset({"chore", "task", "maintenance", "refactor", "tech-debt", "techdebt", "build", "ci", "infra"})),
+    ("test", frozenset({"test", "tests", "qa", "testing"})),
+    ("feat", frozenset({"feat", "feature", "enhancement", "improvement", "story", "epic", "new feature"})),
+)
+
+# What an unlabelled ticket with an unrecognised issue type becomes. "feat"
+# rather than "chore" because the overwhelming majority of tickets reaching
+# a dev story are feature work — and a branch prefix is a label for humans,
+# not a routing decision, so the cost of guessing wrong is cosmetic.
+DEFAULT_TYPE_PREFIX = "feat"
+
+
+def branch_type_for(issue_type: str | None = None, labels: list[str] | None = None) -> str:
+    """The conventional-commit prefix for a ticket: feat/fix/docs/chore/test."""
+    normalized = {(label or "").strip().lower() for label in (labels or [])} - {""}
+    for prefix, vocabulary in _TYPE_PREFIXES:
+        if normalized & vocabulary:
+            return prefix
+    kind = (issue_type or "").strip().lower()
+    if kind:
+        for prefix, vocabulary in _TYPE_PREFIXES:
+            if kind in vocabulary:
+                return prefix
+    return DEFAULT_TYPE_PREFIX
+
+
+# `owner/repo#123` (how forge stores a GitHub issue's external_id) -> `123`.
+_GITHUB_ISSUE_RE = re.compile(r"#(\d+)\s*$")
+
+
+def ticket_ref_for(story_key: str, external_source: str | None = None, external_id: str | None = None) -> str:
+    """The short, human-meaningful reference to put in a branch name.
+
+    For JIRA this is the issue key itself, uppercased and kept whole —
+    JIRA's development panel auto-links a branch by finding that key in the
+    name, so shortening it would silently break the link back to the
+    ticket. For GitHub it is the issue number, because the story key forge
+    synthesises for a GitHub issue (`gh.owner.repo.3`) is an internal
+    identifier that means nothing to a person reading `git branch`."""
+    if (external_source or "").strip().lower() == "github" and external_id:
+        match = _GITHUB_ISSUE_RE.search(str(external_id))
+        if match:
+            return match.group(1)
+    key = str(story_key or "").strip()
+    if (external_source or "").strip().lower() == "github":
+        # A GitHub story whose external_id is missing or malformed: the last
+        # dotted segment of `gh.owner.repo.3` is still the issue number.
+        tail = key.rsplit(".", 1)[-1]
+        if tail.isdigit():
+            return tail
+    return key.upper()
+
+
+def branch_name_for(
+    story_key: str,
+    summary: str,
+    *,
+    issue_type: str | None = None,
+    labels: list[str] | None = None,
+    external_source: str | None = None,
+    external_id: str | None = None,
+) -> str:
+    """`<type>/<ref>-<slug>`, e.g. `feat/3-show-the-currency-next-to-each-price`
+    or `fix/ENG-123-prices-page-crashes-on-empty`.
+
+    Nothing parses this name — forge tracks a story's branch in
+    `story_worktrees.branch`, so the format is free to be readable. The one
+    hard requirement is that a JIRA issue key survives intact somewhere in
+    it (see ticket_ref_for).
+
+    The type and labels are optional so that a caller which does not have
+    the story row — dev_loop creating a worktree for an extra repo the plan
+    named — still produces a valid name; it normally passes the branch it
+    already has instead, so every repo in one story shares a branch name."""
+    prefix = branch_type_for(issue_type, labels)
+    ref = ticket_ref_for(story_key, external_source, external_id)
+    return f"{prefix}/{ref}-{slugify(summary)}" if ref else f"{prefix}/{slugify(summary)}"
 
 
 def _git(project_path: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -58,6 +146,61 @@ def _git(project_path: str, *args: str, check: bool = True) -> subprocess.Comple
     if check and proc.returncode != 0:
         raise WorktreeError(proc.stderr.strip() or f"git {' '.join(args)} failed")
     return proc
+
+
+# A fetch of a healthy remote finishes in seconds; this is the ceiling for a
+# stalled connection, after which we go on with the refs already in the clone.
+_FETCH_TIMEOUT_SECONDS = 120
+
+
+def _fetch_origin(project_path: str) -> None:
+    """Best-effort `git fetch origin` — a failure never blocks the worktree.
+
+    It runs from the daemon's own process, whose stdin is usually a live
+    terminal, so it must be unable to ask anyone for anything: git would
+    otherwise prompt for a password on that terminal for a private repo it
+    has no credentials for, and this call — made while holding the per-repo
+    lock inside the poll loop — would wait on it indefinitely, stalling
+    every story. No stdin, no prompt, a timeout, and the configured GitHub
+    token supplied the way a push gets it (github.com remotes only).
+
+    A failed fetch is logged, not raised: the clone still has the refs from
+    when it was made, which is what this call used to fall back on
+    silently. A base that is merely stale is recoverable; a story that
+    cannot start is not."""
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    askpass_path = None
+    try:
+        # Imported here, not at module load: forge.tools stays free of
+        # config/service imports (see dart_tools.py for the same pattern).
+        from forge.services.github_service import git_auth_env_for
+
+        extra_env, askpass_path = git_auth_env_for(project_path)
+        env.update(extra_env)
+    except Exception:  # noqa: BLE001 — auth is best-effort; an unreadable config store must not block the fetch itself
+        logger.warning("could not load GitHub credentials for fetch in %s", project_path, exc_info=True)
+
+    try:
+        proc = subprocess.run(
+            ["git", "-C", project_path, "fetch", "origin"],
+            capture_output=True, text=True, check=False, env=env,
+            stdin=subprocess.DEVNULL, timeout=_FETCH_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("git fetch origin timed out after %ss in %s — continuing from the refs already in the clone", _FETCH_TIMEOUT_SECONDS, project_path)
+        return
+    finally:
+        if askpass_path:
+            try:
+                os.unlink(askpass_path)
+            except OSError:
+                pass
+
+    if proc.returncode != 0:
+        logger.warning(
+            "git fetch origin failed in %s — continuing from the refs already in the clone: %s",
+            project_path, (proc.stderr or proc.stdout or "no output").strip()[-500:],
+        )
 
 
 def _default_branch(project_path: str) -> str:
@@ -123,16 +266,29 @@ def create_worktree(
     worktrees_base_dir: str,
     base_ref: str | None = None,
     repo_label: str | None = None,
+    branch: str | None = None,
+    issue_type: str | None = None,
+    labels: list[str] | None = None,
+    external_source: str | None = None,
+    external_id: str | None = None,
 ) -> dict:
+    """`branch` overrides the computed name. A story that writes several
+    repos gets one worktree per repo and they must share a branch name, so
+    the caller that already knows the story's branch passes it rather than
+    recomputing from a different summary in each repo."""
     if not os.path.isdir(os.path.join(project_path, ".git")):
         raise WorktreeError(f"Not a git repository: {project_path}")
 
-    branch = branch_name_for(story_key, summary)
+    branch = branch or branch_name_for(
+        story_key, summary,
+        issue_type=issue_type, labels=labels,
+        external_source=external_source, external_id=external_id,
+    )
     worktree_path = resolve_worktree_path(worktrees_base_dir, story_key, repo_label)
 
     with _repo_lock(project_path):
         os.makedirs(os.path.dirname(worktree_path), exist_ok=True)
-        _git(project_path, "fetch", "origin", check=False)
+        _fetch_origin(project_path)
 
         if os.path.exists(worktree_path):
             registered = _git(project_path, "worktree", "list", "--porcelain", check=False).stdout
@@ -169,6 +325,45 @@ def create_worktree(
 def remove_worktree(project_path: str, worktree_path: str) -> None:
     with _repo_lock(project_path):
         _git(project_path, "worktree", "remove", "--force", worktree_path, check=False)
+
+
+def discard_worktree(project_path: str, worktree_path: str | None, branch: str | None) -> dict:
+    """Forget a worktree and its LOCAL branch: unregister and delete the
+    worktree, prune, then `git branch -D`. For removing a ticket from forge —
+    it never touches a remote, so a pushed copy of the branch is left alone.
+
+    Best-effort and idempotent: a worktree already gone, an unregistered
+    leftover directory, or a branch that no longer exists are all fine, and
+    each failure is reported in `errors` rather than raised, so one stuck
+    path does not strand the rest of a cleanup. The repo's default branch is
+    never deleted, whatever it is asked to."""
+    result = {"worktree_removed": False, "branch_deleted": False, "errors": []}
+    have_repo = os.path.isdir(os.path.join(project_path, ".git"))
+
+    with _repo_lock(project_path):
+        if worktree_path and os.path.exists(worktree_path):
+            if have_repo:
+                _git(project_path, "worktree", "remove", "--force", worktree_path, check=False)
+            if os.path.exists(worktree_path):  # unregistered, or the repo itself is gone
+                shutil.rmtree(worktree_path, ignore_errors=True)
+            result["worktree_removed"] = not os.path.exists(worktree_path)
+            if not result["worktree_removed"]:
+                result["errors"].append(f"could not remove the worktree at {worktree_path}")
+        if not have_repo:
+            if branch:
+                result["errors"].append(f"{project_path} is not a git repository — branch {branch} was not deleted")
+            return result
+
+        _git(project_path, "worktree", "prune", check=False)
+        if branch:
+            if branch == _default_branch(project_path):
+                result["errors"].append(f"refusing to delete the default branch {branch}")
+            elif _branch_refs(project_path, branch)[0]:
+                proc = _git(project_path, "branch", "-D", branch, check=False)
+                result["branch_deleted"] = proc.returncode == 0
+                if proc.returncode != 0:
+                    result["errors"].append(f"could not delete branch {branch}: {proc.stderr.strip()}")
+    return result
 
 
 def sync_dirty_files(project_path: str, worktree_path: str) -> None:

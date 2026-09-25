@@ -178,6 +178,88 @@ then a guide forge generated and stored, then nothing.
 - The guide is read as authoritative, so a wrong line gets followed: the API
   and UI let a person read, edit (`PUT .../guide`), regenerate or discard it.
 
+## Cancelling a run
+
+`POST /api/stories/{key}/cancel` (the **Cancel run** button on a running story)
+stops a run in flight. Pause only stops the *next* dispatch, so before this the
+only way to end a run that had gone wrong was to restart the whole stack.
+
+- Each run executes in **its own asyncio task**, registered by story key in
+  `daemon/main.py` (`_run_tasks`). That is what makes cancelling safe: the poll
+  loop awaits runs inline, and cancelling *that* task would stop the daemon.
+  `_run_or_resume_story` tells a person's cancel (`_cancel_requested`, and its
+  own task not being cancelled) from a shutdown (the caller cancelled — still
+  restores the story and re-raises, as before).
+- A cancelled story becomes **`failed`, `parked_reason="cancelled"`,
+  `failure_stage="run"`** and a "Run cancelled" activity event is written, so the
+  existing Retry (a full redispatch) and Remove both apply. If the run had
+  already written its outcome when the cancel landed, that outcome stands.
+- The route is `async` on purpose: cancelling a task must happen on the event
+  loop's thread. It answers `409` when no run is in flight in this process.
+- **Limit:** a model call is abandoned at once, but a tool already running in a
+  worker thread (a build, a test run) cannot be interrupted; it finishes and its
+  result is discarded. Model calls already made are still billed.
+
+## When a planned file already does the job
+
+The gate requires every file the plan says to modify to have been modified, and
+had no honest way to hear "this one needs nothing". One run whose ticket was
+already implemented did what that forces: it made javadoc and `required`-marker
+edits "so every planned file is actually written". Now it can say so.
+
+- **Dev tool** `declare_already_satisfied_tool(path, reason)` (`tools/dev_tools.py`).
+  Only a file the plan *modifies* qualifies (one to create must be written), it
+  must exist, and the reason must be specific (`MIN_DECLARATION_REASON_CHARS`).
+  It marks the checklist entry done. It is bookkeeping, not progress: it does not
+  reset the idle budget or the repeat-call guard. The dev prompt offers it and
+  forbids "a comment, rename or reformat just to make a planned file count".
+- **Gate:** `compare_to_plan(declared_unchanged=…)` no longer blocks a declared,
+  existing, unchanged file; it lists it as `assumed_satisfied` (per repo, paths
+  re-prefixed on merge). A declaration never excuses a missing file, and one
+  that was in fact changed is not reported as assumed. `format_gate_feedback`
+  offers the tool when files "were not modified".
+- **Reviewer:** the LLM review is *always* run when anything was declared — the
+  trivial-diff skip would otherwise pass a run that changed nothing — and its
+  prompt tells it to check each claim and not to fail a run for having few or
+  no changes.
+- **Ending:** a run that changed nothing, with declarations, completes as story
+  status `done`, `parked_reason="already_satisfied"` (an activity event lists each
+  file and reason) instead of trying to open an empty pull request. A run with
+  no declarations and no changes is unchanged. The state field is
+  `FeatureRunState.declared_unchanged`, carried into fix rounds.
+
+## Removing a ticket
+
+`DELETE /api/epics/{key}` (the trash button on a ticket card) forgets a ticket
+locally and completely — `daemon/ticket_removal.py`, with the row-level half in
+`state/manager_removal.py`. A "ticket" is what Add ticket adds: an epic and its
+stories and sub-tasks.
+
+- **Deleted:** the epic/story rows and everything keyed by them (pull-request
+  and worktree records, activity events, usage, run outcomes, watermarks); each
+  story's worktree and *local* branch and the epic's integration worktree and
+  branch, in every repo the ticket touched; the story and integration folders
+  under `worktrees_base_dir`, `data_dir/baselines/<key>` and
+  `jira_attachments_dir/<key>`; and the LangGraph checkpoints for each story's
+  thread. The checkpoints matter beyond tidiness: a ticket added again under
+  the same key would otherwise resume the old thread.
+- **Never touched — local only:** nothing is sent to GitHub or JIRA. An opened
+  pull request stays open and a pushed branch stays pushed; the report's
+  `left_on_remote` lists them so they can be closed by hand. forge keeps no
+  record that a ticket was removed, so a project whose ticket filter still
+  matches it ingests it again on the next sweep (`ticket_filter_may_readd`).
+- **Order and guards:** a story with a run in flight is refused (`409`), and the
+  ticket's keys are claimed in `daemon/main.py`'s live-run registry for the
+  duration, so the poller and `/start` cannot begin a run mid-removal. The
+  footprint is read first, then the filesystem, then checkpoints, then the rows
+  *last* — a failure before that leaves the ticket listed and removable again
+  instead of orphaned files. Filesystem problems are warnings (a worktree
+  already deleted by hand is no reason to keep a ticket); a checkpoint failure
+  stops the removal. Directories are only removed under their configured base,
+  a symlink is unlinked rather than followed, and a repo's default branch is
+  never deleted. `handle_intent` skips an intent for a story removed since the
+  cycle's snapshot was taken.
+
 ## Story kinds and hierarchy
 
 ### `dev` vs `qa`
@@ -286,6 +368,15 @@ same loop drives GPT, DeepSeek, or a local vLLM/Ollama endpoint):
 - **Repeat-call guard**: an identical (name, args) call in the consecutive
   turn is intercepted and answered with an is_error nudge; resets after any
   mutating call.
+- **Model-call deadline** (`llm_request_timeout_seconds`, default 900): the
+  adapter (`llm/openai_compat.py`) abandons a single call after this many
+  seconds and raises `LlmTimeoutError`. The SDK's own timeout is per read, and
+  a gateway that answers a slow request with keep-alive bytes never trips it —
+  one run's single call sat for 2h39m. A timed-out call is retried **once**
+  (`_MAX_TIMEOUT_RETRIES`; other transient errors keep their three tries),
+  because a provider that stalled tends to stall again and each attempt costs
+  the whole deadline. The roles' `on_retry` hook writes "Model call failed —
+  retrying" to the activity feed so the gap is never silent. 0 turns it off.
 - **Idle-turn budget** (dev only, `dev_sdk_max_idle_turns`): N consecutive
   tool turns with no `PROGRESS_TOOLS` call end the run as a soft stop
   (`no_progress`), same handling as a turn cap. The configured N is the
@@ -486,7 +577,7 @@ LangGraph checkpointer creates its own tables on first use
 | Config | `/api/config` | Global settings CRUD |
 | Projects | `/api/projects` | Projects, repos (cloned from a URL — `forge/services/repo_clone.py`), overrides, ticket filter (+ `/preview`, `/sync`) |
 | Epics | `/api/epics` | Sync from JIRA, assign repo, manual gate |
-| Stories | `/api/stories` | Approve gate, set kind, get story |
+| Stories | `/api/stories` | Approve gate, set kind, get story, get plan |
 
 There is no “start run” endpoint: sync epic (by key, or by the project's
 ticket filter) → assign repo → daemon dispatches when reconciler says ready
@@ -625,6 +716,7 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | Graph routing / gates | `orchestration/graph.py`, `config/store.py` |
 | Dispatch / PR / CI | `daemon/main.py`, `orchestration/integration.py` |
 | Agent behavior | `agents/roles/*` |
+| Removing a ticket (rows, worktrees, branches, checkpoints — local only) | `daemon/ticket_removal.py`, `state/manager_removal.py`, `tools/worktree.py`'s `discard_worktree` |
 | What the agents are told about a repo (its AGENTS.md, or one forge generates) | `services/project_guide.py`; routes in `api/project_routes.py` |
 | Persistence API | `state/manager_*.py` + Alembic |
 | UI | `ui-src/src/` (React/TS); rebuild with `cd ui-src && npm run build` |

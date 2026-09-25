@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "../lib/api";
+import { api, type ClarificationAnswerInput } from "../lib/api";
 import { queryKeys } from "../lib/queryClient";
 import type { ActivityEvent, ExternalChangeAction } from "../types/api";
 
@@ -24,10 +24,27 @@ export function useApproveStory(projectId: number) {
   });
 }
 
+export function useAnswerStoryQuestions(projectId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ storyKey, answers }: { storyKey: string; answers: ClarificationAnswerInput[] }) =>
+      api.answerStoryQuestions(storyKey, answers),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) }),
+  });
+}
+
 export function useRetryStory(projectId: number) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (storyKey: string) => api.retryStory(storyKey),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) }),
+  });
+}
+
+export function useCancelStory(projectId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (storyKey: string) => api.cancelStory(storyKey),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) }),
   });
 }
@@ -131,5 +148,16 @@ export function useStoryUsage(storyKey: string | null) {
     queryKey: queryKeys.storyUsage(storyKey ?? ""),
     queryFn: () => api.getStoryUsage(storyKey as string),
     enabled: storyKey != null,
+  });
+}
+
+// Reopens the story's LangGraph checkpoint server-side — not free, so this
+// is only fetched while the story detail dialog is actually open
+// (`enabled`), same convention as useStoryActivity.
+export function useStoryPlan(storyKey: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.storyPlan(storyKey ?? ""),
+    queryFn: () => api.getStoryPlan(storyKey as string),
+    enabled: enabled && storyKey != null,
   });
 }

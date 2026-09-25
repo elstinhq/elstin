@@ -67,8 +67,14 @@ class _ProjectMixin:
             return repo.id
 
     def list_project_repos(self, project_id: int) -> list[dict]:
+        """Oldest first — this order is what picks the *default* repo for a
+        new epic (the first-added one, see epic_sync.py) and what a
+        multi-repo tool description lists as "the default", so it needs to
+        be deterministic rather than whatever order Postgres feels like."""
         with session_scope() as session:
-            rows = session.execute(select(ProjectRepo).where(ProjectRepo.project_id == project_id)).scalars().all()
+            rows = session.execute(
+                select(ProjectRepo).where(ProjectRepo.project_id == project_id).order_by(ProjectRepo.id)
+            ).scalars().all()
             return [_project_repo_to_dict(r) for r in rows]
 
     def get_project_repo(self, repo_id: int) -> dict | None:

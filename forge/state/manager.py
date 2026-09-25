@@ -19,9 +19,12 @@ from forge.state.manager_epic import _EpicMixin
 from forge.state.manager_external import _ExternalSyncMixin
 from forge.state.manager_pr import _PullRequestMixin
 from forge.state.manager_project import _ProjectMixin
+from forge.state.manager_removal import _RemovalMixin
 from forge.state.manager_story import _StoryMixin
 from forge.state.manager_watermark import _WatermarkMixin
 
 
-class StateManager(_EpicMixin, _ExternalSyncMixin, _ProjectMixin, _StoryMixin, _PullRequestMixin, _WatermarkMixin):
+class StateManager(
+    _EpicMixin, _ExternalSyncMixin, _ProjectMixin, _RemovalMixin, _StoryMixin, _PullRequestMixin, _WatermarkMixin
+):
     pass

@@ -94,7 +94,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from forge.llm.base import LlmProvider
-from forge.llm.errors import LlmError, is_retryable
+from forge.llm.errors import LlmError, LlmTimeoutError, is_retryable
 from forge.llm.pricing import estimate_cost_usd
 from forge.llm.types import (
     ContentBlock,
@@ -183,6 +183,11 @@ REPEAT_CALL_NUDGE = (
 # non-retryable error (bad request, auth, content filter) is never retried
 # here — it terminates the loop immediately.
 _MAX_TRANSIENT_RETRIES = 3
+# A timeout is not like a 429 or a dropped connection: the call already spent
+# its whole deadline, and a provider that stalled once tends to stall again, so
+# a second try is allowed and a third is not (worst case ~2x the deadline per
+# turn, not 3x).
+_MAX_TIMEOUT_RETRIES = 1
 _RETRY_BASE_DELAY_SECONDS = 2.0
 _RETRY_CEILING_SECONDS = 30.0
 
@@ -277,6 +282,10 @@ class LoopConfig:
     trailing_reminder: Callable[[], str] | None = None
     on_block: ActivityCallback | None = None
     on_turn: TurnCallback | None = None
+    # Called before each retry of a failed model call: (attempt that failed,
+    # its error, seconds until the next attempt). Lets a role put "the call
+    # timed out, retrying" in its activity feed instead of leaving a silent gap.
+    on_retry: Callable[[int, LlmError, float], None] | None = None
 
 
 async def _call_tool(tool_fns: dict[str, ToolFn], name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
@@ -327,6 +336,7 @@ async def _complete_with_retry(config: LoopConfig, request: LlmRequest) -> tuple
     raises."""
     last_error: LlmError | None = None
     api_duration_ms = 0
+    timeouts = 0
     for attempt in range(1, _MAX_TRANSIENT_RETRIES + 1):
         started = time.monotonic()
         try:
@@ -335,10 +345,17 @@ async def _complete_with_retry(config: LoopConfig, request: LlmRequest) -> tuple
         except LlmError as exc:
             api_duration_ms += int((time.monotonic() - started) * 1000)
             last_error = exc
-            if attempt >= _MAX_TRANSIENT_RETRIES or not is_retryable(exc):
+            if isinstance(exc, LlmTimeoutError):
+                timeouts += 1
+            if attempt >= _MAX_TRANSIENT_RETRIES or not is_retryable(exc) or timeouts > _MAX_TIMEOUT_RETRIES:
                 break
             delay = retry_backoff_seconds(attempt)
             logger.warning("Transient LLM error (attempt %d/%d): %s — retrying in %.0fs", attempt, _MAX_TRANSIENT_RETRIES, exc, delay)
+            if config.on_retry:
+                try:
+                    config.on_retry(attempt, exc, delay)
+                except Exception:  # noqa: BLE001 — a caller's hook is never worth the run
+                    logger.warning("on_retry raised — continuing", exc_info=True)
             await asyncio.sleep(delay)
     return None, last_error, api_duration_ms
 

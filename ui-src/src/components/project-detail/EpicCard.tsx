@@ -1,13 +1,13 @@
 import { Pause, Play } from "lucide-react";
 import { PhaseTagFor, Tag } from "../shared/StatusTag";
 import { Twisty } from "../shared/Twisty";
+import { RemoveEpicButton } from "./RemoveEpicButton";
 import { StoryRow } from "./StoryRow";
-import { useSetEpicGate, useSetEpicRepo } from "../../hooks/useEpics";
+import { useSetEpicGate } from "../../hooks/useEpics";
 import type { Epic, ProjectRepo, Story } from "../../types/api";
 import { Button } from "../ui/button";
 import { Card } from "../ui/card";
 import { Progress } from "../ui/progress";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { cn } from "../../lib/utils";
 import { displayKey } from "../../lib/ticketSource";
 
@@ -42,7 +42,6 @@ export function EpicCard({
   onOpenEpic,
   onOpenStory,
 }: EpicCardProps) {
-  const setEpicRepo = useSetEpicRepo(projectId);
   const setEpicGate = useSetEpicGate(projectId);
 
   // Progress counts top-level stories only. Sub-tasks are never dispatched
@@ -79,27 +78,26 @@ export function EpicCard({
           <PhaseTagFor phase={epic.phase} />
 
           {epic.repo ? (
-            <span className="text-muted-foreground min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-xs">
+            <span
+              className="text-muted-foreground min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-xs"
+              title={
+                repos.length > 1
+                  ? `Default repo for unprefixed paths. Every repo in this project (${repos
+                      .map((r) => r.label || r.path)
+                      .join(", ")}) is already readable and writable by the plan — assigned automatically, nothing to pick per ticket.`
+                  : undefined
+              }
+            >
               {epic.repo}
+              {repos.length > 1 ? " (default)" : ""}
             </span>
-          ) : repos.length ? (
-            <span onClick={(event) => event.stopPropagation()}>
-              <Select onValueChange={(value) => setEpicRepo.mutate({ epicKey: epic.jira_key, projectRepoId: Number(value) })}>
-                <SelectTrigger size="sm" aria-label="Folder">
-                  <SelectValue placeholder="Choose a folder" />
-                </SelectTrigger>
-                <SelectContent>
-                  {repos.map((r) => (
-                    <SelectItem key={r.id} value={String(r.id)}>
-                      {r.label || r.path}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </span>
-          ) : (
-            <Tag label="No folder attached" appearance="warning" />
-          )}
+          ) : repos.length === 0 ? (
+            <Tag
+              label="No folder attached"
+              appearance="warning"
+              title="Add a git repo in Folders before this epic can run."
+            />
+          ) : null}
 
           {epic.manual_gate ? <Tag label="Paused" appearance="warning" /> : null}
           {epic.external_closed ? (
@@ -120,6 +118,7 @@ export function EpicCard({
             {epic.manual_gate ? <Play /> : <Pause />}
             {epic.manual_gate ? "Resume" : "Pause"}
           </Button>
+          <RemoveEpicButton projectId={projectId} epic={epic} />
         </div>
 
         <div className={cn("flex flex-col gap-4", isCollapsed && "hidden")}>

@@ -64,6 +64,72 @@ async def test_run_parks_at_planner_gate_and_resumes_after_reconnect(postgres_ur
         assert final["qa_report"] == {}
 
 
+async def test_answering_a_clarification_resumes_into_planner_not_dev(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+):
+    """Regression for MKT2-858. route_after_planner only special-cased
+    "failed"; every other status, including "awaiting_clarification",
+    routed to "dev" — computed once, right when planner_node returns and
+    interrupt_after=["planner"] pauses the graph, and frozen into the
+    checkpoint's `next` pointer from that point on.
+
+    forge/daemon/main.py's resume patches in a human's answer
+    (clarification_answers) via `aupdate_state` before resuming, exactly
+    like this test does — but `aupdate_state` recomputes `next` by
+    re-running the outgoing conditional edge, so the fix has to live in
+    that edge function, not in the patch. Confirmed against the unfixed
+    code: dev ran directly on a nearly-empty plan (no files, no
+    acceptance_criteria) and the run failed with "nothing to verify"."""
+    import forge.orchestration.graph as graph_module
+
+    calls: list[list[dict] | None] = []
+
+    async def planner_needs_one_answer(**kwargs) -> dict:
+        answers = kwargs.get("clarification_answers")
+        calls.append(answers)
+        if not answers:
+            return {
+                "questions": [{
+                    "id": "q0", "question": "Which store should own this?", "context": None,
+                    "options": [{"id": "A", "label": "Redux", "description": None}],
+                }],
+                "context_bundle": {}, "plan": {}, "acceptance_criteria": [], "messages": [],
+            }
+        return {
+            "questions": [],
+            "context_bundle": {},
+            "plan": {"summary": "answered", "files_to_create": [{"path": "a.py", "purpose": "x"}], "files_to_modify": []},
+            "acceptance_criteria": ["it works"],
+            "messages": [],
+        }
+
+    monkeypatch.setattr(graph_module, "run_planner", planner_needs_one_answer)
+
+    thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}}
+    state = initial_state(thread_id, "Add a widget to the cart", "/repo")
+
+    async with checkpointer_from_url(postgres_url) as checkpointer:
+        graph = compile_graph(checkpointer, require_plan_approval=True)
+        result = await graph.ainvoke(state, config)
+        assert result["status"] == "awaiting_clarification"
+        assert len(calls) == 1
+
+        # Same shape forge/daemon/main.py's resume patch applies from
+        # stories.clarification_answers once a human answers.
+        answer = [{"question": "Which store should own this?", "option_label": "Redux", "option_description": None}]
+        await graph.aupdate_state(config, {"clarification_answers": answer})
+
+        snapshot = await graph.aget_state(config)
+        assert snapshot.next == ("planner",)  # recomputed, not stuck on the original "dev"
+
+        final = await graph.ainvoke(None, config)
+
+    assert len(calls) == 2
+    assert calls[1] == answer  # the second planner call actually saw it
+    assert final["status"] == "awaiting_approval"  # a real plan now, parked for its own review
+
+
 async def test_gate_off_runs_straight_through_without_parking(postgres_url: str):
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
@@ -507,3 +573,85 @@ async def test_a_failed_verifier_is_still_counted_as_a_run(
     outcome = get_run_outcome(thread_id)
     assert outcome["verifier_runs"] == 1
     assert outcome["verifier_rejections"] == 0  # it never got to judge
+
+
+async def test_a_run_with_nothing_to_verify_fails_without_sending_dev_back(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+):
+    """A verifier rejection normally means "dev, fix it and come back".
+    This one cannot: dev may only write files the plan names, and the
+    rejection says the plan names none. Routing it back would buy three
+    more no-op passes at model prices before the run failed anyway."""
+    import forge.orchestration.graph as graph_module
+
+    dev_passes = {"count": 0}
+    fake_dev = graph_module.run_dev
+
+    async def counting_dev(**kwargs) -> dict:
+        dev_passes["count"] += 1
+        return await fake_dev(**kwargs)
+
+    async def verifier_finds_nothing(**kwargs) -> dict:
+        return {
+            "verifier_report": {
+                "passed": False,
+                "nothing_to_verify": True,
+                "required_fixes": ["Nothing to verify: the plan named no files to create or modify."],
+            },
+            "diffs": [],
+            "messages": [],
+        }
+
+    monkeypatch.setattr(graph_module, "run_dev", counting_dev)
+    monkeypatch.setattr(graph_module, "run_verifier", verifier_finds_nothing)
+
+    thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}}
+    state = initial_state(thread_id, "Show the currency next to each price", "/repo")
+    state["worktree_path"] = "/repo-worktrees/eng-1"
+
+    async with checkpointer_from_url(postgres_url) as checkpointer:
+        graph = compile_graph(checkpointer, require_plan_approval=False)
+        result = await graph.ainvoke(state, config)
+
+    assert result["status"] == "failed"
+    assert "Nothing to verify" in result["error"]
+    assert dev_passes["count"] == 1  # the pass that produced nothing, and no retry of it
+
+
+async def test_a_planner_that_cannot_produce_a_usable_plan_fails_the_run(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+):
+    """A PlannerLoopError used to propagate out of the run, and the
+    daemon's unwind restored the story to "pending" — which the next poll
+    dispatched again, re-planning and re-failing every cycle forever. It
+    has to end as a failure a human sees, and it must not reach dev, which
+    would be scoped to write the files of a plan that does not exist."""
+    import forge.orchestration.graph as graph_module
+    from forge.agents.roles.planner_loop import PlannerLoopError
+
+    dev_passes = {"count": 0}
+    fake_dev = graph_module.run_dev
+
+    async def counting_dev(**kwargs) -> dict:
+        dev_passes["count"] += 1
+        return await fake_dev(**kwargs)
+
+    async def planner_cannot_converge(**kwargs) -> dict:
+        raise PlannerLoopError("Planner agent loop failed after 3 attempt(s): plan gate rejected the plan")
+
+    monkeypatch.setattr(graph_module, "run_dev", counting_dev)
+    monkeypatch.setattr(graph_module, "run_planner", planner_cannot_converge)
+
+    thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}}
+    state = initial_state(thread_id, "Show the currency next to each price", "/repo")
+    state["worktree_path"] = "/repo-worktrees/eng-1"
+
+    async with checkpointer_from_url(postgres_url) as checkpointer:
+        graph = compile_graph(checkpointer, require_plan_approval=False)
+        result = await graph.ainvoke(state, config)
+
+    assert result["status"] == "failed"
+    assert "plan gate rejected the plan" in result["error"]
+    assert dev_passes["count"] == 0

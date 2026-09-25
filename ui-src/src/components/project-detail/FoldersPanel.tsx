@@ -10,10 +10,14 @@ import { Card } from "../ui/card";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { RepoGuideControl } from "./RepoGuide";
 
-// Multi-repo projects (e.g. Vue admin + Spring API) need an explicit choice
-// per epic; only auto-wire when there is nowhere else to point.
-async function assignSoleFolderToEpics(projectId: number, repoId: number, repos: ProjectRepo[]) {
-  if (repos.length !== 1) return;
+// No repo is bound to an epic — every repo here is already readable and
+// writable by the plan (forge/tools/workspace.py). There is no per-epic
+// picker; a new epic gets a default assigned automatically on sync
+// (forge/services/epic_sync.py, the project's first-added repo). This
+// covers the one case that misses: an epic synced before this project had
+// any repo at all, which stays folder-less until the daemon's next sweep
+// backfills it — cloning a repo here backfills it immediately instead.
+async function backfillFolderlessEpics(projectId: number, repoId: number) {
   const epics = await api.listProjectEpics(projectId);
   await Promise.all(epics.filter((epic) => !epic.repo).map((epic) => api.setEpicRepo(epic.jira_key, repoId)));
 }
@@ -65,8 +69,7 @@ export function FoldersPanel({ projectId }: { projectId: number }) {
       onSuccess: async (repo) => {
         setDialogOpen(false);
         showToast("Repository cloned", "success");
-        const nextRepos = await api.listProjectRepos(projectId);
-        await assignSoleFolderToEpics(projectId, repo.id, nextRepos);
+        await backfillFolderlessEpics(projectId, repo.id);
       },
       onError: (err) => showToast(err.message || "Could not clone repository", "error"),
     });
@@ -83,7 +86,9 @@ export function FoldersPanel({ projectId }: { projectId: number }) {
             </Button>
           </div>
           <p className="text-muted-foreground text-xs">
-            Git repos this project can run against. Each task then picks one (auto-selected when there is only one).
+            Git repos this project can run against. Every repo is already readable and writable by the plan — a ticket
+            spanning several repos just works, nothing to pick per ticket. The first repo added here is the default
+            for unprefixed paths.
           </p>
           <div className="flex flex-col gap-2">
             {repos.length === 0 ? (
@@ -102,7 +107,8 @@ export function FoldersPanel({ projectId }: { projectId: number }) {
           </DialogHeader>
           <div className="flex flex-col gap-4">
             <p className="text-muted-foreground text-xs">
-              Git repos this project can run against. Each task then picks one (auto-selected when there is only one).
+              Git repos this project can run against. Every repo added here is readable and writable by the plan — a
+              ticket spanning several repos just works, it doesn't need one picked per repo.
             </p>
             <RepoUrlInput value={repoUrl} onChange={setRepoUrl} />
           </div>

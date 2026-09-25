@@ -8,6 +8,13 @@ that, whichever gate currently applies (plan-approval, PR-open, or
 PR-review; a story only ever waits on one at a time). The next daemon poll
 cycle picks it up — no separate "resume" action needed.
 
+Clarification: a plan-approval gate sometimes carries a question instead of
+a finished plan — the planner asks when a design decision is genuinely
+ambiguous (forge/agents/roles/planner.py). POST /{key}/answer is how a
+human resolves it: every pending question must be answered in one call,
+which clears the same plan-approval gate /approve does and feeds the
+resolved answers back into the next resume instead of asking again.
+
 Kind override: forge guesses at sync time whether a ticket is
 implementation or validation work (forge/services/story_kind.py), and that
 guess reads free-text prose, so it can be wrong. This is how a human fixes
@@ -33,6 +40,15 @@ Ticket refresh: epic re-sync deliberately leaves existing summary/
 description alone (progress must not be rewritten by a tree walk). This
 endpoint is the explicit escape hatch — pull latest JIRA prose for one
 story without touching kind, status, or wave.
+
+Plan: the planner's structured plan (feature_summary, plan_markdown,
+files_to_create/modify, acceptance_criteria, ...) lives only inside the
+story's LangGraph checkpoint (forge/db/models/gameplan.py's docstring on
+why forge doesn't duplicate it into Postgres) — once a human clears the
+plan-approval gate there was previously no way to read it back short of
+scrolling the activity feed. GET /{key}/plan reopens that checkpoint by
+thread_id and returns the `plan` key from its state, same mechanism
+forge/daemon/main.py's dispatch_story resume path already uses.
 """
 from __future__ import annotations
 
@@ -47,12 +63,14 @@ from jira import JIRAError
 from pydantic import BaseModel
 
 from forge.config.store import resolve_bool_config
-from forge.daemon.main import check_story_action, execute_story_action
+from forge.daemon.main import cancel_run, check_story_action, execute_story_action
+from forge.db.engine import get_database_url
+from forge.orchestration.graph import checkpointer_from_url, compile_graph
 from forge.orchestration.reconciler import Blocked
 from forge.services.activity_stream import iter_events
 from forge.services.epic_sync import relevel_epic, sync_story_from_jira
 from forge.services.run_activity import list_activity
-from forge.services.usage import get_story_usage
+from forge.services.usage import get_run_outcome, get_story_usage
 from forge.state.manager import StateManager
 
 router = APIRouter(prefix="/api/stories", tags=["stories"])
@@ -75,9 +93,28 @@ class ExternalChangeRequest(BaseModel):
     action: Literal["accept", "replan", "dismiss"]
 
 
+class ClarificationAnswer(BaseModel):
+    question_id: str
+    option_id: str
+
+
+class ClarificationAnswerRequest(BaseModel):
+    answers: list[ClarificationAnswer]
+
+
 def _story_with_pr(sm: StateManager, story_key: str) -> dict:
     story = sm.get_story(story_key) or {}
     story["pull_request"] = sm.get_pull_request(story_key)
+    # thread_id == run_id == story_key by construction (forge/orchestration/
+    # graph.py). None until the story's first dispatch. The counters
+    # accumulate across every retry under this run_id (forge/services/
+    # usage.py's record_run_outcome), so on a story that has retried, this
+    # is the run's lifetime total, not just the latest attempt — the
+    # distinction the UI actually needs (dev wrote real code vs. the run
+    # never got past planning) holds either way: a fresh "run"-stage
+    # failure only ever accumulates from the attempt that produced it,
+    # since retry_story's "run" recovery path is a full redispatch.
+    story["run_outcome"] = get_run_outcome(story_key) if story.get("thread_id") else None
     return story
 
 
@@ -127,6 +164,70 @@ def approve_story(story_key: str, background_tasks: BackgroundTasks) -> dict:
     sm.set_story_gate_approved(story_key, True)
     _maybe_trigger_manual_run(sm, story_key, background_tasks)
     return {"story_key": story_key, "gate_approved": True}
+
+
+@router.post("/{story_key}/answer")
+def answer_story_questions(story_key: str, body: ClarificationAnswerRequest, background_tasks: BackgroundTasks) -> dict:
+    """A human's answer to the planner's clarification questions (see
+    forge/agents/roles/planner.py's CLARIFICATION QUESTIONS rules and
+    forge/orchestration/graph.py's `awaiting_clarification`).
+
+    The reconciler cannot tell this state apart from an ordinary
+    plan-approval gate — both collapse to "awaiting_plan_approval"
+    (forge/daemon/main.py's _GRAPH_STATUS_TO_STORY_STATUS) — so
+    set_story_clarification_answers clears the same gate /approve does,
+    and the next resume feeds the resolved answers back into the planner
+    (forge/daemon/main.py's resume patch) instead of asking again.
+
+    Every pending question must be answered in one call: the planner
+    prompt only has an all-or-nothing "clarification answers provided"
+    branch (forge/agents/roles/planner.py), so a partial set would either
+    be silently ignored or produce a plan reasoning from an answer that was
+    never given."""
+    sm = StateManager()
+    story = sm.get_story(story_key)
+    if story is None:
+        raise HTTPException(status_code=404, detail=f"No such story: {story_key}")
+    pending = story.get("clarification_questions") or []
+    if not pending:
+        raise HTTPException(status_code=409, detail=f"{story_key} has no pending clarification questions")
+
+    by_id = {q["id"]: q for q in pending}
+    submitted = {a.question_id: a.option_id for a in body.answers}
+    missing = [qid for qid in by_id if qid not in submitted]
+    if missing:
+        raise HTTPException(status_code=422, detail=f"missing answer(s) for question(s): {', '.join(missing)}")
+
+    resolved: list[dict] = []
+    for question_id, option_id in submitted.items():
+        question = by_id.get(question_id)
+        if question is None:
+            raise HTTPException(status_code=422, detail=f"no such question: {question_id}")
+        option = next((o for o in question.get("options") or [] if o.get("id") == option_id), None)
+        if option is None:
+            raise HTTPException(status_code=422, detail=f"{question_id}: no such option {option_id!r}")
+        resolved.append({
+            "question": question.get("question"),
+            "option_label": option.get("label"),
+            "option_description": option.get("description"),
+        })
+
+    sm.set_story_clarification_answers(story_key, resolved)
+    _maybe_trigger_manual_run(sm, story_key, background_tasks)
+    return _story_with_pr(sm, story_key)
+
+
+@router.post("/{story_key}/cancel")
+async def cancel_story_run(story_key: str) -> dict:
+    """Stop a story's run in flight. The story is left failed ("cancelled"), so
+    Retry starts it over and Remove clears it. `async` on purpose: cancelling an
+    asyncio task has to happen on the event loop's own thread."""
+    sm = StateManager()
+    if sm.get_story(story_key) is None:
+        raise HTTPException(status_code=404, detail=f"No such story: {story_key}")
+    if not await cancel_run(story_key):
+        raise HTTPException(status_code=409, detail=f"{story_key} has no run in progress")
+    return _story_with_pr(sm, story_key)
 
 
 @router.post("/{story_key}/retry")
@@ -262,10 +363,9 @@ def sync_story(story_key: str) -> dict:
 @router.get("/{story_key}")
 def get_story(story_key: str) -> dict:
     sm = StateManager()
-    story = sm.get_story(story_key)
-    if story is None:
+    if sm.get_story(story_key) is None:
         raise HTTPException(status_code=404, detail=f"No such story: {story_key}")
-    return story
+    return _story_with_pr(sm, story_key)
 
 
 @router.get("/{story_key}/activity")
@@ -363,3 +463,32 @@ def get_story_usage_route(story_key: str) -> dict:
     if sm.get_story(story_key) is None:
         raise HTTPException(status_code=404, detail=f"No such story: {story_key}")
     return get_story_usage(story_key)
+
+
+@router.get("/{story_key}/plan")
+async def get_story_plan(story_key: str) -> dict:
+    """The planner's plan for this story, read back from its LangGraph
+    checkpoint by thread_id (see this module's docstring). `plan` is null
+    before a run has been dispatched at all, and also for a "qa" story,
+    which never runs a planner node."""
+    sm = StateManager()
+    story = sm.get_story(story_key)
+    if story is None:
+        raise HTTPException(status_code=404, detail=f"No such story: {story_key}")
+    thread_id = story.get("thread_id")
+    if not thread_id:
+        return {"story_key": story_key, "plan": None}
+
+    config = {"configurable": {"thread_id": thread_id}}
+    # require_plan_approval only affects where the graph would interrupt on
+    # an actual invoke — irrelevant to a plain state read.
+    async with checkpointer_from_url(get_database_url()) as checkpointer:
+        graph = compile_graph(checkpointer, require_plan_approval=False)
+        snapshot = await graph.aget_state(config)
+
+    # initial_state() seeds "plan" as {} before the planner node has ever
+    # run — falsy either way, so a plain truthiness check covers both "no
+    # run yet" and "run started but hasn't reached the planner" the same
+    # way as the no-thread_id case above.
+    plan = (snapshot.values or {}).get("plan") or None
+    return {"story_key": story_key, "plan": plan}

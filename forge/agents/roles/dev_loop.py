@@ -150,6 +150,7 @@ async def run_dev(
     run_id: str | None = None,
     prior_history: list[dict[str, Any]] | None = None,
     prior_progress: list[dict[str, str]] | None = None,
+    prior_declared: dict[str, str] | None = None,
     repo_roots: dict[str, str] | None = None,
     default_label: str = "",
     story_worktrees: dict[str, dict[str, str]] | None = None,
@@ -164,6 +165,10 @@ async def run_dev(
     X, fix these" user message appended onto `prior_history`, so the model
     keeps every file it already read (and the prompt prefix stays cached)
     instead of re-deriving the task from a fresh FIX MODE brief.
+
+    prior_declared: the planned files an earlier pass declared already satisfy the
+    ticket (dev_tools' declare_already_satisfied_tool), carried so a fix round
+    does not have to re-argue them.
 
     prior_progress: the checklist this story's earlier dev pass left behind
     (forge/tools/progress.py). Carried forward so a fix round resumes the
@@ -248,6 +253,13 @@ async def run_dev(
                 meta={"prompt_tokens": usage.input_tokens, "completion_tokens": usage.output_tokens, "total_tokens": total, "cost_usd": usage.cost_usd},
             )
 
+    def _on_retry(attempt: int, error: LlmError, delay: float) -> None:
+        if run_id:
+            append_activity(
+                run_id, type="status", phase="dev", title="Model call failed — retrying",
+                detail=f"Attempt {attempt} failed: {error}. Trying again in {delay:.0f}s.", meta={"attempt": attempt},
+            )
+
     try:
         synced = await asyncio.to_thread(sync_planned_files_from_project, project_path, worktree_path, plan)
         if synced and run_id:
@@ -259,6 +271,10 @@ async def run_dev(
         roots = dict(repo_roots or {default_label: worktree_path})
         existing = {label: entry["worktree_path"] for label, entry in (story_worktrees or {}).items()}
         existing.setdefault(default_label, worktree_path)
+
+        # The branch the daemon already created for this story in its
+        # default repo. Every other repo the plan names gets the same one.
+        story_branch = ((story_worktrees or {}).get(default_label) or {}).get("branch") or ""
 
         write_roots: dict[str, str] = {}
         created: dict[str, dict[str, str]] = {}
@@ -281,6 +297,13 @@ async def run_dev(
                 summary=plan.get("feature_summary") or (run_id or "story"),
                 worktrees_base_dir=get_config("worktrees_base_dir") or "/data/repos",
                 repo_label=label,
+                # One story, one branch name — in every repo it writes. This
+                # worktree is for an extra repo the plan named, created after
+                # the default repo already has its branch, so recomputing the
+                # name here (from the plan's summary rather than the story's,
+                # and without the ticket's type) would give the same story a
+                # different branch per repo.
+                branch=story_branch or None,
             )
             write_roots[label] = wt["worktree_path"]
             created[label] = {"repo_path": repo_path, "worktree_path": wt["worktree_path"], "branch": wt["branch"]}
@@ -338,6 +361,7 @@ async def run_dev(
         # out below for the next round.
         progress_items = [dict(item) for item in prior_progress] if prior_progress else seed_progress_items(plan)
 
+        declared_unchanged = dict(prior_declared or {})
         tool_fns, tool_schemas = make_dev_tools(
             worktree_path=worktree_path,
             allowed_paths=allowed_paths,
@@ -346,6 +370,7 @@ async def run_dev(
             planned_test_files=planned_test_files,
             baseline_dir=baseline_dir,
             progress_items=progress_items,
+            declared_unchanged=declared_unchanged,
             default_label=default_label,
             write_roots=write_roots,
             read_roots=read_roots,
@@ -377,6 +402,7 @@ async def run_dev(
             trailing_reminder=lambda: render_progress(progress_items),
             on_block=_on_block,
             on_turn=_on_turn,
+            on_retry=_on_retry,
         )
 
         try:
@@ -443,6 +469,9 @@ async def run_dev(
         "messages": [{"role": "dev", "content": dev_summary_holder["text"]}],
         "dev_history": history_to_json(result.history),
         "dev_progress": progress_items,
+        # Planned files dev declared already do what the ticket needs; the gate
+        # excuses them and the reviewer is shown why.
+        "declared_unchanged": declared_unchanged,
         # Every repo this story now has a worktree in, for the daemon to
         # record and to commit/push/PR per repo afterwards.
         "story_worktrees": {

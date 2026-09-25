@@ -53,7 +53,12 @@ PROGRESS_TOOLS: frozenset[str] = frozenset({"write_file_tool", "edit_file_tool",
 # checklist, so an identical read after one is still a repeat and the
 # loop's repeat-call guard must survive them (see
 # forge/agents/loop.py's LoopConfig.bookkeeping_tools).
-BOOKKEEPING_TOOLS: frozenset[str] = frozenset({"update_progress_tool"})
+BOOKKEEPING_TOOLS: frozenset[str] = frozenset({"update_progress_tool", "declare_already_satisfied_tool"})
+
+# A declaration that a planned file already does what the ticket needs must say
+# why, in enough words to be checked by the reviewer; "already done" alone is
+# the padding-edit problem in a new form.
+MIN_DECLARATION_REASON_CHARS = 30
 
 # Offered only when make_dev_tools(web_access=True), so they are kept out
 # of TOOL_SCHEMAS: a run without web access sends exactly the schema bytes
@@ -452,6 +457,27 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "declare_already_satisfied_tool",
+            "description": (
+                "Declare that a file the plan says to MODIFY already does what the ticket needs, so it requires "
+                "no edit. Give the specific reason — what the file already contains that satisfies the requirement. "
+                "Use this instead of editing: never add a comment, rename or reformat only to make a planned file "
+                "look changed. Only files the plan modifies qualify (a file to create must be written), and the file "
+                "must exist. The verifier and the reviewer see your declaration and check it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "A planned file path, exactly as the checklist shows it"},
+                    "reason": {"type": "string", "description": "What the file already contains that satisfies the ticket"},
+                },
+                "required": ["path", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_command_tool",
             "description": (
                 "Run a whitelisted shell command (e.g. 'dart run build_runner build', "
@@ -515,6 +541,7 @@ def make_dev_tools(
     read_roots: dict[str, str] | None = None,
     web_access: bool = False,
     search_api_key: str | None = None,
+    declared_unchanged: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Return (functions_dict, tool_schemas) pre-bound to this run's
     worktree and plan scope.
@@ -524,6 +551,11 @@ def make_dev_tools(
     without it, search uses DuckDuckGo Lite.
     False leaves both the functions and the shared `TOOL_SCHEMAS` object
     exactly as they were.
+
+    declared_unchanged: {path: reason} for planned files dev has declared
+    already satisfy the ticket (`declare_already_satisfied_tool`), mutated in
+    place like `progress_items` so the caller can carry it into the gate. None
+    disables the tool's effect, as with progress tracking.
 
     progress_items: the caller's live checklist (see
     forge/agents/roles/dev.py). `update_progress_tool` mutates this list
@@ -705,6 +737,32 @@ def make_dev_tools(
             )
         return result + "\n" + render_progress(progress_items)
 
+    def declare_already_satisfied_tool(path: str, reason: str) -> str:
+        if declared_unchanged is None or progress_items is None:
+            return "Declaring a file already satisfied is not enabled for this run; make the edit the plan calls for."
+        rel = _norm_rel(path)
+        item = next((i for i in progress_items if i["path"] == rel), None)
+        if item is None:
+            return f"BLOCKED: {path} is not in the approved plan, so there is nothing to declare."
+        if item["action"] != "modify":
+            return f"BLOCKED: the plan says to create {rel}. A file that must be created cannot already satisfy the ticket — write it."
+        why = (reason or "").strip()
+        if len(why) < MIN_DECLARATION_REASON_CHARS:
+            return (
+                f"BLOCKED: give the specific reason ({MIN_DECLARATION_REASON_CHARS}+ characters): what {rel} already "
+                "contains that satisfies the ticket. If you cannot say, it needs the edit."
+            )
+        try:
+            _label, root, relative = read_workspace.root_for(path)
+            exists = os.path.isfile(os.path.join(root, _norm_rel(relative)))
+        except Exception as exc:  # noqa: BLE001 — an unknown repo prefix
+            return f"BLOCKED: could not resolve {path}: {exc}"
+        if not exists:
+            return f"BLOCKED: {rel} does not exist in the worktree, so it cannot already satisfy the ticket."
+        declared_unchanged[rel] = why
+        merge_progress_update(progress_items, [{"path": rel, "status": "done"}])
+        return f"Recorded: {rel} needs no change. Your reason will be shown to the reviewer.\n" + render_progress(progress_items)
+
     def run_command_tool(command: str) -> str:
         guard_result, safe_command = _guard_run_command(command, worktree_path, analyze_targets, allow_test_run, planned_test_files)
         if guard_result is not None:
@@ -728,6 +786,7 @@ def make_dev_tools(
         "lookup_sdk_symbol_tool": lookup_sdk_symbol_tool,
         "analyze_changed_files_tool": analyze_changed_files_tool,
         "update_progress_tool": update_progress_tool,
+        "declare_already_satisfied_tool": declare_already_satisfied_tool,
         "run_command_tool": run_command_tool,
     }
 

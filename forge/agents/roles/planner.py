@@ -79,6 +79,8 @@ CRITICAL — files_to_modify completeness (the dev agent is BLOCKED from editing
 - Integration and wiring files are NOT context_files — if an existing file needs even one line changed (routing tables, DI registration, barrel exports, app entry points, navigation guards), it belongs in files_to_modify.
 - Every acceptance criterion must be traceable to at least one file in files_to_create or files_to_modify. If you cannot point to a file that implements a criterion, either add the file or drop the criterion.
 - After drafting the list, re-read each criterion and each action described in the plan and verify the responsible file is present. If it is missing, add it.
+- Unless questions is non-empty, a plan naming NO files at all, or stating NO acceptance criteria, is not a valid answer and will be rejected. Nothing downstream can act on it: the dev agent has nothing to write and the checks that follow have nothing to check, so the ticket silently ships as an empty change.
+- If the feature looks already implemented, that is not an empty plan either. Say so in reasoning, and plan the files that still need changing to satisfy the ticket — the tests that prove it, most often. If it is genuinely complete to the last test, ask a question instead of returning an empty plan.
 
 CRITICAL — multi-repo projects:
 - When the user message lists more than one repo, the project spans several. Paths with no prefix belong to the default repo; a path in another repo carries its `@label/` prefix, e.g. `@api/src/models/cart.py`.

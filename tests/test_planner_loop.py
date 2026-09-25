@@ -155,6 +155,125 @@ async def test_missing_plan_then_success_on_retry(monkeypatch, git_repo):
     assert len(provider.calls) == 2
 
 
+async def test_a_plan_naming_no_files_is_rejected_and_retried_with_the_reason(monkeypatch, git_repo):
+    """The bug this exists for: a plan with no files and no acceptance
+    criteria passes every later check vacuously — the deterministic gate
+    loops over the plan's files and finds none to fail, and the review is
+    asked to reject only a "planned acceptance criterion clearly unmet", of
+    which there are none. The story then reaches the PR gate green with an
+    empty diff. Nothing downstream can catch it, so the planner must."""
+    empty = {**_MINIMAL_PLAN, "files_to_create": [], "files_to_modify": [], "acceptance_criteria": []}
+    provider = FakeProvider(script=[_plan_response(empty), _plan_response()])
+    _configure(monkeypatch, provider)
+
+    result = await run_planner(user_request="Show the currency next to each price", project_path=git_repo)
+
+    assert result["plan"]["files_to_create"] == [{"path": "widget.py", "purpose": "the widget"}]
+    assert len(provider.calls) == 2
+    # The retry starts from a fresh history, so the defect has to travel in
+    # the prompt or the second attempt just repeats the first.
+    retry_prompt = provider.calls[1].messages[0].content[-1].text
+    assert "YOUR PREVIOUS PLAN WAS REJECTED" in retry_prompt
+    assert "names no files to create and none to modify" in retry_prompt
+    assert "states no acceptance criteria" in retry_prompt
+
+
+async def test_a_plan_with_files_but_no_acceptance_criteria_is_rejected(monkeypatch, git_repo):
+    """Half the vacuous pass on its own: the gate has files to check, but
+    the review's whole rule is about criteria it would not have."""
+    provider = FakeProvider(script=[_plan_response({**_MINIMAL_PLAN, "acceptance_criteria": []}), _plan_response()])
+    _configure(monkeypatch, provider)
+
+    await run_planner(user_request="Add a widget", project_path=git_repo)
+
+    retry_prompt = provider.calls[1].messages[0].content[-1].text
+    assert "states no acceptance criteria" in retry_prompt
+    assert "names no files" not in retry_prompt
+
+
+async def test_an_unusable_plan_that_never_improves_fails_the_run(monkeypatch, git_repo):
+    """Better a story a human can see failed than a green PR with nothing
+    in it."""
+    from forge.config.store import set_config
+
+    empty = {**_MINIMAL_PLAN, "files_to_create": [], "files_to_modify": [], "acceptance_criteria": []}
+    provider = FakeProvider(script=[_plan_response(empty), _plan_response(empty)])
+    _configure(monkeypatch, provider)
+    set_config("planner_sdk_max_retries", "1")  # -> 2 attempts
+
+    with pytest.raises(PlannerLoopError, match="plan gate rejected the plan"):
+        await run_planner(user_request="Add a widget", project_path=git_repo)
+
+    assert len(provider.calls) == 2
+
+
+async def test_a_plan_naming_a_file_that_does_not_exist_is_rejected_with_the_real_path(monkeypatch, git_repo):
+    """End to end through the real plan gate: the planner names a path it
+    never verified, the gate resolves it against the repo the planner's own
+    tools read, and the retry carries the correction rather than a scolding."""
+    import os
+
+    os.makedirs(os.path.join(git_repo, "pricing-web"), exist_ok=True)
+    with open(os.path.join(git_repo, "pricing-web", "openapi.json"), "w", encoding="utf-8") as handle:
+        handle.write("{}\n")
+
+    guessed = {**_MINIMAL_PLAN, "files_to_create": [], "files_to_modify": [{"path": "openapi.json", "purpose": "add currency"}]}
+    provider = FakeProvider(script=[_plan_response(guessed), _plan_response()])
+    _configure(monkeypatch, provider)
+
+    result = await run_planner(user_request="Show the currency", project_path=git_repo)
+
+    assert result["plan"]["files_to_create"] == [{"path": "widget.py", "purpose": "the widget"}]
+    retry_prompt = provider.calls[1].messages[0].content[-1].text
+    assert "openapi.json is listed under files_to_modify" in retry_prompt
+    assert "a file of that name exists at: pricing-web/openapi.json" in retry_prompt
+
+
+async def test_a_plan_asking_clarification_questions_may_be_empty(monkeypatch, git_repo):
+    """A question round-trip's plan is a placeholder until the human
+    answers — planner_node parks it at awaiting_clarification and it never
+    reaches dev, so the emptiness is correct rather than a defect."""
+    asking = {
+        **_MINIMAL_PLAN,
+        "files_to_create": [], "files_to_modify": [], "acceptance_criteria": [],
+        "questions": [{"id": "q0", "question": "Which layer?", "context": None, "options": []}],
+    }
+    provider = FakeProvider(script=[_plan_response(asking)])
+    _configure(monkeypatch, provider)
+
+    result = await run_planner(user_request="Add a widget", project_path=git_repo)
+
+    assert len(result["questions"]) == 1
+    assert len(provider.calls) == 1
+
+
+async def test_stub_placeholder_questions_are_rejected_and_retried(monkeypatch, git_repo):
+    """Regression for MKT2-858: the planner emitted a question whose id,
+    question, and option label were all literally "placeholder", and it
+    reached the human as if it were a real clarification question because
+    a clarification round-trip skips the plan gate entirely. It must now
+    be rejected like any other bad plan, with a correction telling the
+    planner what a real question looks like."""
+    stub = {
+        **_MINIMAL_PLAN,
+        "files_to_create": [], "files_to_modify": [], "acceptance_criteria": [],
+        "questions": [{
+            "id": "placeholder", "question": "placeholder", "context": "placeholder",
+            "options": [{"id": "A", "label": "placeholder", "description": None}],
+        }],
+    }
+    provider = FakeProvider(script=[_plan_response(stub), _plan_response()])
+    _configure(monkeypatch, provider)
+
+    result = await run_planner(user_request="Add a widget", project_path=git_repo)
+
+    assert result["questions"] == []  # the retry's clean plan won
+    assert len(provider.calls) == 2
+    retry_prompt = provider.calls[1].messages[0].content[-1].text
+    assert "stub" in retry_prompt
+    assert "'placeholder'" in retry_prompt
+
+
 async def test_attachment_becomes_an_image_block_alongside_the_prompt(monkeypatch, git_repo, tmp_path):
     provider = FakeProvider(script=[_plan_response()])
     _configure(monkeypatch, provider)

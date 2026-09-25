@@ -125,9 +125,10 @@ async def test_scoping_failure_returns_no_areas_rather_than_raising():
 async def test_explorer_gets_only_read_only_tools(git_repo):
     provider = FakeProvider(script=[_text("Rendered in `a.py:1`.")])
 
-    findings = await run_explorer(provider=provider, model="m", project_path=git_repo, area=_area())
+    findings, complete = await run_explorer(provider=provider, model="m", project_path=git_repo, area=_area())
 
     assert findings == "Rendered in `a.py:1`."
+    assert complete is True
     offered = {t.name for t in provider.calls[0].tools}
     assert offered == {"read_file_tool", "grep_tool", "find_files_tool"}
     # No write, edit, shell or spawn path exists for a sub-agent.
@@ -150,31 +151,63 @@ async def test_explorer_prompt_is_self_contained(git_repo):
     assert provider.calls[0].system == EXPLORER_SYSTEM
 
 
-async def test_explorer_turn_cap_is_applied(git_repo):
-    """A sub-agent that keeps reading has to be stopped without stopping
-    the plan; a capped run still returns whatever it had."""
+async def test_a_capped_explorer_is_asked_to_summarise_instead_of_shipping_its_narration(git_repo):
+    """The bug this exists for. A capped explorer's final_text is the prose
+    from the turn where it ALSO called a tool — an announcement of the read
+    it was about to do, not a finding. Shipping it as one is how a planner
+    ends up reasoning from an unfinished sentence. So the reads already paid
+    for get one tool-free turn to become an actual report."""
     provider = FakeProvider(script=[
         LlmResponse(content=[ToolCallBlock(id="c1", name="grep_tool", arguments={"pattern": "x"})], stop_reason="tool_calls", usage=Usage(), model="m"),
-        LlmResponse(content=[TextBlock(text="partial finding")], stop_reason="tool_calls", usage=Usage(), model="m"),
+        LlmResponse(
+            content=[
+                TextBlock(text="Let me read openapi.json to confirm whether currency is present."),
+                ToolCallBlock(id="c2", name="read_file_tool", arguments={"path": "README.md"}),
+            ],
+            stop_reason="tool_calls", usage=Usage(), model="m",
+        ),
+        _text("`currency` is declared at `pricing-web/openapi.json:516`."),
     ])
 
-    findings = await run_explorer(provider=provider, model="m", project_path=git_repo, area=_area(), max_turns=2)
+    findings, complete = await run_explorer(provider=provider, model="m", project_path=git_repo, area=_area(), max_turns=2)
 
-    assert findings == "partial finding"
-    assert len(provider.calls) == 2
+    assert findings == "`currency` is declared at `pricing-web/openapi.json:516`."
+    assert complete is True
+    # The wrap-up turn offers NO tools, so the model cannot spend it
+    # announcing another read instead of answering.
+    assert provider.calls[-1].tools == []
+    # It keeps the reads it already paid for rather than starting over.
+    assert len(provider.calls[-1].messages) > 1
+
+
+async def test_an_explorer_that_cannot_even_summarise_is_reported_incomplete(git_repo):
+    """The wrap-up is best-effort. When it fails there is still no honest
+    way to present the narration as a finding, so it travels labelled."""
+    provider = FakeProvider(script=[
+        LlmResponse(
+            content=[TextBlock(text="Let me check the schema."), ToolCallBlock(id="c1", name="grep_tool", arguments={"pattern": "x"})],
+            stop_reason="tool_calls", usage=Usage(), model="m",
+        ),
+        LlmBadRequestError("wrap-up rejected"),
+    ])
+
+    findings, complete = await run_explorer(provider=provider, model="m", project_path=git_repo, area=_area(), max_turns=1)
+
+    assert findings == "Let me check the schema."
+    assert complete is False
 
 
 async def test_explorer_failure_returns_empty_rather_than_raising(git_repo):
     provider = FakeProvider(script=[LlmBadRequestError("nope")])
 
-    assert await run_explorer(provider=provider, model="m", project_path=git_repo, area=_area()) == ""
+    assert await run_explorer(provider=provider, model="m", project_path=git_repo, area=_area()) == ("", False)
 
 
 async def test_oversized_report_is_truncated(git_repo):
     """An explorer that ignores "compact" would otherwise defeat the point."""
     provider = FakeProvider(script=[_text("x" * 20_000)])
 
-    findings = await run_explorer(provider=provider, model="m", project_path=git_repo, area=_area())
+    findings, _ = await run_explorer(provider=provider, model="m", project_path=git_repo, area=_area())
 
     assert len(findings) < 20_000
     assert findings.endswith("[report truncated]")
@@ -222,6 +255,38 @@ async def test_findings_block_names_each_area_and_its_question(git_repo):
     assert "In `cart.py:12`." in block
     # The planner is told these are observations, not requirements.
     assert "not requirements" in block
+
+
+async def test_an_incomplete_report_is_labelled_in_the_block_the_planner_reads(git_repo):
+    """A partial report reads exactly like a complete one. Unlabelled, the
+    planner treats a cut-off lead as settled fact and invents the rest —
+    which is how a plan ends up naming a file at a path nobody verified."""
+    provider = FakeProvider(script=[
+        _scope(_area(name="the spec")),
+        LlmResponse(
+            content=[TextBlock(text="The spec has a currency property."), ToolCallBlock(id="c1", name="grep_tool", arguments={"pattern": "x"})],
+            stop_reason="tool_calls", usage=Usage(), model="m",
+        ),
+        LlmBadRequestError("wrap-up rejected"),
+    ])
+
+    block, _ = await gather_exploration(
+        provider=provider, model="m", project_path=git_repo, user_request="go", max_turns=1,
+    )
+
+    assert "### the spec  [INCOMPLETE" in block
+    assert "ran out of turns" in block
+    assert "confirm yourself" in block
+    # The finding still travels — it is a lead worth having, just not an answer.
+    assert "The spec has a currency property." in block
+
+
+async def test_a_complete_report_carries_no_incomplete_marker(git_repo):
+    provider = FakeProvider(script=[_scope(_area(name="cart UI")), _text("In `cart.py:12`.")])
+
+    block, _ = await gather_exploration(provider=provider, model="m", project_path=git_repo, user_request="go")
+
+    assert "INCOMPLETE" not in block.split("=== END")[0].split("### cart UI")[1]
 
 
 async def test_no_areas_means_no_block_and_no_explorer_calls(git_repo):

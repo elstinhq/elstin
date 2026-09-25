@@ -1,15 +1,23 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { SquareArrowOutUpRight } from "lucide-react";
 import { PhaseTagFor, StatusTagFor } from "../shared/StatusTag";
 import { ActivityFeed } from "./ActivityFeed";
+import { StoryPlanPanel } from "./PlanPanel";
 import { EpicUsagePanel, StoryUsagePanel } from "./UsagePanel";
-import { useResolveExternalChange, useSetStoryKind, useSyncStory } from "../../hooks/useStories";
+import {
+  useAnswerStoryQuestions,
+  useResolveExternalChange,
+  useSetStoryKind,
+  useSyncStory,
+} from "../../hooks/useStories";
 import { useToast } from "../../lib/toast";
 import { displayKey, sourceLabel, ticketUrl } from "../../lib/ticketSource";
 import { useSyncEpicFields } from "../../hooks/useEpics";
 import type { Epic, ExternalChangeAction, Story } from "../../types/api";
 import { Button } from "../ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
+import { Label } from "../ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 
 export interface DetailTarget {
   kind: "epic" | "story";
@@ -134,6 +142,57 @@ function ExternalChangePanel({ projectId, story }: { projectId: number; story: S
   );
 }
 
+function ClarificationPanel({ projectId, story }: { projectId: number; story: Story }) {
+  const answer = useAnswerStoryQuestions(projectId);
+  const { showToast } = useToast();
+  const questions = story.clarification_questions;
+  const [picks, setPicks] = useState<Record<string, string>>({});
+  if (!questions.length) return null;
+
+  const complete = questions.every((q) => picks[q.id]);
+
+  function submit() {
+    if (!complete) return;
+    answer.mutate(
+      { storyKey: story.jira_key, answers: questions.map((q) => ({ question_id: q.id, option_id: picks[q.id]! })) },
+      {
+        onSuccess: () => showToast("Answer submitted — planning resumes", "success"),
+        onError: (err) => showToast(err.message || "Could not submit this answer.", "error"),
+      },
+    );
+  }
+
+  return (
+    <div className="border-border bg-accent/40 flex flex-col gap-4 rounded-md border p-3">
+      <div className="text-sm font-medium">The planner needs a decision before it can finish this plan</div>
+      {questions.map((q) => (
+        <div key={q.id} className="flex flex-col gap-1.5">
+          <Label htmlFor={`clarify-${q.id}`}>{q.question}</Label>
+          {q.context ? <div className="text-muted-foreground text-xs">{q.context}</div> : null}
+          <Select value={picks[q.id] ?? ""} onValueChange={(value) => setPicks((prev) => ({ ...prev, [q.id]: value }))}>
+            <SelectTrigger id={`clarify-${q.id}`} className="w-full">
+              <SelectValue placeholder="Choose an option" />
+            </SelectTrigger>
+            <SelectContent>
+              {q.options.map((opt) => (
+                <SelectItem key={opt.id} value={opt.id}>
+                  {opt.label}
+                  {opt.description ? ` — ${opt.description}` : ""}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      ))}
+      <div>
+        <Button size="sm" disabled={!complete} loading={answer.isPending} onClick={submit}>
+          Submit answer
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function EpicDetailBody({ epic }: { epic: Epic }) {
   return (
     <>
@@ -159,13 +218,41 @@ function EpicDetailBody({ epic }: { epic: Epic }) {
   );
 }
 
+// A "failed" story that never got past planning and one where dev wrote
+// real code but the build/reviewer rejected it look identical in the
+// status tag alone — this is the same distinction CodeWrittenTag makes in
+// the compact row, spelled out with the actual counters once someone has
+// already clicked in to look.
+function RunOutcomeRow({ story }: { story: Story }) {
+  const outcome = story.run_outcome;
+  if (!outcome || (outcome.dev_passes <= 0 && outcome.gate_runs <= 0)) return null;
+  const parts = [
+    `${outcome.dev_passes} dev pass(es)`,
+    outcome.gate_runs ? `${outcome.gate_failures}/${outcome.gate_runs} build gate failure(s)` : null,
+    outcome.verifier_runs ? `${outcome.verifier_rejections}/${outcome.verifier_runs} review rejection(s)` : null,
+  ].filter(Boolean);
+  return (
+    <DetailRow label="Run outcome">
+      <span className="text-amber-500">Code was written before this run failed</span> — {parts.join(", ")}.
+      {outcome.gate_failures > 0 && !outcome.verifier_runs ? (
+        <div className="text-muted-foreground mt-1 text-xs">
+          Failed at the build/test gate before reaching review — often an environment issue (toolchain version,
+          missing dependency) rather than the code itself.
+        </div>
+      ) : null}
+    </DetailRow>
+  );
+}
+
 function StoryDetailBody({ projectId, story, activityEnabled }: { projectId: number; story: Story; activityEnabled: boolean }) {
   return (
     <>
       <DetailRow label="Ticket">{story.external_id || story.jira_key}</DetailRow>
       <ExternalChangePanel projectId={projectId} story={story} />
+      <ClarificationPanel projectId={projectId} story={story} />
       <DetailRow label="Summary">{story.summary || "—"}</DetailRow>
       {story.description ? <DescriptionRow text={story.description} /> : null}
+      <StoryPlanPanel storyKey={story.jira_key} open={activityEnabled} />
       <DetailRow label="Status">
         <StatusTagFor status={story.status} />
       </DetailRow>
@@ -188,6 +275,7 @@ function StoryDetailBody({ projectId, story, activityEnabled }: { projectId: num
         <DetailRow label="Coverage gap">{story.coverage_gap_detail || "Tests passed; coverage threshold not met."}</DetailRow>
       ) : null}
       {story.pr_open_error ? <DetailRow label="PR not opened">{story.pr_open_error}</DetailRow> : null}
+      {story.status === "failed" && story.failure_stage === "run" ? <RunOutcomeRow story={story} /> : null}
       {story.retry_count ? <DetailRow label="Retries">{String(story.retry_count)}</DetailRow> : null}
       {story.pull_request && story.pull_request.number ? (
         <DetailRow label="Pull request">
@@ -239,7 +327,12 @@ export function DetailDialog({ projectId, epics, target, onClose, jiraBaseUrl, t
         <DialogHeader>
           <DialogTitle>{heading}</DialogTitle>
         </DialogHeader>
-        <div className="flex flex-col gap-3">
+        {/* min-w-0: DialogContent is a CSS grid, and a grid item's default
+            automatic minimum width is its content's max-content size — an
+            unwrapped plan_markdown paragraph (one long line, no hard wraps)
+            would otherwise blow this out to thousands of pixels wide
+            instead of wrapping inside the dialog. */}
+        <div className="flex min-w-0 flex-col gap-3">
           {epic ? <EpicDetailBody epic={epic} /> : null}
           {story ? <StoryDetailBody projectId={projectId} story={story} activityEnabled={open} /> : null}
         </div>

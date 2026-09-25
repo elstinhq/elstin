@@ -68,6 +68,10 @@ KIND_MISSING_TARGET = "missing_target"  # a planned modify target is not in the 
 _UNWRITTEN_KINDS = (KIND_MISSING_NEW_FILE, KIND_UNMODIFIED_TARGET, KIND_MISSING_TARGET)
 
 
+def _norm_declared(path: str) -> str:
+    return os.path.normpath(str(path).strip().lstrip("/")).replace("\\", "/")
+
+
 def _dev_target_paths(file_changes: list[dict[str, Any]] | None) -> set[str]:
     return {path.lstrip("/") for path in (_planned_paths(file_changes or []))}
 
@@ -79,10 +83,18 @@ def compare_to_plan(
     project_path: str | None = None,
     run_id: str | None = None,
     prior_verify_state: dict[str, Any] | None = None,
+    declared_unchanged: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    """`declared_unchanged`: {path relative to this repo: reason} — planned
+    files dev declared already do what the ticket needs (see dev_tools'
+    declare_already_satisfied_tool). Such a file that exists and was left alone
+    is not a blocker; it is reported as `assumed_satisfied` so the reviewer sees
+    the claim. A declaration never excuses a file that is missing."""
     issues: list[dict[str, Any]] = []
     required_fixes: list[str] = []
     synced_from_project: list[str] = []
+    assumed_satisfied: list[dict[str, str]] = []
+    declared = {_norm_declared(path): reason for path, reason in (declared_unchanged or {}).items()}
 
     if project_path:
         synced_from_project = sync_planned_files_from_project(project_path, worktree_path, plan)
@@ -114,6 +126,9 @@ def compare_to_plan(
             issues.append({"severity": "blocker", "file": rel, "reason": msg, "kind": KIND_MISSING_TARGET})
             required_fixes.append(msg)
         elif rel not in changed:
+            if _norm_declared(rel) in declared:
+                assumed_satisfied.append({"path": rel, "reason": declared[_norm_declared(rel)]})
+                continue
             msg = f"Dev did not modify target file: {rel}"
             issues.append({"severity": "blocker", "file": rel, "reason": msg, "kind": KIND_UNMODIFIED_TARGET})
             required_fixes.append(msg)
@@ -179,6 +194,7 @@ def compare_to_plan(
         "dev_targets": sorted(dev_targets),
         "coverage_gap": coverage_gap,
         "coverage_gap_detail": "; ".join(coverage_gap_details) or None,
+        "assumed_satisfied": assumed_satisfied,
     }
 
 
@@ -239,9 +255,13 @@ def _merge_gate_reports(reports: dict[str, dict[str, Any]], workspace: Workspace
     profiles: dict[str, Any] = {}
     coverage_gap = False
     coverage_details: list[str] = []
+    assumed_satisfied: list[dict[str, str]] = []
 
     for label, report in reports.items():
         prefix = "" if label == workspace.default_label else f"[{label}] "
+        assumed_satisfied.extend(
+            {**entry, "path": workspace.display_path(label, entry["path"])} for entry in report.get("assumed_satisfied", [])
+        )
         for issue in report.get("issues", []):
             merged = dict(issue)
             merged["reason"] = f"{prefix}{issue.get('reason', '')}"
@@ -269,6 +289,7 @@ def _merge_gate_reports(reports: dict[str, dict[str, Any]], workspace: Workspace
         "dev_targets": sorted(dev_targets),
         "coverage_gap": coverage_gap,
         "coverage_gap_detail": "; ".join(coverage_details) or None,
+        "assumed_satisfied": assumed_satisfied,
         "repos": sorted(reports),
     }
 
@@ -293,6 +314,7 @@ async def run_deterministic_gate(
     prior_build_runner: dict[str, Any] | None = None,
     story_worktrees: dict[str, Any] | None = None,
     default_label: str = "",
+    declared_unchanged: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Tier 1: planned-file presence, per-language analyze/compile and the
     plan's tests — subprocesses, no model — run in EVERY repo the plan
@@ -314,6 +336,14 @@ async def run_deterministic_gate(
             continue
         per_repo_changes.setdefault(label, []).append({**change, "path": relative})
 
+    per_repo_declared: dict[str, dict[str, str]] = {}
+    for display, reason in (declared_unchanged or {}).items():
+        try:
+            label, relative = workspace.split(str(display))
+        except Exception:  # noqa: BLE001 — a declaration for an unknown repo simply excuses nothing
+            continue
+        per_repo_declared.setdefault(label, {})[relative] = reason
+
     prior_state = prior_build_runner or {}
     reports: dict[str, dict[str, Any]] = {}
     for label, repo_plan in per_repo_plan.items():
@@ -326,7 +356,7 @@ async def run_deterministic_gate(
         reports[label] = await asyncio.to_thread(
             compare_to_plan, repo_plan, root, per_repo_changes.get(label, []),
             project_path=project_path if label == workspace.default_label else None,
-            run_id=run_id, prior_verify_state=repo_prior,
+            run_id=run_id, prior_verify_state=repo_prior, declared_unchanged=per_repo_declared.get(label),
         )
 
     gate = _merge_gate_reports(reports, workspace) if reports else {
@@ -458,6 +488,14 @@ def format_gate_feedback(gate: dict[str, Any], *, attempt: int, max_attempts: in
             "explored; read a file only when an edit must copy its exact text. "
             "Then run analyze_changed_files_tool; when it passes for your files, respond with a plain-text summary.",
         ])
+        if unwritten[KIND_UNMODIFIED_TARGET]:
+            lines.extend([
+                "",
+                "If one of the files to change already does what the ticket needs, do not edit it: call "
+                "declare_already_satisfied_tool(path, reason) with the specific reason — what the file already contains that "
+                "satisfies the requirement. A comment, rename or reformat made only so this check sees a change is worse than "
+                "declaring it: the reviewer sees your declaration and judges it.",
+            ])
     else:
         lines.extend([
             "",
@@ -544,7 +582,52 @@ _VERIFIER_JSON_SCHEMA: dict[str, Any] = {
 _VERIFIER_REVIEW_CORE = """You verify a software feature implementation against a plan.
 Deterministic checks already passed.
 Return JSON: {passed: bool, issues: [], required_fixes: [], reasoning: string optional}.
-Set passed=true unless a planned acceptance criterion is clearly unmet."""
+Set passed=true unless a planned acceptance criterion is clearly unmet.
+
+An EMPTY `acceptance_criteria` list does not mean there is nothing to check — it means the plan
+never said what "done" is, so "no criterion is unmet" is vacuously true and tells you nothing.
+Judge such a change against `plan.feature_summary` instead, and set passed=false when you cannot
+see code in the diffs that implements it.
+
+`deterministic_gate.assumed_satisfied` lists planned files the developer declared ALREADY do what the
+ticket needs, each with its reason, and left unchanged. Check every such claim against the acceptance
+criteria and the code you can see: if a declared file does not actually contain what the ticket requires,
+set passed=false and name it in required_fixes. Do not fail a run merely because it made few or no
+changes — a file that already does the job needs none."""
+
+
+_NOTHING_TO_VERIFY = (
+    "Nothing to verify: the plan named no files to create or modify, the worktree has no changes, "
+    "and no file was declared already satisfied. The deterministic gate passed having checked "
+    "nothing, so there is no implementation to review and no criterion this run could have met. "
+    "Re-plan the story."
+)
+
+
+def _nothing_to_verify(plan: dict[str, Any], gate: dict[str, Any], diffs: list[dict[str, Any]]) -> bool:
+    """Whether this run produced nothing a pass could possibly be about.
+
+    Every check in compare_to_plan above is a loop over the plan's own
+    files, so a plan that names none reports `passed` having verified
+    nothing; the LLM review then applies "passed unless a planned
+    acceptance criterion is clearly unmet" to a plan with no criteria and
+    agrees. Both halves of the verifier are vacuous at once, and a story
+    reaches the PR gate green with an empty diff — which is what happened,
+    and why this is checked structurally rather than left to the reviewer's
+    judgement.
+
+    Deliberately narrow: it takes an empty plan AND an untouched worktree
+    AND no already-satisfied declaration. A plan that names files but was
+    not implemented is already a gate blocker (KIND_UNMODIFIED_TARGET), and
+    a run whose only outcome is a declaration is exactly the claim the
+    review exists to judge.
+
+    forge/agents/roles/planner_loop.py's _plan_defects stops an empty plan
+    at the source; this is the backstop for what never went through it — a
+    run resumed from a checkpoint written before that existed, and callers
+    of run_verifier outside the graph."""
+    planned = (plan.get("files_to_create") or []) + (plan.get("files_to_modify") or [])
+    return not planned and not gate.get("changed_files") and not gate.get("assumed_satisfied") and not diffs
 
 
 def _verifier_review_system_prompt(worktree_path: str) -> str:
@@ -568,6 +651,7 @@ async def run_verifier(
     precomputed_gate: dict[str, Any] | None = None,
     story_worktrees: dict[str, Any] | None = None,
     default_label: str = "",
+    declared_unchanged: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """prior_build_runner: kept as the historical param/field name for
     minimal churn to the LangGraph state schema (FeatureRunState.dev_build_runner) —
@@ -593,7 +677,7 @@ async def run_verifier(
             gate = await run_deterministic_gate(
                 plan=plan, worktree_path=worktree_path, file_changes=file_changes,
                 project_path=project_path, run_id=run_id, prior_build_runner=prior_build_runner,
-                story_worktrees=story_worktrees, default_label=default_label,
+                story_worktrees=story_worktrees, default_label=default_label, declared_unchanged=declared_unchanged,
             )
         diffs = await asyncio.to_thread(get_all_diffs, worktree_path)
 
@@ -602,8 +686,29 @@ async def run_verifier(
             logger.warning("Verifier deterministic gate failed: %s", "; ".join(blockers[:5]) or "unknown")
             return {"verifier_report": gate, "diffs": diffs, "messages": [{"role": "verifier", "content": "Deterministic gates failed."}]}
 
+        if _nothing_to_verify(plan, gate, diffs):
+            logger.error("Verifier refusing a vacuous pass worktree=%s (empty plan, empty worktree)", worktree_path)
+            if run_id:
+                append_activity(run_id, type="status", phase="verifier", title="Nothing to verify — failing the run", detail=_NOTHING_TO_VERIFY)
+            report = {
+                "passed": False,
+                "nothing_to_verify": True,
+                "issues": [{"severity": "blocker", "file": None, "reason": _NOTHING_TO_VERIFY}],
+                "required_fixes": [_NOTHING_TO_VERIFY],
+                "deterministic_gate": gate,
+            }
+            return {"verifier_report": report, "diffs": diffs, "messages": [{"role": "verifier", "content": "Nothing to verify."}]}
+
         threshold = get_int_config("verifier_skip_llm_trivial_chars", 0)
-        if threshold > 0 and not (plan.get("files_to_create") or []) and sum(len(d.get("diff") or "") for d in diffs) <= threshold:
+        # A declaration that a planned file already satisfies the ticket is a
+        # claim, and the review is what checks it: a run made almost entirely of
+        # such claims has a tiny diff, exactly the case the skip would pass.
+        if (
+            threshold > 0
+            and not gate.get("assumed_satisfied")
+            and not (plan.get("files_to_create") or [])
+            and sum(len(d.get("diff") or "") for d in diffs) <= threshold
+        ):
             logger.info("Verifier passed (gate only; LLM review skipped, trivial diff)")
             report = {"passed": True, "issues": [], "required_fixes": [], "deterministic_gate": gate, "llm_review": "skipped_trivial"}
             return {"verifier_report": report, "diffs": diffs, "messages": [{"role": "verifier", "content": "Verification passed."}]}

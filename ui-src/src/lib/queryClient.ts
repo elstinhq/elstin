@@ -13,4 +13,5 @@ export const queryKeys = {
   globalConfig: () => ["config"] as const,
   epicUsage: (epicKey: string) => ["epics", epicKey, "usage"] as const,
   storyUsage: (storyKey: string) => ["stories", storyKey, "usage"] as const,
+  storyPlan: (storyKey: string) => ["stories", storyKey, "plan"] as const,
 };

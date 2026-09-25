@@ -7,6 +7,7 @@ response objects.
 """
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import openai
@@ -256,3 +257,72 @@ async def test_unsupported_effort_level_is_omitted_from_the_request(provider, mo
 
     assert "reasoning_effort" not in captured
     assert response.stop_reason == "end_turn"
+
+
+# --- the overall deadline on one call -------------------------------------
+
+
+def _request() -> LlmRequest:
+    return LlmRequest(model="gpt-5.1", messages=[text_message("user", "hi")])
+
+
+async def test_a_call_that_never_answers_is_abandoned_at_the_deadline(monkeypatch):
+    """One run's single model call sat for 2h39m. The SDK's own timeout is per
+    read and a keep-alive gateway never trips it, so the deadline is ours."""
+    from forge.llm.errors import LlmTimeoutError
+
+    provider = OpenAiCompatProvider(api_key="sk-test", request_timeout_seconds=0.05)
+    cancelled = asyncio.Event()
+
+    async def hangs(**kwargs):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", hangs)
+
+    with pytest.raises(LlmTimeoutError, match="no response from the model within 0.05s"):
+        await asyncio.wait_for(provider.complete(_request()), timeout=2)
+
+    assert cancelled.is_set()  # the request itself was cancelled, not left running
+
+
+async def test_a_call_that_answers_in_time_is_unaffected(monkeypatch):
+    provider = OpenAiCompatProvider(api_key="sk-test", request_timeout_seconds=5)
+
+    async def quick(**kwargs):
+        return _fake_completion(content="hello", usage=_fake_usage())
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", quick)
+
+    assert (await provider.complete(_request())).text() == "hello"
+
+
+@pytest.mark.parametrize("off", [None, 0, -1])
+async def test_no_deadline_when_it_is_off(monkeypatch, off):
+    provider = OpenAiCompatProvider(api_key="sk-test", request_timeout_seconds=off)
+
+    async def slowish(**kwargs):
+        await asyncio.sleep(0.05)
+        return _fake_completion(content="late but fine", usage=_fake_usage())
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", slowish)
+
+    assert (await provider.complete(_request())).text() == "late but fine"
+
+
+@pytest.mark.usefixtures("forge_db")
+def test_the_configured_deadline_reaches_the_provider():
+    from forge.config.store import set_config
+    from forge.llm.registry import get_provider
+
+    set_config("openai_api_key", "sk-test")
+    assert get_provider()._request_timeout == 900  # the default: a legitimate dev step tops out near 7.5 minutes
+
+    set_config("llm_request_timeout_seconds", "12")
+    assert get_provider()._request_timeout == 12
+
+    set_config("llm_request_timeout_seconds", "0")
+    assert get_provider()._request_timeout is None

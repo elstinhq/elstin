@@ -50,7 +50,13 @@ import asyncio
 import logging
 from typing import Any
 
-from forge.agents.loop import LoopConfig, run_agent_loop, tool_defs_from_schemas
+from forge.agents.loop import (
+    TERMINAL_MAX_BUDGET,
+    TERMINAL_MAX_TURNS,
+    LoopConfig,
+    run_agent_loop,
+    tool_defs_from_schemas,
+)
 from forge.llm.base import LlmProvider
 from forge.llm.types import ResponseFormat, text_message
 from forge.services.run_activity import append_activity
@@ -69,6 +75,18 @@ DEFAULT_MAX_TURNS = 8
 # an essay would otherwise defeat the whole purpose, which is to keep the
 # planner's context small.
 _MAX_FINDINGS_CHARS = 6_000
+
+# Stops that mean "out of room", not "answered". Neither is an error
+# (forge/agents/loop.py returns is_error=False for both), which is exactly
+# why they need naming here: nothing else distinguishes an explorer that
+# finished from one that was cut off mid-read.
+_CUT_SHORT_REASONS = frozenset({TERMINAL_MAX_BUDGET, TERMINAL_MAX_TURNS})
+
+_WRAP_UP_PROMPT = """You are out of turns. Stop investigating and report now, from what you have already read.
+
+Report only what the files you actually read support, with `path:line` citations. If you could not
+answer the task, say exactly that and name what you would have had to read next — a plan built on a
+guess of yours is worse than one that knows this question is still open."""
 
 EXPLORER_SYSTEM = """You are a recon specialist on a software planning run: first in, travels light, reports what is actually there.
 
@@ -214,8 +232,11 @@ async def run_explorer(
     on_turn: Any = None,
     run_id: str | None = None,
 ) -> str:
-    """One read-only sub-agent against one area. Returns its findings, or
-    an empty string if it produced nothing usable.
+    """One read-only sub-agent against one area. Returns (findings,
+    complete) — an empty findings string if it produced nothing usable, and
+    complete=False if it was stopped by a cap rather than by answering, so
+    the caller can label a partial report instead of passing it off as a
+    finished one.
 
     Never raises: an explorer is an optimization, so a sub-agent that fails
     costs the planner a head start and nothing else. Its own loop already
@@ -248,27 +269,74 @@ async def run_explorer(
         result = await run_agent_loop(config, [text_message("user", prompt)])
     except Exception as exc:  # noqa: BLE001 — a failed head start must not fail the plan
         logger.warning("Explorer %r raised: %s", area["name"], exc)
-        return ""
+        return "", False
 
+    complete = result.terminal_reason not in _CUT_SHORT_REASONS
     findings = (result.final_text or "").strip()
+    if not complete:
+        # An explorer stopped by a cap has NOT answered: its final_text is
+        # whatever prose sat in the turn where it also called a tool, which
+        # is an announcement of the read it was about to do ("Let me check
+        # the schema in openapi.json") and not a finding at all. Shipping
+        # that to the planner as one — under a heading promising `path:line`
+        # citations — is how a planner ends up reasoning from a sentence
+        # that was never finished. So the reads already paid for are
+        # salvaged with one tool-free turn instead: same history, no tools,
+        # "report what you have". Cheap, and the alternative is throwing the
+        # whole investigation away.
+        salvaged = await _wrap_up(config, result, area=area, run_id=run_id)
+        if salvaged:
+            findings, complete = salvaged, True
+        else:
+            logger.warning(
+                "Explorer %r was cut short (%s) and could not summarise — reporting it as incomplete",
+                area["name"], result.terminal_reason,
+            )
     if result.is_error and not findings:
         logger.warning("Explorer %r ended in error: %s", area["name"], result.error_message)
-        return ""
+        return "", False
     if len(findings) > _MAX_FINDINGS_CHARS:
         findings = findings[:_MAX_FINDINGS_CHARS] + "\n...[report truncated]"
 
     logger.info(
-        "Explorer %r finished turns=%d chars=%d terminal_reason=%s",
-        area["name"], result.turns_used, len(findings), result.terminal_reason,
+        "Explorer %r finished turns=%d chars=%d terminal_reason=%s complete=%s",
+        area["name"], result.turns_used, len(findings), result.terminal_reason, complete,
     )
     if run_id:
         append_activity(
             run_id, type="llm", phase="planner",
-            title=f"Investigation: {area['name']}",
+            title=f"Investigation: {area['name']}" + ("" if complete else " (incomplete)"),
             detail=findings[:4000] or "(no findings)",
-            meta={"explorer": area["name"], "turns": result.turns_used},
+            meta={"explorer": area["name"], "turns": result.turns_used, "complete": complete},
         )
-    return findings
+    return findings, complete
+
+
+async def _wrap_up(config: LoopConfig, result: Any, *, area: dict[str, Any], run_id: str | None) -> str:
+    """One tool-free turn asking a capped explorer to report what it has.
+
+    Safe to build on `result.history`: forge/agents/loop.py appends the
+    turn's tool results before it checks either cap, so a capped run's
+    history ends on an answered tool message and every call in it has its
+    result. `tools=[]` is what forces prose — the adapter omits the tools
+    field entirely when the list is empty, so the model cannot spend this
+    turn announcing another read."""
+    wrap_config = LoopConfig(
+        provider=config.provider,
+        model=config.model,
+        system=config.system,
+        effort=config.effort,
+        max_turns=1,
+        on_turn=config.on_turn,
+    )
+    try:
+        wrapped = await run_agent_loop(wrap_config, [*result.history, text_message("user", _WRAP_UP_PROMPT)])
+    except Exception as exc:  # noqa: BLE001 — same rule as the explorer itself
+        logger.warning("Explorer %r wrap-up raised: %s", area["name"], exc)
+        return ""
+    text = (wrapped.final_text or "").strip()
+    logger.info("Explorer %r wrap-up chars=%d terminal_reason=%s", area["name"], len(text), wrapped.terminal_reason)
+    return text
 
 
 async def gather_exploration(
@@ -313,11 +381,15 @@ async def gather_exploration(
         for area in areas
     ))
 
-    sections = [
-        f"### {area['name']}\nQuestion: {area['question']}\n\n{report}"
-        for area, report in zip(areas, reports)
-        if report
-    ]
+    sections: list[str] = []
+    incomplete = 0
+    for area, (report, complete) in zip(areas, reports):
+        if not report:
+            continue
+        if not complete:
+            incomplete += 1
+        marker = "" if complete else "  [INCOMPLETE — this agent ran out of turns; treat it as a lead, not an answer]"
+        sections.append(f"### {area['name']}{marker}\nQuestion: {area['question']}\n\n{report}")
     if not sections:
         return "", api_duration_ms
 
@@ -325,9 +397,18 @@ async def gather_exploration(
         "=== REPOSITORY INVESTIGATION (read-only agents, run in parallel before planning) ===\n"
         "Each section answers one question about the existing code, with `path:line` citations. "
         "These are findings from this repository, not requirements — treat them as what IS, and "
-        "verify anything you intend to rely on heavily with your own read/grep tools.\n\n"
+        "verify anything you intend to rely on heavily with your own read/grep tools.\n"
+        # Said explicitly because the cost of getting this wrong is not a
+        # thinner plan but a confident, wrong one: a partial report reads
+        # exactly like a complete one, and a planner that treats it as
+        # settled invents the rest of the file it was never told about.
+        "A section marked INCOMPLETE was cut off before it finished. It may name a file without "
+        "saying where it is, or raise a question without answering it. Anything you take from such "
+        "a section you must confirm yourself with read/grep/find before the plan relies on it.\n\n"
         + "\n\n".join(sections)
         + "\n=== END INVESTIGATION ===\n"
     )
+    if incomplete:
+        logger.warning("%d of %d explorer report(s) are incomplete", incomplete, len(sections))
     return block, api_duration_ms
 

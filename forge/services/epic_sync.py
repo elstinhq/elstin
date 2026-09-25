@@ -166,10 +166,15 @@ def relevel_epic(epic_key: str) -> list[list[str]]:
 def sync_epic_from_jira(jira_key: str, *, project_id: int) -> ReconcileReport:
     """Registers the epic and its child tickets under `project_id`, using
     that project's JIRA connection (its own override, or the global
-    default — see forge.config.store.resolve_config). Deliberately
-    folder-less — the daemon leaves an epic alone until a folder is chosen
-    separately via PUT /api/epics/{epic_key}/repo, so syncing tickets and
-    picking a target folder are two independent steps.
+    default — see forge.config.store.resolve_config). A new epic is
+    assigned the project's first-added repo as its default automatically
+    (no repo is bound to the epic — every project repo is readable and
+    writable by the plan, forge/tools/workspace.py — this only fixes which
+    one an unprefixed path means and gives dispatch a real path to create
+    the first worktree from). A project with no repos yet leaves the epic
+    folder-less until one is cloned via the Folders panel, at which point
+    it gets backfilled the same way an in-progress re-sync backfills any
+    older epic that predates its project's first repo.
 
     Raises ValueError if the epic already exists under a *different*
     project — re-syncing never silently reassigns an epic's project.
@@ -181,6 +186,12 @@ def sync_epic_from_jira(jira_key: str, *, project_id: int) -> ReconcileReport:
     existing = sm.get_epic(jira_key)
     if existing is not None and existing["project_id"] != project_id:
         raise ValueError(f"{jira_key} already belongs to a different project (project_id={existing['project_id']})")
+
+    # The project's first-added repo (list_project_repos is oldest-first),
+    # used below as the new default-repo assignment. None when the project
+    # has no repo cloned yet — the epic then stays folder-less until one is.
+    project_repos = sm.list_project_repos(project_id)
+    default_repo_id = project_repos[0]["id"] if project_repos else None
 
     source = get_ticket_source(project_id)
     jira_key = source.normalize_key(jira_key)
@@ -233,7 +244,16 @@ def sync_epic_from_jira(jira_key: str, *, project_id: int) -> ReconcileReport:
         jira_key, project_id=project_id, levels=levels,
         summary=root.summary, description=root.description,
         external_source=source.name, external_id=root.external_id or jira_key,
+        project_repo_id=default_repo_id,
     )
+    # create_epic only sets project_repo_id on insert — an older epic that
+    # was first synced before this project had any repo (or before this
+    # backfill existed) still needs it applied here, on re-sync, once a
+    # repo shows up. Never overwrites a repo a human (or an earlier sync)
+    # already assigned.
+    current_epic = sm.get_epic(jira_key)
+    if current_epic is not None and current_epic["project_repo_id"] is None and default_repo_id is not None:
+        sm.set_epic_project_repo(jira_key, default_repo_id)
     sm.set_epic_levels(jira_key, levels)
 
     for ticket in top_level:
@@ -242,6 +262,7 @@ def sync_epic_from_jira(jira_key: str, *, project_id: int) -> ReconcileReport:
             ticket.key, epic_key=jira_key, wave=wave_of[ticket.key],
             summary=ticket.summary, description=ticket.description,
             kind=kind, kind_reason=reason,
+            issue_type=ticket.issue_type, labels=ticket.labels,
             external_source=source.name, external_id=ticket.external_id or ticket.key,
         )
 

@@ -65,6 +65,13 @@ export const GATE_ACTION: Partial<Record<StoryStatus, GateAction>> = {
   },
 };
 
+// Reasons a story stops that the row can say in words. Anything else is shown
+// as the raw code, and the three *_gate reasons are not shown at all.
+export const PARKED_REASON_LABEL: Record<string, string> = {
+  already_satisfied: "already satisfied — no changes needed",
+  cancelled: "cancelled",
+};
+
 export const ACTIVITY_TYPE_LABEL: Record<string, string> = {
   status: "Status",
   thinking: "Thinking",
@@ -78,6 +85,7 @@ export const ACTIVITY_PHASE_LABEL: Record<string, string> = {
   dev: "Dev",
   verifier: "Verifier",
   qa: "QA",
+  system: "System",
 };
 
 interface TagProps {
@@ -148,4 +156,24 @@ export function CoverageGapTag({ story }: { story: Story }) {
 export function PrOpenErrorTag({ story }: { story: Story }) {
   if (!story.pr_open_error) return null;
   return <Tag label="PR not opened" appearance="destructive" title={story.pr_open_error} />;
+}
+
+// A "failed" story that never got past planning and one where dev actually
+// wrote code but the build or the reviewer rejected it read the same in the
+// plain status tag — the second is real progress, not a dead end, and is
+// worth a click into the run before retrying blind. gate_runs/dev_passes
+// are the cheapest signal that dev actually ran (see forge/api/
+// epic_routes.py's _story_with_pr): the deterministic gate only runs after
+// dev writes something.
+export function CodeWrittenTag({ story }: { story: Story }) {
+  const outcome = story.run_outcome;
+  if (story.status !== "failed" || story.failure_stage !== "run" || !outcome) return null;
+  if (outcome.dev_passes <= 0 && outcome.gate_runs <= 0) return null;
+  const detail =
+    outcome.verifier_rejections > 0
+      ? "The reviewer rejected the implementation — open the run to see why."
+      : outcome.gate_failures > 0
+        ? "The build/test gate failed after dev wrote code — often an environment issue (toolchain version, missing dependency), not the code itself."
+        : "Dev wrote code before this run failed — open it to see what happened.";
+  return <Tag label="Code written, verification failed" appearance="warning" title={detail} />;
 }

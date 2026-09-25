@@ -57,7 +57,7 @@ from contextlib import asynccontextmanager
 from langgraph.graph import END, START, StateGraph
 
 from forge.agents.roles.dev_loop import DevLoopError, run_dev
-from forge.agents.roles.planner_loop import run_planner
+from forge.agents.roles.planner_loop import PlannerLoopError, run_planner
 from forge.agents.roles.qa import run_epic_qa
 from forge.agents.roles.verifier import format_gate_feedback, run_deterministic_gate, run_verifier
 from forge.orchestration.state import FeatureRunState
@@ -77,21 +77,35 @@ DEFAULT_MAX_GATE_ATTEMPTS = 3
 async def planner_node(state: FeatureRunState) -> dict:
     run_id = state.get("run_id", "")
     logger.info("planner starting run_id=%s", run_id)
-    result = await run_planner(
-        user_request=state["user_request"],
-        project_path=state["project_path"],
-        run_id=run_id or None,
-        ticket_id=state.get("ticket_id"),
-        attachment_paths=state.get("attachment_paths") or None,
-        linked_issues_context=state.get("linked_issues_context"),
-        acceptance_criteria_hint=state.get("acceptance_criteria_hint") or None,
-        clarification_answers=state.get("clarification_answers") or None,
-        repo_roots=state.get("repo_roots") or None,
-        default_label=state.get("default_repo_label") or "",
-        project_guide=state.get("project_guide") or None,
-        sdk_model=state.get("sdk_model"),
-        sdk_effort=state.get("sdk_effort"),
-    )
+    try:
+        result = await run_planner(
+            user_request=state["user_request"],
+            project_path=state["project_path"],
+            run_id=run_id or None,
+            ticket_id=state.get("ticket_id"),
+            attachment_paths=state.get("attachment_paths") or None,
+            linked_issues_context=state.get("linked_issues_context"),
+            acceptance_criteria_hint=state.get("acceptance_criteria_hint") or None,
+            clarification_answers=state.get("clarification_answers") or None,
+            repo_roots=state.get("repo_roots") or None,
+            default_label=state.get("default_repo_label") or "",
+            project_guide=state.get("project_guide") or None,
+            sdk_model=state.get("sdk_model"),
+            sdk_effort=state.get("sdk_effort"),
+        )
+    except PlannerLoopError as exc:
+        # Same reasoning as dev_node's DevLoopError catch below, plus one
+        # specific to this node: an exception here propagates out of the
+        # run, and the daemon's unwind restores the story to its PREVIOUS
+        # status — "pending" — which the next poll dispatches again. A
+        # planner that cannot produce a usable plan therefore re-planned
+        # every cycle, paying for the same failure forever. Ending the run
+        # "failed" stops that: a human sees it, and Retry is a deliberate
+        # act rather than the default.
+        logger.error("planner failed run_id=%s: %s", run_id, exc)
+        if run_id:
+            append_activity(run_id, type="status", phase="planner", title="Planning failed", detail=str(exc)[:1000])
+        return {"status": "failed", "error": str(exc), "messages": []}
     questions = result.get("questions") or []
     if questions:
         logger.info("planner awaiting clarification run_id=%s questions=%d", run_id, len(questions))
@@ -142,6 +156,7 @@ async def dev_node(state: FeatureRunState) -> dict:
             # state.py's field docstring.
             prior_history=state.get("dev_history") or None,
             prior_progress=state.get("dev_progress") or None,
+            prior_declared=state.get("declared_unchanged") or None,
             # Set by gate_node when Tier 1 just failed: the targeted fix
             # message becomes this iteration's brief (see point 3 in the
             # module docstring). Takes precedence over verifier_report,
@@ -174,6 +189,7 @@ async def dev_node(state: FeatureRunState) -> dict:
         "messages": result.get("messages", []),
         "dev_history": result.get("dev_history", []),
         "dev_progress": result.get("dev_progress", []),
+        "declared_unchanged": result.get("declared_unchanged", {}),
         # Grows when the plan turned out to write a repo that had no
         # worktree yet; the daemon records it after the run.
         "story_worktrees": result.get("story_worktrees", {}),
@@ -205,6 +221,7 @@ async def gate_node(state: FeatureRunState) -> dict:
         prior_build_runner=state.get("dev_build_runner") or None,
         story_worktrees=state.get("story_worktrees") or None,
         default_label=state.get("default_repo_label") or "",
+        declared_unchanged=state.get("declared_unchanged") or None,
     )
 
     record_run_outcome(run_id, gate_runs=1, gate_failures=0 if gate.get("passed") else 1)
@@ -279,6 +296,7 @@ async def verifier_node(state: FeatureRunState) -> dict:
             prior_build_runner=state.get("dev_build_runner") or None,
             story_worktrees=state.get("story_worktrees") or None,
             default_label=state.get("default_repo_label") or "",
+            declared_unchanged=state.get("declared_unchanged") or None,
             # gate_node already ran the toolchain on this exact worktree state
             # — reuse its report rather than paying for a second run.
             precomputed_gate=state.get("tier1_gate") or None,
@@ -308,6 +326,20 @@ async def verifier_node(state: FeatureRunState) -> dict:
             "status": "completed",
             "verifier_report": report,
             "diffs": result.get("diffs", []),
+            "messages": result.get("messages", []),
+        }
+
+    # Sending this back to dev would buy three more no-op passes at model
+    # prices: dev may only write files the plan names, and this rejection
+    # means the plan names none. The fix is a new plan, which only a
+    # redispatch produces.
+    if report.get("nothing_to_verify"):
+        logger.error("verifier run_id=%s has nothing to verify — failing without a dev retry", run_id)
+        return {
+            "status": "failed",
+            "verifier_report": report,
+            "diffs": result.get("diffs", []),
+            "error": (report.get("required_fixes") or ["Nothing to verify"])[0],
             "messages": result.get("messages", []),
         }
 
@@ -400,6 +432,30 @@ def route_entry(state: FeatureRunState) -> str:
     return "qa" if state.get("story_kind") == "qa" else "planner"
 
 
+def route_after_planner(state: FeatureRunState) -> str:
+    # planner_node returns status="failed" for a PlannerLoopError, which
+    # includes a plan the plan gate rejected on every attempt. Without this
+    # the unconditional planner->dev edge sent that failure on to dev,
+    # which would be scoped to write the files of a plan that does not
+    # exist.
+    if state.get("status") == "failed":
+        return END
+    # A clarification round-trip's "plan" is a placeholder until a human
+    # answers (planner_node) — status stays "awaiting_clarification" until
+    # planner actually runs again with an answer. interrupt_after=["planner"]
+    # computes this edge once, right when planner first returns that status,
+    # and freezes it into the checkpoint's `next` pointer; a later resume
+    # (forge/daemon/main.py patches in clarification_answers via
+    # `aupdate_state`, which re-evaluates this same edge against the patched
+    # state) must land back on "planner" to actually finish planning, not on
+    # "dev", which would be scoped to write the files of a plan that was
+    # never finished — see MKT2-858, where this sent an unanswered-shaped
+    # plan straight to dev and the run failed with "nothing to verify".
+    if state.get("status") == "awaiting_clarification":
+        return "planner"
+    return "dev"
+
+
 def route_after_dev(state: FeatureRunState) -> str:
     # dev_node returns status="failed" both for its pre-existing defensive
     # checks (no worktree) and for a caught DevLoopError — either
@@ -435,7 +491,7 @@ def build_graph() -> StateGraph:
     graph.add_node("qa", qa_node)
 
     graph.add_conditional_edges(START, route_entry, {"planner": "planner", "qa": "qa"})
-    graph.add_edge("planner", "dev")
+    graph.add_conditional_edges("planner", route_after_planner, {"planner": "planner", "dev": "dev", END: END})
     graph.add_conditional_edges("dev", route_after_dev, {"gate": "gate", END: END})
     graph.add_conditional_edges("gate", route_after_gate, {"verifier": "verifier", "dev": "dev", END: END})
     graph.add_conditional_edges("verifier", route_after_verifier, {"dev": "dev", END: END})
