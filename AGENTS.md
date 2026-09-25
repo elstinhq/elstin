@@ -348,7 +348,7 @@ stays in its history and is re-sent every later turn, whereas a sub-agent's
 reads die with its throwaway context and only a short report comes back.
 Everything about it is best-effort — an empty scope, a failed scope, or
 every explorer returning nothing all degrade to "plan without a head
-start". Sub-agents get the read-only trio only, so there is no write path
+start". Sub-agents get the read-only tools only, so there is no write path
 and no way to spawn another one. Skipped on a clarification round-trip.
 Their tokens roll up into the planner's `story_usage` row via the same
 `on_turn` hook, and their spend caps are carved out of
@@ -357,10 +357,24 @@ Their tokens roll up into the planner's `story_usage` row via the same
 **Agent loop mechanics** (`forge/agents/loop.py`, model-agnostic — the
 same loop drives GPT, DeepSeek, or a local vLLM/Ollama endpoint):
 
-- Compaction is **tombstoning, not summarization**: tool results older
-  than the last N turns are replaced in place with a fixed string; no
-  message is removed or reordered, no LLM call is made, and the prompt
-  prefix stays byte-stable for provider prefix caching.
+- Compaction is **tombstoning, not summarization**: tool results (and old
+  copies of the trailing reminder) older than the last N turns are replaced
+  in place with a fixed string; no message is removed or reordered, no LLM
+  call is made, and the prompt prefix stays byte-stable for provider prefix
+  caching.
+- **Context overflow** (`LlmContextOverflowError` — the adapter maps the
+  provider's "prompt is too long" 400, or a 413): the loop compacts deeper
+  (only the latest turn kept, large string arguments of older tool calls —
+  a written file's content — tombstoned too) and retries the same turn
+  once. A second overflow in that turn, or nothing left to compact, ends
+  the run as before.
+- **Tool arguments are checked before a tool runs**
+  (`agents/tool_arguments.py`): repaired where the tool's JSON schema makes
+  the intent unambiguous (`"200"` → 200, `"false"` → False — Python reads
+  the string `"false"` as true, which once made `write_file_tool`
+  overwrite a file), then validated. A call still invalid, or whose
+  arguments were not JSON at all (`ToolCallBlock.arguments_error`), gets
+  an is_error result naming the problem and the tool does not run.
 - Consecutive **read-only** tool calls (`tools/dev_tools.py` /
   `tools/planner_tools.py`'s `READ_ONLY_TOOLS`) run concurrently; every
   other tool runs alone, in order. A new tool is mutating until declared
@@ -388,10 +402,15 @@ same loop drives GPT, DeepSeek, or a local vLLM/Ollama endpoint):
   `IDLE_WARNING_WINDOW` turns before the stop, the trailing message also
   says how many are left (`_idle_warning`), so the cut-off is never a surprise.
 - **Trailing reminder** (`LoopConfig.trailing_reminder`): a callable
-  re-evaluated each turn whose text is appended to the *request* as a
-  final user message and never stored in `history`. That is what keeps it
-  cheap — it sits after every cached byte, so it costs one short message
-  per turn instead of bloating history and breaking the prefix. Dev uses
+  re-evaluated each turn whose text is appended to the request as a final
+  user message — and **kept in the loop's history**, so every request
+  begins with every message the one before it sent. It used to be sent
+  and dropped; GPT-5.6+ caches the prompt only at the end of the latest
+  user/tool message, which was always that reminder, so nothing past the
+  system prompt was ever reused (one dev run: 4% of 11.5M input tokens
+  cached, against 59% for the planner on the same model and gateway).
+  Compaction tombstones stale copies, and `LoopResult.history` — what is
+  persisted and resumed — never contains any. Dev uses
   it to re-show the **progress checklist** (`tools/progress.py`): one
   entry per planned file, seeded from the plan, updated by the model via
   `update_progress_tool`, carried across fix rounds in
@@ -402,6 +421,17 @@ same loop drives GPT, DeepSeek, or a local vLLM/Ollama endpoint):
 - `read_file_tool` serves at most 250 lines per call (`tools/grep.py`'s
   `MAX_READ_LINES`); a larger `limit` is rejected, an unwindowed read of a
   longer file returns the first 250 with a continue-from offset.
+- `outline_file_tool` (`tools/outline.py`, dev and planner) lists a file's
+  classes, functions and methods with line numbers, so the next read can
+  be one method's range. Language-neutral heuristics — nothing branches on
+  a language name. It exists because one dev run spent 237 of 341 calls
+  searching for `class X` and paging through files from line 1.
+- `grep_codebase` caps matches **in total** (ripgrep's `--max-count` is per
+  file — "15" used to mean one match per file across the repo), stops
+  ripgrep once it has enough, sorts by path, previews lines longer than
+  `MAX_MATCH_LINE_CHARS`, and passes the pattern with `-e` so one starting
+  with `-` is not read as an option. Callers ask for one more than they
+  show to know when to say the list was cut.
 
 **Pointing forge at a non-OpenAI model** (any OpenAI-compatible endpoint
 via `llm_base_url` — OpenRouter, vLLM, Ollama, Azure):
@@ -418,7 +448,15 @@ via `llm_base_url` — OpenRouter, vLLM, Ollama, Azure):
   names the adapter, not the base_url), so third-party model ids go in
   *that* dict. A missing row makes `estimate_cost_usd` return None, which
   silently disables `max_budget_usd` for that model — a test pins every
-  config default against the table for this reason.
+  config default against the table for this reason. A dated snapshot id
+  (`gpt-5.6-luna-2026-08-01`, OpenRouter's `…-20260813`) matches its
+  undated row. A row can carry a `cache_write_per_mtok` for models that
+  bill cache writes above the input rate (GPT-5.6+).
+- **OpenRouter reports what it billed** (`usage.cost`, on every response);
+  the adapter reads it into `Usage.cost_usd`, and both the loop's budget
+  and `story_usage` use it in preference to the table. The table can only
+  guess which upstream served a call — its DeepSeek row overstated one
+  run's spend 2.3×.
 - Raise/lower `agent_compaction_token_threshold` to suit the context
   window; the default assumes roughly 1M tokens.
 
@@ -461,7 +499,7 @@ story JIRA key.
 Dev agent surface: `roles/dev_loop.py` → `agents/loop.py` (tool dispatch,
 off-thread) → `tools/dev_tools.py` → path-guarded filesystem, edit, grep,
 allowlisted shell, language analyze/test. Planner's surface is the same
-shape with `tools/planner_tools.py`'s read-only trio instead. There is no
+shape with `tools/planner_tools.py`'s read-only tools instead. There is no
 MCP hop in either: `make_dev_tools()`/`make_planner_tools()` hand their
 `(functions, schemas)` pair straight to the loop.
 
@@ -520,9 +558,9 @@ ceiling.
 
 **Limitation worth knowing:** spend is summed from `story_usage.cost_usd`,
 which is None for any (provider, model) pair missing from
-`llm/pricing.py`. A model with no price row therefore cannot be bounded at
-all. That is why a test pins every shipped model default against the
-pricing table.
+`llm/pricing.py` *unless the provider reports its own cost* (OpenRouter
+does). A model with neither cannot be bounded at all. That is why a test
+pins every shipped model default against the pricing table.
 
 ## Run telemetry
 
@@ -531,7 +569,10 @@ Two tables, both written as a run progresses and both keyed on `run_id`
 StateManager (hard constraint #1's documented exception):
 
 - `story_usage` — what a run **cost**: tokens, cache reads, cost and
-  duration per (run, phase, model, provider).
+  duration per (run, phase, model, provider). Sums only — the per-turn
+  split, cache reads and writes included, is in each turn's `token`
+  activity event (`services/usage.py`'s `turn_usage_meta`, dev and planner
+  alike), which is where a run that stopped hitting the cache shows up.
 - `story_run_outcomes` — how much work it **took**: gate runs and
   failures, verifier runs and rejections, dev passes/turns/terminal
   reason, planner turns, explorer count, final graph status. Written by

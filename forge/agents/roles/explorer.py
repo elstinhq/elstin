@@ -32,7 +32,7 @@ knowable before any sub-agent starts, and leaves the graph, the activity
 phases and the run state completely untouched — this module is internal to
 the planner step.
 
-Sub-agents get forge/tools/planner_tools.py's read-only trio and nothing
+Sub-agents get forge/tools/planner_tools.py's read-only tools and nothing
 else, so there is no write path to guard and no way for an explorer to
 spawn another one. Hard constraint #9 holds: these are `run_agent_loop`
 calls like every other planner/dev model interaction, not direct provider

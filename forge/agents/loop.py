@@ -16,7 +16,7 @@ history compaction.
 
 Everything here is written to be model-agnostic — the same loop drives
 GPT, DeepSeek, or a local vLLM/Ollama endpoint through forge/llm/'s
-OpenAI-compatible adapter — and four mechanisms exist specifically
+OpenAI-compatible adapter — and the mechanisms below exist largely
 because weaker or cheaper models need more scaffolding than a frontier
 model does:
 
@@ -28,7 +28,8 @@ model does:
    billable call each time. Now compaction never removes or reorders a
    message: it walks turns older than the last `compaction_keep_recent_turns`
    and replaces each *large* ToolResultBlock's content with a fixed
-   tombstone string, in place. Roles and tool_call_ids are preserved, so
+   tombstone string, in place (and each old copy of the trailing reminder,
+   point 5, with another). Roles and tool_call_ids are preserved, so
    the OpenAI-compatible message structure stays valid, and because a
    tombstoned block never changes again the prefix stays byte-stable
    across turns. No provider call, no failure mode.
@@ -63,16 +64,43 @@ model does:
    left, so the cut-off is never a surprise.
 
 5. **A trailing reminder** (LoopConfig.trailing_reminder). A callable
-   re-evaluated every turn whose text is appended to the *request* as a
-   final user message and deliberately NOT stored in `history`. That
-   distinction is the whole trick: a rule stated once in the system prompt
-   stops being load-bearing forty turns later, but appending a reminder
-   *into* the history would both bloat it with stale copies and, worse,
-   change bytes that the prefix cache depends on. Kept out of history, it
-   sits after every cached byte, so it costs one short message per turn and
-   nothing else. forge/agents/roles/dev_loop.py uses it to re-show the dev
-   agent its own progress checklist, which is what turns the idle-turn
-   budget above from a silent stop into a correction the model can act on.
+   re-evaluated every turn whose text is appended to the request as a
+   final user message: a rule stated once in the system prompt stops being
+   load-bearing forty turns later. forge/agents/roles/dev_loop.py uses it
+   to re-show the dev agent its own progress checklist, which is what
+   turns the idle-turn budget above from a silent stop into a correction
+   the model can act on.
+
+   Each reminder is STORED in the loop's history once sent, so every
+   request begins with every message the previous one sent. It used to be
+   sent and then dropped, on the theory that it "sits after every cached
+   byte" — true for caches that save a prefix at fixed intervals, fatal
+   for the ones that save it only at the end of the last message. GPT-5.6+
+   places its single implicit cache breakpoint at the end of the latest
+   user or tool message, which was always the reminder, which the next
+   request no longer contained: one dev run on gpt-5.6-luna read 4% of
+   11.5M input tokens from the cache (about the system prompt and tools,
+   ~4k tokens a turn) while the planner — same model, same gateway, no
+   reminder — read 59%. Anthropic's automatic caching works the same way.
+   The cost is the stale copies; compaction replaces those older than the
+   last few turns with REMINDER_TOMBSTONE, and LoopResult.history — what a
+   caller persists and resumes from — never contains any.
+
+6. **Tool arguments checked before a tool runs**
+   (forge/agents/tool_arguments.py). A call's arguments are repaired where
+   the tool's JSON schema makes the intent unambiguous ("200" for an
+   integer, "false" for a boolean) and then validated; a call that is
+   still invalid — or whose arguments were not JSON at all
+   (ToolCallBlock.arguments_error) — is answered with an is_error result
+   naming the problem, and the tool does not run. Python would otherwise
+   read `overwrite="false"` as true.
+
+7. **Recovery from a context overflow.** A provider that rejects the
+   prompt as too long (LlmContextOverflowError) gets one retry of the same
+   turn after a deeper compaction — only the latest turn kept, and large
+   string arguments of older tool calls (a written file's content)
+   tombstoned too. A second overflow in the same turn, or one with nothing
+   left to compact, ends the run as before.
 
 Tool permission gating is NOT a separate layer here (the old code had two:
 an MCP server allowlist plus a `can_use_tool` callback). A tool the caller
@@ -93,8 +121,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from forge.agents.tool_arguments import argument_errors, repair_arguments
 from forge.llm.base import LlmProvider
-from forge.llm.errors import LlmError, LlmTimeoutError, is_retryable
+from forge.llm.errors import LlmContextOverflowError, LlmError, LlmTimeoutError, is_retryable
 from forge.llm.pricing import estimate_cost_usd
 from forge.llm.types import (
     ContentBlock,
@@ -165,6 +194,22 @@ TOMBSTONE = (
     "and ask for the specific range or pattern you are missing rather than the whole file. "
     "Your applied changes are unaffected.]"
 )
+
+# What an old copy of the trailing reminder becomes once compaction reaches
+# it — the current copy is always the newest message, so an old one is
+# stale by definition (module docstring, point 5). Fixed, like TOMBSTONE.
+REMINDER_TOMBSTONE = "[Earlier reminder removed to save context — the latest one is the last message.]"
+
+# What a large string argument of an old tool call becomes when a context
+# overflow forces a deeper compaction (module docstring, point 7): the
+# `content` of a write_file call is the other thing, besides tool output,
+# that grows a dev run's history file by file. The call already ran and
+# its result is still recorded, so the model loses nothing it acts on.
+ARGUMENT_TOMBSTONE = "[Argument omitted to save context — this call already ran; its result is recorded.]"
+
+# Turns a context-overflow compaction keeps intact: only the latest, since
+# the alternative is failing the run.
+_OVERFLOW_KEEP_RECENT_TURNS = 1
 
 # Tool results at or below this size are left alone by compaction. They
 # are the cheap, load-bearing ones ("Successfully wrote file to x",
@@ -379,9 +424,31 @@ def _compaction_cut_index(history: list[Message], keep_recent_turns: int) -> int
     return 1
 
 
-def _compact_history(history: list[Message], keep_recent_turns: int) -> tuple[list[Message], int]:
+def _shrink_arguments(value: Any) -> Any:
+    """`value` with every long string inside it replaced by
+    ARGUMENT_TOMBSTONE, keeping its keys and structure."""
+    if isinstance(value, str):
+        return ARGUMENT_TOMBSTONE if len(value) > _TOMBSTONE_MIN_CHARS else value
+    if isinstance(value, dict):
+        return {key: _shrink_arguments(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_shrink_arguments(item) for item in value]
+    return value
+
+
+def _compact_history(
+    history: list[Message],
+    keep_recent_turns: int,
+    *,
+    reminder_indexes: frozenset[int] | set[int] = frozenset(),
+    shrink_call_arguments: bool = False,
+) -> tuple[list[Message], int]:
     """Tombstone large tool results older than the last `keep_recent_turns`
-    turns. Returns (new_history, number_of_blocks_tombstoned).
+    turns, and old copies of the trailing reminder (the messages at
+    `reminder_indexes`). With `shrink_call_arguments`, large string
+    arguments of old tool calls too — the deeper cut a context overflow
+    needs (module docstring, point 7). Returns (new_history,
+    number_of_blocks_tombstoned).
 
     Nothing is removed or reordered — every message keeps its role and
     every ToolResultBlock keeps its tool_call_id, so a provider that
@@ -394,6 +461,26 @@ def _compact_history(history: list[Message], keep_recent_turns: int) -> tuple[li
     pruned = 0
     for idx in range(1, cut):
         message = compacted[idx]
+        if idx in reminder_indexes:
+            text = "".join(b.text for b in message.content if isinstance(b, TextBlock))
+            if text != REMINDER_TOMBSTONE and len(text) > len(REMINDER_TOMBSTONE):
+                compacted[idx] = Message(role=message.role, content=[TextBlock(text=REMINDER_TOMBSTONE)])
+                pruned += 1
+            continue
+        if shrink_call_arguments and message.role == "assistant":
+            calls_changed = False
+            new_content: list[ContentBlock] = []
+            for block in message.content:
+                if isinstance(block, ToolCallBlock):
+                    shrunk = _shrink_arguments(block.arguments)
+                    if shrunk != block.arguments:
+                        block = ToolCallBlock(id=block.id, name=block.name, arguments=shrunk, arguments_error=block.arguments_error)
+                        calls_changed = True
+                        pruned += 1
+                new_content.append(block)
+            if calls_changed:
+                compacted[idx] = Message(role=message.role, content=new_content)
+            continue
         if message.role != "tool":
             continue
         new_blocks: list[ContentBlock] = []
@@ -435,11 +522,34 @@ class _DispatchOutcome:
     intercepted: int
 
 
-async def _dispatch_tool_calls(config: LoopConfig, tool_calls: list[ToolCallBlock], previous_signatures: set[str]) -> _DispatchOutcome:
-    """Run one turn's tool calls: read-only runs concurrently, everything
-    else sequentially in call order, repeats intercepted (see module
-    docstring, points 2 and 3). Results come back in call order."""
+def _invalid_arguments(call: ToolCallBlock, schemas: dict[str, dict[str, Any]]) -> tuple[dict[str, Any], str | None]:
+    """(arguments to run the call with, or an error to answer it with
+    instead). See module docstring, point 6."""
+    if call.arguments_error:
+        return call.arguments, (
+            f"Invalid arguments for tool {call.name!r}: {call.arguments_error}. "
+            "The tool was not run; re-issue the call with its arguments as one valid JSON object."
+        )
+    schema = schemas.get(call.name)
+    arguments = repair_arguments(call.arguments, schema)
+    problems = argument_errors(arguments, schema)
+    if problems:
+        return arguments, f"Invalid arguments for tool {call.name!r}: {'; '.join(problems)}. The tool was not run."
+    return arguments, None
+
+
+async def _dispatch_tool_calls(
+    config: LoopConfig,
+    tool_calls: list[ToolCallBlock],
+    previous_signatures: set[str],
+    schemas: dict[str, dict[str, Any]] | None = None,
+) -> _DispatchOutcome:
+    """Run one turn's tool calls: arguments checked against the tool's
+    schema first, then read-only calls concurrently, everything else
+    sequentially in call order, repeats intercepted (see module docstring,
+    points 2, 3 and 6). Results come back in call order."""
     results: list[ToolResultBlock | None] = [None] * len(tool_calls)
+    arguments_for: list[dict[str, Any]] = [call.arguments for call in tool_calls]
     pending_reads: list[int] = []
     live_signatures = set(previous_signatures)
     progressed = False
@@ -449,14 +559,20 @@ async def _dispatch_tool_calls(config: LoopConfig, tool_calls: list[ToolCallBloc
         if not pending_reads:
             return
         outcomes = await asyncio.gather(
-            *(_call_tool(config.tool_fns, tool_calls[i].name, tool_calls[i].arguments) for i in pending_reads)
+            *(_call_tool(config.tool_fns, tool_calls[i].name, arguments_for[i]) for i in pending_reads)
         )
         for idx, (text, is_error) in zip(pending_reads, outcomes):
             results[idx] = ToolResultBlock(tool_call_id=tool_calls[idx].id, content=text, is_error=is_error)
         pending_reads.clear()
 
     for idx, call in enumerate(tool_calls):
-        signature = call_signature(call.name, call.arguments)
+        arguments, invalid = _invalid_arguments(call, schemas or {})
+        if invalid:
+            logger.warning("Tool call %s rejected before running: %s", call.name, invalid[:300])
+            results[idx] = ToolResultBlock(tool_call_id=call.id, content=invalid, is_error=True)
+            continue
+        arguments_for[idx] = arguments
+        signature = call_signature(call.name, arguments)
         if signature in live_signatures:
             logger.warning("Repeated tool call intercepted: %s args=%s", call.name, json.dumps(call.arguments, default=str)[:200])
             results[idx] = ToolResultBlock(tool_call_id=call.id, content=REPEAT_CALL_NUDGE, is_error=True)
@@ -471,7 +587,7 @@ async def _dispatch_tool_calls(config: LoopConfig, tool_calls: list[ToolCallBloc
         # A state-changing call: drain any reads queued before it first,
         # so it never overlaps them, then run it alone.
         await _flush_reads()
-        text, is_error = await _call_tool(config.tool_fns, call.name, call.arguments)
+        text, is_error = await _call_tool(config.tool_fns, call.name, arguments)
         results[idx] = ToolResultBlock(tool_call_id=call.id, content=text, is_error=is_error)
         if call.name not in config.bookkeeping_tools:
             # The worktree may have changed: an identical read/analyze after
@@ -537,16 +653,26 @@ async def run_agent_loop(config: LoopConfig, initial_messages: list[Message]) ->
     # both.
     own_compaction = not config.provider.capabilities.supports_server_compaction
     compaction_char_threshold = config.compaction_token_threshold * _CHARS_PER_TOKEN_ESTIMATE
+    # Each tool's JSON schema, for checking a call's arguments before it
+    # runs (module docstring, point 6).
+    schemas = {tool.name: tool.parameters for tool in config.tools}
+    # Where in `history` each turn's trailing reminder was stored. They stay
+    # there for the rest of the run so every request extends the previous
+    # one (module docstring, point 5), and are left out of the history the
+    # caller gets back and persists.
+    reminder_indexes: set[int] = set()
+    # One overflow-driven compaction per turn (module docstring, point 7).
+    overflow_retried = False
+
+    def caller_history() -> list[Message]:
+        return [message for idx, message in enumerate(history) if idx not in reminder_indexes]
 
     while True:
         if own_compaction and _estimate_message_chars(history) > compaction_char_threshold:
-            history, pruned = _compact_history(history, config.compaction_keep_recent_turns)
+            history, pruned = _compact_history(history, config.compaction_keep_recent_turns, reminder_indexes=reminder_indexes)
             if pruned:
-                logger.info("Compacted history: tombstoned %d tool result(s) older than the last %d turn(s)", pruned, config.compaction_keep_recent_turns)
+                logger.info("Compacted history: tombstoned %d block(s) older than the last %d turn(s)", pruned, config.compaction_keep_recent_turns)
 
-        # Appended to the request only. Everything before it is unchanged
-        # from last turn, so the cached prefix survives.
-        turn_messages = list(history)
         reminder = ""
         if config.trailing_reminder:
             try:
@@ -559,13 +685,17 @@ async def run_agent_loop(config: LoopConfig, initial_messages: list[Message]) ->
                 # remaining epic for the cycle.
                 logger.warning("trailing_reminder raised — continuing without it this turn", exc_info=True)
                 reminder = ""
-        # Rides in the same trailing message, so it is just as cheap and just
-        # as absent from history — see _idle_warning.
+        # Rides in the same trailing message — see _idle_warning.
         warning = _idle_warning(idle_turns, config)
         if warning:
             reminder = f"{reminder}\n\n{warning}" if reminder else warning
+        # Stored, not just sent: the next request must begin with every
+        # message this one sent (module docstring, point 5).
+        reminder_index: int | None = None
         if reminder:
-            turn_messages.append(Message(role="user", content=[TextBlock(text=reminder)]))
+            reminder_index = len(history)
+            reminder_indexes.add(reminder_index)
+            history.append(Message(role="user", content=[TextBlock(text=reminder)]))
 
         request = LlmRequest(
             model=config.model,
@@ -575,7 +705,7 @@ async def run_agent_loop(config: LoopConfig, initial_messages: list[Message]) ->
             # caller holding onto a returned/logged request object should
             # see exactly what was sent, not a view that silently changes
             # underneath it once the loop moves on.
-            messages=turn_messages,
+            messages=list(history),
             system=config.system,
             tools=config.tools,
             response_format=config.response_format,
@@ -585,23 +715,51 @@ async def run_agent_loop(config: LoopConfig, initial_messages: list[Message]) ->
         response, last_error, turn_api_ms = await _complete_with_retry(config, request)
         api_duration_ms += turn_api_ms
 
+        if response is None and isinstance(last_error, LlmContextOverflowError) and not overflow_retried:
+            # The prompt no longer fits the model. Cut deeper than the
+            # routine compaction and send the same turn once more (module
+            # docstring, point 7). This turn's reminder comes off first:
+            # the retry stores a freshly evaluated one in its place.
+            overflow_retried = True
+            if reminder_index is not None:
+                history.pop()
+                reminder_indexes.discard(reminder_index)
+            history, pruned = _compact_history(
+                history, _OVERFLOW_KEEP_RECENT_TURNS, reminder_indexes=reminder_indexes, shrink_call_arguments=True,
+            )
+            if pruned:
+                logger.warning("Context overflow: tombstoned %d block(s) and retrying the turn: %s", pruned, last_error)
+                if config.on_retry:
+                    try:
+                        config.on_retry(1, last_error, 0.0)
+                    except Exception:  # noqa: BLE001 — a caller's hook is never worth the run
+                        logger.warning("on_retry raised — continuing", exc_info=True)
+                continue
+            last_error = LlmContextOverflowError(f"{last_error} (the history had nothing left to compact)")
+
         if response is None:
             return LoopResult(
-                history=history, usage=usage_total, terminal_reason=TERMINAL_ERROR, is_error=True,
+                history=caller_history(), usage=usage_total, terminal_reason=TERMINAL_ERROR, is_error=True,
                 turns_used=turn, api_duration_ms=api_duration_ms,
                 error_message=str(last_error) if last_error else "unknown provider error",
             )
 
+        overflow_retried = False
         turn += 1
         if config.on_turn:
             config.on_turn(turn, response)
         usage_total = usage_total + response.usage
-        cost = estimate_cost_usd(
-            config.provider.name, response.model,
-            input_tokens=response.usage.input_tokens,
-            cache_read_tokens=response.usage.cache_read_tokens,
-            output_tokens=response.usage.output_tokens,
-        )
+        # What the provider billed, when it says (OpenRouter does on every
+        # response); the pricing table's estimate otherwise.
+        cost = response.usage.cost_usd
+        if cost is None:
+            cost = estimate_cost_usd(
+                config.provider.name, response.model,
+                input_tokens=response.usage.input_tokens,
+                cache_read_tokens=response.usage.cache_read_tokens,
+                output_tokens=response.usage.output_tokens,
+                cache_creation_tokens=response.usage.cache_creation_tokens,
+            )
         if cost is not None:
             budget_spent += cost
 
@@ -620,7 +778,7 @@ async def run_agent_loop(config: LoopConfig, initial_messages: list[Message]) ->
             detail = _UNUSABLE_STOP_REASONS[response.stop_reason]
             logger.warning("Loop ending on unusable stop_reason=%s: %s", response.stop_reason, detail)
             return LoopResult(
-                history=history, usage=usage_total, terminal_reason=response.stop_reason, is_error=True,
+                history=caller_history(), usage=usage_total, terminal_reason=response.stop_reason, is_error=True,
                 turns_used=turn, api_duration_ms=api_duration_ms, final_text=response.text(),
                 error_message=f"Provider stopped with {response.stop_reason!r}: {detail}.",
             )
@@ -628,12 +786,12 @@ async def run_agent_loop(config: LoopConfig, initial_messages: list[Message]) ->
         tool_calls = response.tool_calls()
         if not tool_calls:
             return LoopResult(
-                history=history, usage=usage_total, terminal_reason=TERMINAL_END_TURN, is_error=False,
+                history=caller_history(), usage=usage_total, terminal_reason=TERMINAL_END_TURN, is_error=False,
                 turns_used=turn, api_duration_ms=api_duration_ms,
                 structured_output=response.structured_output, final_text=response.text(),
             )
 
-        outcome = await _dispatch_tool_calls(config, tool_calls, previous_signatures)
+        outcome = await _dispatch_tool_calls(config, tool_calls, previous_signatures, schemas)
         previous_signatures = outcome.live_signatures
         for result_block in outcome.results:
             step += 1
@@ -643,12 +801,12 @@ async def run_agent_loop(config: LoopConfig, initial_messages: list[Message]) ->
 
         if config.max_turns and turn >= config.max_turns:
             return LoopResult(
-                history=history, usage=usage_total, terminal_reason=TERMINAL_MAX_TURNS, is_error=False,
+                history=caller_history(), usage=usage_total, terminal_reason=TERMINAL_MAX_TURNS, is_error=False,
                 turns_used=turn, api_duration_ms=api_duration_ms, final_text=response.text(),
             )
         if config.max_budget_usd and budget_spent >= config.max_budget_usd:
             return LoopResult(
-                history=history, usage=usage_total, terminal_reason=TERMINAL_MAX_BUDGET, is_error=False,
+                history=caller_history(), usage=usage_total, terminal_reason=TERMINAL_MAX_BUDGET, is_error=False,
                 turns_used=turn, api_duration_ms=api_duration_ms, final_text=response.text(),
             )
 
@@ -659,7 +817,7 @@ async def run_agent_loop(config: LoopConfig, initial_messages: list[Message]) ->
                 idle_turns, len(tool_calls), outcome.intercepted,
             )
             return LoopResult(
-                history=history, usage=usage_total, terminal_reason=TERMINAL_NO_PROGRESS, is_error=False,
+                history=caller_history(), usage=usage_total, terminal_reason=TERMINAL_NO_PROGRESS, is_error=False,
                 turns_used=turn, api_duration_ms=api_duration_ms, final_text=response.text(),
                 error_message=f"No file-modifying tool call in the last {idle_turns} turn(s).",
             )

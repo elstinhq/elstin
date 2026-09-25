@@ -125,4 +125,4 @@ def test_find_files_tool_excludes_default_dirs(tmp_path):
 def test_schemas_match_function_names():
     _functions, schemas = make_planner_tools(project_path="/tmp")
     names = {s["function"]["name"] for s in schemas}
-    assert names == {"read_file_tool", "grep_tool", "find_files_tool"}
+    assert names == {"read_file_tool", "outline_file_tool", "grep_tool", "find_files_tool"}

@@ -58,6 +58,11 @@ class ToolCallBlock:
     id: str
     name: str
     arguments: dict[str, Any]
+    # Set by an adapter when the provider's arguments could not be decoded
+    # (not valid JSON): `arguments` is then {} and this says why, so the
+    # loop answers the model with the real problem instead of running the
+    # tool with no arguments. None for every well-formed call.
+    arguments_error: str | None = None
     type: Literal["tool_call"] = "tool_call"
 
 

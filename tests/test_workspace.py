@@ -329,5 +329,6 @@ def test_the_prefix_aware_tools_are_the_reads_and_the_writes(two_repos):
     advertised = {s["function"]["name"] for s in schemas if "spans several repos" in s["function"]["description"]}
 
     assert advertised == {
-        "read_file_tool", "search_codebase_tool", "find_files_tool", "write_file_tool", "edit_file_tool", "apply_edits_tool",
+        "read_file_tool", "outline_file_tool", "search_codebase_tool", "find_files_tool", "write_file_tool",
+        "edit_file_tool", "apply_edits_tool",
     }

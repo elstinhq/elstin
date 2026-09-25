@@ -9,14 +9,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from forge.agents.loop import (
+    ARGUMENT_TOMBSTONE,
+    REMINDER_TOMBSTONE,
     TERMINAL_END_TURN,
+    TERMINAL_ERROR,
     TERMINAL_MAX_BUDGET,
     TERMINAL_MAX_TURNS,
     LoopConfig,
     run_agent_loop,
 )
 from forge.llm.base import Capabilities
-from forge.llm.errors import LlmRateLimitError
+from forge.llm.errors import LlmContextOverflowError, LlmRateLimitError
 from forge.llm.types import (
     LlmRequest,
     LlmResponse,
@@ -828,7 +831,8 @@ async def test_the_warning_shares_one_trailing_message_with_the_reminder():
 
     trailing = _trailing_text(provider.calls[1])
     assert trailing.startswith("THE BOARD") and "IDLE WARNING" in trailing
-    assert [m.role for m in provider.calls[1].messages].count("user") == 2  # the brief, plus one trailing message
+    # One trailing message after the tool results, not a reminder and a warning.
+    assert [m.role for m in provider.calls[1].messages][-2:] == ["tool", "user"]
 
 
 async def test_no_warning_without_an_idle_budget():
@@ -846,10 +850,10 @@ async def test_no_warning_without_an_idle_budget():
 # --- trailing reminder --------------------------------------------------
 
 
-async def test_trailing_reminder_is_sent_every_turn_but_never_stored_in_history():
-    """The distinction that makes this cheap: appending the reminder INTO
-    history would bloat it with stale copies and change bytes the prefix
-    cache depends on. Kept out, it sits after every cached byte."""
+async def test_trailing_reminder_is_sent_every_turn_but_never_in_the_history_the_caller_gets():
+    """Each reminder is kept in the loop's own history (so the next request
+    extends this one — see the test below), but what a caller persists and
+    resumes from holds none of them."""
     state = {"n": 0}
 
     def reminder() -> str:
@@ -871,6 +875,60 @@ async def test_trailing_reminder_is_sent_every_turn_but_never_stored_in_history(
     # And the history the caller persists holds none of them.
     texts = [b.text for m in result.history for b in m.content if isinstance(b, TextBlock)]
     assert not any("CHECKLIST" in t for t in texts)
+
+
+async def test_every_request_begins_with_everything_the_previous_one_sent():
+    """The cache regression. GPT-5.6+ saves the prompt prefix at the end of
+    the latest user/tool message — the reminder. When the reminder was sent
+    and then dropped, the next request never contained that prefix, and a
+    dev run read 4% of its input from the cache. Every request must extend
+    the one before it, reminder included."""
+    state = {"n": 0}
+
+    def reminder() -> str:
+        state["n"] += 1
+        return f"CHECKLIST v{state['n']}"
+
+    provider = FakeProvider(script=[
+        _tool_call_response("t", {"x": 1}, call_id="c1"),
+        _tool_call_response("t", {"x": 2}, call_id="c2"),
+        _tool_call_response("t", {"x": 3}, call_id="c3"),
+        _text_response("done"),
+    ])
+    await run_agent_loop(
+        _config(provider, tool_fns={"t": lambda x: "ok"}, trailing_reminder=reminder),
+        [text_message("user", "go")],
+    )
+
+    for previous, current in zip(provider.calls, provider.calls[1:]):
+        assert current.messages[: len(previous.messages)] == previous.messages
+        assert current.messages[-1].content[0].text.startswith("CHECKLIST")
+
+
+async def test_compaction_tombstones_old_reminders_but_keeps_the_latest():
+    big = "x" * 5_000
+    provider = FakeProvider(script=[
+        _tool_call_response("t", {"x": i}, call_id=f"c{i}") for i in range(5)
+    ] + [_text_response("done")])
+    state = {"n": 0}
+
+    def reminder() -> str:
+        state["n"] += 1
+        return f"CHECKLIST v{state['n']} " + "." * 200
+
+    await run_agent_loop(
+        _config(
+            provider, tool_fns={"t": lambda x: big}, trailing_reminder=reminder,
+            compaction_token_threshold=1_000, compaction_keep_recent_turns=1,
+        ),
+        [text_message("user", "go")],
+    )
+
+    last = provider.calls[-1].messages
+    reminders = [m.content[0].text for m in last if m.role == "user"][1:]  # skip the brief
+    assert reminders[-1].startswith("CHECKLIST v6")
+    assert REMINDER_TOMBSTONE in reminders[:-2]
+    assert not any(r.startswith("CHECKLIST v1 ") for r in reminders)
 
 
 async def test_trailing_reminder_sits_after_the_whole_cached_prefix():
@@ -959,3 +1017,152 @@ async def test_a_raising_trailing_reminder_does_not_end_the_run():
     assert result.is_error is False
     assert result.final_text == "done anyway"
     assert len(provider.calls[0].messages) == 1  # nothing appended
+
+
+# --- tool arguments checked before the tool runs ----------------------------
+
+_READ_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "path": {"type": "string"},
+        "limit": {"type": "integer"},
+        "overwrite": {"type": "boolean"},
+    },
+    "required": ["path"],
+}
+
+
+def _read_tool_def() -> ToolDef:
+    return ToolDef(name="read_file_tool", description="read", parameters=_READ_SCHEMA)
+
+
+async def test_stringified_numbers_and_booleans_are_repaired_before_the_tool_runs():
+    """Regression: Python reads overwrite="false" as true, and limit="200"
+    failed with a TypeError the model could not act on."""
+    seen: list[dict] = []
+    provider = FakeProvider(script=[
+        _tool_call_response("read_file_tool", {"path": "a.py", "limit": "200", "overwrite": "false"}),
+        _text_response("done"),
+    ])
+
+    await run_agent_loop(
+        _config(provider, tools=[_read_tool_def()], tool_fns={"read_file_tool": lambda **kw: seen.append(kw) or "ok"}),
+        [text_message("user", "go")],
+    )
+
+    assert seen == [{"path": "a.py", "limit": 200, "overwrite": False}]
+
+
+async def test_a_call_still_invalid_after_repair_is_answered_and_not_run():
+    ran: list[dict] = []
+    provider = FakeProvider(script=[
+        _tool_call_response("read_file_tool", {"limit": "lots"}),
+        _text_response("done"),
+    ])
+
+    await run_agent_loop(
+        _config(provider, tools=[_read_tool_def()], tool_fns={"read_file_tool": lambda **kw: ran.append(kw) or "ok"}),
+        [text_message("user", "go")],
+    )
+
+    assert ran == []
+    result = provider.calls[1].messages[-1].content[0]
+    assert result.is_error
+    assert "path is required" in result.content and "limit must be integer" in result.content
+
+
+async def test_arguments_that_were_not_json_are_reported_and_the_tool_is_not_run():
+    ran: list[dict] = []
+    provider = FakeProvider(script=[
+        LlmResponse(
+            content=[ToolCallBlock(id="c1", name="read_file_tool", arguments={}, arguments_error="the arguments were not valid JSON")],
+            stop_reason="tool_calls", usage=Usage(input_tokens=10, output_tokens=5), model="fake-model",
+        ),
+        _text_response("done"),
+    ])
+
+    await run_agent_loop(
+        _config(provider, tools=[_read_tool_def()], tool_fns={"read_file_tool": lambda **kw: ran.append(kw) or "ok"}),
+        [text_message("user", "go")],
+    )
+
+    assert ran == []
+    result = provider.calls[1].messages[-1].content[0]
+    assert result.is_error and "not valid JSON" in result.content
+
+
+# --- context overflow ----------------------------------------------------------
+
+
+async def test_a_context_overflow_compacts_deeper_and_retries_the_same_turn():
+    big = "x" * 5_000
+    provider = FakeProvider(script=[
+        _tool_call_response("write_file_tool", {"path": "a.py", "content": big}, call_id="c1"),
+        _tool_call_response("write_file_tool", {"path": "b.py", "content": big}, call_id="c2"),
+        LlmContextOverflowError("This model's maximum context length is 8192 tokens"),
+        _text_response("done"),
+    ])
+    retries: list[str] = []
+
+    result = await run_agent_loop(
+        _config(
+            provider, tool_fns={"write_file_tool": lambda path, content: big},
+            on_retry=lambda attempt, error, delay: retries.append(str(error)),
+        ),
+        [text_message("user", "go")],
+    )
+
+    assert result.terminal_reason == TERMINAL_END_TURN and result.is_error is False
+    assert result.turns_used == 3
+    assert len(retries) == 1
+    retried = provider.calls[3].messages
+    first_call = next(m for m in retried if m.role == "assistant").content[0]
+    assert first_call.arguments["content"] == ARGUMENT_TOMBSTONE
+
+
+async def test_a_second_overflow_in_the_same_turn_ends_the_run():
+    big = "x" * 5_000
+    provider = FakeProvider(script=[
+        _tool_call_response("t", {}, call_id="c1"),
+        _tool_call_response("t", {}, call_id="c2"),
+        LlmContextOverflowError("prompt is too long"),
+        LlmContextOverflowError("prompt is too long"),
+    ])
+
+    result = await run_agent_loop(_config(provider, tool_fns={"t": lambda: big}), [text_message("user", "go")])
+
+    assert result.terminal_reason == TERMINAL_ERROR and result.is_error
+    assert "prompt is too long" in result.error_message
+
+
+async def test_an_overflow_with_nothing_left_to_compact_ends_the_run_and_says_so():
+    provider = FakeProvider(script=[LlmContextOverflowError("prompt is too long")])
+
+    result = await run_agent_loop(_config(provider), [text_message("user", "go")])
+
+    assert result.terminal_reason == TERMINAL_ERROR
+    assert "nothing left to compact" in result.error_message
+    assert len(provider.calls) == 1
+
+
+# --- spend -------------------------------------------------------------------
+
+
+async def test_the_budget_counts_the_cost_the_provider_reported():
+    """A model missing from the pricing table used to be unbounded; a
+    provider that reports what it billed (OpenRouter) bounds it anyway."""
+    provider = FakeProvider(script=[
+        LlmResponse(
+            content=[ToolCallBlock(id="c1", name="t", arguments={})], stop_reason="tool_calls",
+            usage=Usage(input_tokens=10, output_tokens=5, cost_usd=0.02), model="some/unpriced-model",
+        ),
+        _text_response("never reached"),
+    ])
+
+    result = await run_agent_loop(
+        _config(provider, model="some/unpriced-model", max_budget_usd=0.01, tool_fns={"t": lambda: "ok"}),
+        [text_message("user", "go")],
+    )
+
+    assert result.terminal_reason == TERMINAL_MAX_BUDGET
+    assert len(provider.calls) == 1

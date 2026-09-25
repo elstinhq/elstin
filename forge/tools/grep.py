@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from forge.tools.path_guard import resolve_read_path
 
 
+# Longer matching lines come back as a ripgrep preview of this many chars.
+MAX_MATCH_LINE_CHARS = 300
+
+
 @dataclass
 class GrepMatch:
     file_path: str
@@ -120,6 +124,15 @@ def grep_codebase(
     *,
     max_results: int = 100,
 ) -> list[GrepMatch]:
+    """At most `max_results` matches IN TOTAL, in path order.
+
+    `--max-count` alone does not do that: it is ripgrep's cap per *file*,
+    so a common identifier used to come back once per file across the
+    whole repo — one dev run's 77 searches returned ~41k tokens where a
+    real cap of 15 gives ~16k, and every one of those tokens is re-sent on
+    each later turn. The total cap is enforced here by reading ripgrep's
+    output as it streams and stopping it once there are enough; asking for
+    `max_results + 1` is how a caller learns the list was cut."""
     if not os.path.isdir(project_path):
         raise FileNotFoundError(f"Project path not found: {project_path}")
 
@@ -128,39 +141,70 @@ def grep_codebase(
         "--line-number",
         "--no-heading",
         "--color=never",
+        # Unreadable-file warnings only; a bad regex is still reported.
+        # Also what keeps stderr small enough never to fill its pipe
+        # while stdout is being streamed below.
+        "--no-messages",
+        # Per file, so one file full of matches cannot take the whole cap.
         "--max-count",
         str(max_results),
+        # A match in a minified bundle or generated file is one enormous
+        # line; show a preview of it rather than all of it.
+        "--max-columns",
+        str(MAX_MATCH_LINE_CHARS),
+        "--max-columns-preview",
+        # Deterministic order: the same search always returns the same
+        # lines, which is what the loop's repeat-call guard and the
+        # provider's prefix cache both compare.
+        "--sort",
+        "path",
     ]
     for item in DEFAULT_EXCLUDES:
         args.extend(["--glob", f"!**/{item}/**"])
 
-    args.extend([pattern, project_path])
+    # -e: a pattern that starts with "-" ("--verbose", "-> Widget") is a
+    # pattern, not an option; passed bare it used to be parsed as a flag.
+    args.extend(["-e", pattern, "--", project_path])
 
     try:
-        proc = subprocess.run(args, capture_output=True, text=True, check=False)
+        proc = subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace"
+        )
     except FileNotFoundError as exc:
         raise RuntimeError("ripgrep (rg) is required but not installed") from exc
 
-    if proc.returncode not in (0, 1):
-        raise RuntimeError(proc.stderr.strip() or "grep failed")
-
     matches: list[GrepMatch] = []
     root = os.path.realpath(project_path)
-    for line in proc.stdout.splitlines():
-        if ":" not in line:
-            continue
-        file_part, line_no, content = line.split(":", 2)
-        abs_path = os.path.realpath(file_part)
-        if not abs_path.startswith(root + os.sep):
-            continue
-        rel = os.path.relpath(abs_path, root)
-        matches.append(
-            GrepMatch(
-                file_path=rel,
-                line_number=int(line_no),
-                line_text=content.strip(),
+    stopped_early = False
+    try:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.rstrip("\n")
+            if ":" not in line:
+                continue
+            file_part, line_no, content = line.split(":", 2)
+            abs_path = os.path.realpath(file_part)
+            if not abs_path.startswith(root + os.sep):
+                continue
+            matches.append(
+                GrepMatch(
+                    file_path=os.path.relpath(abs_path, root),
+                    line_number=int(line_no),
+                    line_text=content.strip(),
+                )
             )
-        )
+            if len(matches) >= max_results:
+                stopped_early = True
+                break
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        _, stderr = proc.communicate()
+
+    # 1 is "no matches". 2 is an error — a bad regex, or an unreadable file
+    # among readable ones; only the first leaves nothing worth returning.
+    if not stopped_early and proc.returncode not in (0, 1) and not matches:
+        raise RuntimeError((stderr or "").strip() or "grep failed")
     return matches
 
 

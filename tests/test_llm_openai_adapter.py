@@ -13,7 +13,13 @@ from types import SimpleNamespace
 import openai
 import pytest
 
-from forge.llm.errors import LlmAuthError, LlmBadRequestError, LlmRateLimitError
+from forge.llm.errors import (
+    LlmAuthError,
+    LlmBadRequestError,
+    LlmContextOverflowError,
+    LlmRateLimitError,
+    is_context_overflow_message,
+)
 from forge.llm.openai_compat import OpenAiCompatProvider
 from forge.llm.types import (
     ImageBlock,
@@ -326,3 +332,91 @@ def test_the_configured_deadline_reaches_the_provider():
 
     set_config("llm_request_timeout_seconds", "0")
     assert get_provider()._request_timeout is None
+
+
+# --- usage: cache fields and the provider-reported cost ------------------------
+
+
+async def _complete_with_usage(provider, monkeypatch, usage):
+    async def fake_create(**kwargs):
+        return _fake_completion(content="ok", usage=usage)
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", fake_create)
+    return await provider.complete(LlmRequest(model="gpt-5.1", messages=[text_message("user", "hi")]))
+
+
+async def test_openrouter_reported_cost_and_cache_writes_are_read(provider, monkeypatch):
+    usage = SimpleNamespace(
+        prompt_tokens=4785, completion_tokens=5005, total_tokens=9790, cost=0.00915,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=4096, cache_write_tokens=12),
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=4951),
+    )
+
+    response = await _complete_with_usage(provider, monkeypatch, usage)
+
+    assert response.usage.cost_usd == pytest.approx(0.00915)
+    assert response.usage.cache_read_tokens == 4096
+    assert response.usage.cache_creation_tokens == 12
+    assert response.usage.reasoning_tokens == 4951
+
+
+async def test_deepseek_style_cache_hits_are_read(provider, monkeypatch):
+    usage = SimpleNamespace(prompt_tokens=1000, completion_tokens=10, total_tokens=1010, prompt_cache_hit_tokens=768)
+
+    response = await _complete_with_usage(provider, monkeypatch, usage)
+
+    assert response.usage.cache_read_tokens == 768
+    assert response.usage.cost_usd is None
+
+
+# --- malformed tool-call arguments ------------------------------------------------
+
+
+@pytest.mark.parametrize("raw,fragment", [('{"path": "a.py"', "not valid JSON"), ('["a.py"]', "must be a JSON object")])
+async def test_tool_call_arguments_that_are_not_a_json_object_are_flagged(provider, monkeypatch, raw, fragment):
+    tool_call = SimpleNamespace(id="call_1", function=SimpleNamespace(name="read_file_tool", arguments=raw))
+
+    async def fake_create(**kwargs):
+        return _fake_completion(tool_calls=[tool_call], finish_reason="tool_calls", usage=_fake_usage())
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", fake_create)
+    response = await provider.complete(LlmRequest(model="gpt-5.1", messages=[text_message("user", "hi")]))
+
+    [call] = response.tool_calls()
+    assert call.arguments == {}
+    assert fragment in call.arguments_error
+
+
+# --- context overflow ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "This model's maximum context length is 128000 tokens. However, your messages resulted in 131072 tokens.",
+        "prompt is too long: 210000 tokens > 200000 maximum",
+        "Input is too long for requested model.",
+    ],
+)
+async def test_a_context_overflow_400_maps_to_its_own_error(provider, monkeypatch, message):
+    async def fake_create(**kwargs):
+        raise openai.BadRequestError(message, response=_fake_http_response(400), body=None)
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", fake_create)
+
+    with pytest.raises(LlmContextOverflowError):
+        await provider.complete(LlmRequest(model="gpt-5.1", messages=[text_message("user", "hi")]))
+
+
+async def test_a_413_maps_to_context_overflow(provider, monkeypatch):
+    async def fake_create(**kwargs):
+        raise openai.APIStatusError("Request Entity Too Large", response=_fake_http_response(413), body=None)
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", fake_create)
+
+    with pytest.raises(LlmContextOverflowError):
+        await provider.complete(LlmRequest(model="gpt-5.1", messages=[text_message("user", "hi")]))
+
+
+def test_a_rate_limit_that_mentions_tokens_is_not_an_overflow():
+    assert not is_context_overflow_message("Rate limit reached: too many tokens per minute; context_length_exceeded")

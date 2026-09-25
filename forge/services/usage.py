@@ -34,10 +34,30 @@ from forge.config.store import get_float_config
 from forge.db.engine import session_scope
 from forge.db.models import StoryRunOutcome, StoryUsage
 from forge.llm.pricing import estimate_cost_usd
+from forge.llm.types import Usage
 
 logger = logging.getLogger("forge.usage")
 
 PHASES = ("planner", "dev", "verifier", "qa")
+
+
+def turn_usage_meta(usage: Usage) -> dict[str, Any]:
+    """The `meta` of one agent-loop turn's "token" activity event.
+
+    Carries the cache split, not just prompt/completion totals: story_usage
+    only keeps a phase's sums, and a sum cannot show *where* a run stopped
+    reading from the cache. That is how a dev run reading 4% of its input
+    from the cache went unexplained — its per-turn events had no cache
+    field to look at."""
+    return {
+        "prompt_tokens": usage.input_tokens,
+        "completion_tokens": usage.output_tokens,
+        "total_tokens": usage.input_tokens + usage.output_tokens,
+        "cache_read_tokens": usage.cache_read_tokens,
+        "cache_creation_tokens": usage.cache_creation_tokens,
+        "reasoning_tokens": usage.reasoning_tokens,
+        "cost_usd": usage.cost_usd,
+    }
 
 
 def record_phase_usage(
@@ -68,6 +88,7 @@ def record_phase_usage(
             input_tokens=input_tokens,
             cache_read_tokens=cache_read_tokens,
             output_tokens=output_tokens,
+            cache_creation_tokens=cache_creation_tokens,
         )
         resolved_source = "estimated" if resolved_cost is not None else "unknown"
     elif resolved_source is None:

@@ -24,6 +24,7 @@ model id would silently misattribute cost between them.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -32,6 +33,9 @@ class ModelPricing:
     input_per_mtok: float
     output_per_mtok: float
     cached_input_per_mtok: float
+    # Writing a prompt prefix into the cache, for models that bill it above
+    # the normal input rate (GPT-5.6+, Anthropic). None: same as input.
+    cache_write_per_mtok: float | None = None
 
 
 # provider name -> model id -> pricing. The "gpt-*" rows are unverified
@@ -52,6 +56,14 @@ MODEL_PRICING: dict[str, dict[str, ModelPricing]] = {
         "gpt-5.1-mini": ModelPricing(input_per_mtok=0.25, output_per_mtok=2.00, cached_input_per_mtok=0.025),
         "gpt-4.1": ModelPricing(input_per_mtok=2.00, output_per_mtok=8.00, cached_input_per_mtok=0.50),
         "gpt-4.1-mini": ModelPricing(input_per_mtok=0.40, output_per_mtok=1.60, cached_input_per_mtok=0.10),
+        # Verified, unlike the rows above: read off
+        # developers.openai.com/api/docs/pricing on 2026-09-25 (Standard
+        # tier). OpenAI lists a second, higher "long context" rate for this
+        # model (0.40 / 0.04 / 0.50 / 1.80); forge's prompts stay well
+        # under it, so only the short-context rate is modeled.
+        "gpt-5.6-luna": ModelPricing(
+            input_per_mtok=0.20, output_per_mtok=1.20, cached_input_per_mtok=0.02, cache_write_per_mtok=0.25,
+        ),
         # --- OpenRouter model ids, read off each model page 2026-09-18 ---
         #
         # Each of these is served by 17-23 competing hosts whose rates
@@ -70,6 +82,33 @@ MODEL_PRICING: dict[str, dict[str, ModelPricing]] = {
 }
 
 
+# A release-date suffix on a model id: "-20260813", "-2026-08-13", "-0813".
+_DATE_SUFFIX_RE = re.compile(r"-(?:\d{8}|\d{4}-\d{2}-\d{2}|\d{4})$")
+
+
+def _undated(model: str) -> str:
+    return _DATE_SUFFIX_RE.sub("", model)
+
+
+def pricing_for(provider: str | None, model: str | None) -> ModelPricing | None:
+    """The table row for (provider, model), or None.
+
+    Exact id first. Failing that, the same model with its release-date
+    suffix ignored on both sides, when exactly one row matches: an API
+    answers with a dated snapshot id ("deepseek/deepseek-v4-pro-20260813",
+    "gpt-5.6-luna-2026-08-01") where the config — and this table — name
+    the model, and a miss here silently disables max_budget_usd."""
+    if not provider or not model:
+        return None
+    rows = MODEL_PRICING.get(provider, {})
+    exact = rows.get(model)
+    if exact is not None:
+        return exact
+    wanted = _undated(model)
+    candidates = [pricing for key, pricing in rows.items() if _undated(key) == wanted]
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def estimate_cost_usd(
     provider: str | None,
     model: str | None,
@@ -77,18 +116,20 @@ def estimate_cost_usd(
     input_tokens: int,
     cache_read_tokens: int,
     output_tokens: int,
+    cache_creation_tokens: int = 0,
 ) -> float | None:
     """None when the (provider, model) pair isn't in the table — callers
     should record cost_source="unknown" rather than assert a wrong
-    number."""
-    if not provider or not model:
-        return None
-    pricing = MODEL_PRICING.get(provider, {}).get(model)
+    number. `input_tokens` is the whole prompt, cache reads and writes
+    included, as OpenAI-compatible APIs report it."""
+    pricing = pricing_for(provider, model)
     if pricing is None:
         return None
-    uncached_input = max(input_tokens - cache_read_tokens, 0)
+    cache_write_rate = pricing.cache_write_per_mtok if pricing.cache_write_per_mtok is not None else pricing.input_per_mtok
+    uncached_input = max(input_tokens - cache_read_tokens - cache_creation_tokens, 0)
     return (
         uncached_input * pricing.input_per_mtok
         + cache_read_tokens * pricing.cached_input_per_mtok
+        + cache_creation_tokens * cache_write_rate
         + output_tokens * pricing.output_per_mtok
     ) / 1_000_000

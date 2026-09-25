@@ -130,7 +130,7 @@ async def test_explorer_gets_only_read_only_tools(git_repo):
     assert findings == "Rendered in `a.py:1`."
     assert complete is True
     offered = {t.name for t in provider.calls[0].tools}
-    assert offered == {"read_file_tool", "grep_tool", "find_files_tool"}
+    assert offered == {"read_file_tool", "outline_file_tool", "grep_tool", "find_files_tool"}
     # No write, edit, shell or spawn path exists for a sub-agent.
     assert not any("write" in name or "edit" in name or "command" in name or "agent" in name for name in offered)
 

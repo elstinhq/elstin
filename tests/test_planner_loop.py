@@ -304,7 +304,7 @@ async def test_planner_gets_read_only_tools(monkeypatch, git_repo):
     await run_planner(user_request="go", project_path=git_repo)
 
     tool_names = {tool.name for tool in provider.calls[0].tools}
-    assert tool_names == {"read_file_tool", "grep_tool", "find_files_tool"}
+    assert tool_names == {"read_file_tool", "outline_file_tool", "grep_tool", "find_files_tool"}
     # No write/edit tool may ever reach the planner.
     assert not any("write" in name or "edit" in name for name in tool_names)
 
@@ -351,7 +351,7 @@ async def test_explorer_findings_reach_the_planner_prompt(monkeypatch, git_repo)
     # Each explorer gets the read-only trio and its own standalone question.
     explorer_calls = provider.calls[1:3]
     for call in explorer_calls:
-        assert {t.name for t in call.tools} == {"read_file_tool", "grep_tool", "find_files_tool"}
+        assert {t.name for t in call.tools} == {"read_file_tool", "outline_file_tool", "grep_tool", "find_files_tool"}
     questions = {call.messages[0].content[0].text for call in explorer_calls}
     assert any("How is the cart rendered?" in q for q in questions)
     assert any("How are cart calls made?" in q for q in questions)

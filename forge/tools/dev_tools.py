@@ -23,6 +23,7 @@ from forge.tools.find_files import FIND_FILES_DESCRIPTION, MAX_FIND_RESULTS, fin
 from forge.tools.filesystem import roll_back_file, snapshot_baseline, write_file
 from forge.tools.grep import MAX_READ_LINES, grep_codebase, read_file
 from forge.tools.language_hooks import run_analyze
+from forge.tools.outline import OUTLINE_FILE_DESCRIPTION, outline_file
 from forge.tools.path_guard import PathGuardError
 from forge.tools.progress import PROGRESS_STATUSES, merge_progress_update, render_progress
 from forge.tools.safe_shell import BLOCKED_RETURN_CODE, run_safe_command
@@ -32,13 +33,16 @@ from forge.tools.workspace import Workspace
 _RUN_COMMAND_STDOUT_TAIL = 2000
 _RUN_COMMAND_STDERR_TAIL = 1000
 
+# search_codebase_tool's cap on matches per call, across every readable repo.
+SEARCH_MAX_RESULTS = 15
+
 # Tools that neither write to the worktree nor run anything that does —
 # forge/agents/loop.py runs consecutive calls to these concurrently.
 # analyze_changed_files_tool is deliberately NOT here: a compiler check
 # can write build output (Java's target/, Dart's .dart_tool/), so two
 # overlapping runs could trip over each other.
 READ_ONLY_TOOLS: frozenset[str] = frozenset(
-    {"read_file_tool", "search_codebase_tool", "find_files_tool", "lookup_sdk_symbol_tool"}
+    {"read_file_tool", "outline_file_tool", "search_codebase_tool", "find_files_tool", "lookup_sdk_symbol_tool"}
 )
 
 # Tools whose execution counts as implementation progress for the loop's
@@ -283,7 +287,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "to read exactly the range you need — one method, one widget, one class. "
                 f"A limit above {MAX_READ_LINES} is rejected. Without offset/limit you get the first "
                 f"{MAX_READ_LINES} lines and a header telling you the file's total length and the "
-                "offset to continue from. Use search_codebase_tool first to find the line you need."
+                "offset to continue from. Use outline_file_tool (a file's declarations with line numbers) or "
+                "search_codebase_tool first to find the lines you need."
             ),
             "parameters": {
                 "type": "object",
@@ -293,6 +298,19 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "limit": {"type": "integer", "description": f"Number of lines to read from offset (1-{MAX_READ_LINES}). Defaults to {MAX_READ_LINES}."},
                 },
                 "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "outline_file_tool",
+            "description": OUTLINE_FILE_DESCRIPTION,
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Relative path to the file"}},
+                "required": ["path"],
+                "additionalProperties": False,
             },
         },
     },
@@ -377,7 +395,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "search_codebase_tool",
-            "description": "Search for strings or patterns across the codebase. Returns up to 15 matches.",
+            "description": (
+                "Search file contents across the codebase for a regex (ripgrep syntax; escape ( [ { . when you mean "
+                f"them literally). Returns up to {SEARCH_MAX_RESULTS} matches in total as 'path:line: text', and says "
+                "when there were more."
+            ),
             "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
         },
     },
@@ -501,6 +523,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 # in their descriptions would only mislead.
 _WORKSPACE_AWARE_TOOLS = (
     "read_file_tool",
+    "outline_file_tool",
     "search_codebase_tool",
     "find_files_tool",
     "write_file_tool",
@@ -693,20 +716,43 @@ def make_dev_tools(
             return f"Error rolling back {path}: {exc}"
 
     def search_codebase_tool(query: str) -> str:
-        hits: list[dict[str, Any]] = []
+        lines: list[str] = []
+        truncated = False
         try:
             for label, root in read_workspace.read_roots():
-                if len(hits) >= 15:
+                remaining = SEARCH_MAX_RESULTS - len(lines)
+                if remaining <= 0:
+                    truncated = True
                     break
-                for match in grep_codebase(root, query, max_results=15 - len(hits)):
-                    hits.append({
-                        "file": read_workspace.display_path(label, match.file_path),
-                        "line": match.line_number,
-                        "text": match.line_text,
-                    })
-            return json.dumps(hits)
+                # One more than fits, so a cut list is known to be cut.
+                matches = grep_codebase(root, query, max_results=remaining + 1)
+                if len(matches) > remaining:
+                    truncated = True
+                    matches = matches[:remaining]
+                lines.extend(
+                    f"{read_workspace.display_path(label, m.file_path)}:{m.line_number}: {m.line_text}" for m in matches
+                )
         except Exception as exc:
             return f"Error searching codebase: {exc}"
+        if not lines:
+            return "No matches."
+        suffix = (
+            f"\n... [showing the first {SEARCH_MAX_RESULTS} matches — narrow the query, or use outline_file_tool "
+            "to find a declaration in a file you already know]"
+            if truncated else ""
+        )
+        return "\n".join(lines) + suffix
+
+    def outline_file_tool(path: str) -> str:
+        try:
+            _label, root, relative = read_workspace.root_for(path)
+            return outline_file(root, relative)
+        except FileNotFoundError:
+            return f"File not found: {path}"
+        except PathGuardError as exc:
+            return f"BLOCKED: {exc}"
+        except Exception as exc:  # noqa: BLE001 - surfaced to the model as a normal tool error
+            return f"Error outlining {path}: {exc}"
 
     def find_files_tool(glob_pattern: str, max_results: int | None = None) -> str:
         try:
@@ -777,6 +823,7 @@ def make_dev_tools(
 
     functions: dict[str, Any] = {
         "read_file_tool": read_file_tool,
+        "outline_file_tool": outline_file_tool,
         "write_file_tool": write_file_tool,
         "edit_file_tool": edit_file_tool,
         "apply_edits_tool": apply_edits_tool,

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from forge.tools.find_files import FIND_FILES_DESCRIPTION, MAX_FIND_RESULTS, find_files
 from forge.tools.grep import MAX_READ_LINES, grep_codebase, read_file
+from forge.tools.outline import OUTLINE_FILE_DESCRIPTION, outline_file
 from forge.tools.path_guard import PathGuardError
 from forge.tools.workspace import Workspace
 
@@ -21,7 +22,7 @@ _MAX_GREP_RESULTS = 50
 
 # Every planner tool is read-only by construction (module docstring), so
 # forge/agents/loop.py may run any consecutive batch of them concurrently.
-READ_ONLY_TOOLS: frozenset[str] = frozenset({"read_file_tool", "grep_tool", "find_files_tool"})
+READ_ONLY_TOOLS: frozenset[str] = frozenset({"read_file_tool", "outline_file_tool", "grep_tool", "find_files_tool"})
 
 
 def _numbered(text: str, *, start_line: int = 1) -> str:
@@ -72,32 +73,55 @@ def make_planner_tools(
         return _numbered(content)
 
     def grep_tool(pattern: str, max_results: int = _MAX_GREP_RESULTS) -> str:
-        cap = min(max_results, _MAX_GREP_RESULTS)
+        cap = max(1, min(max_results or _MAX_GREP_RESULTS, _MAX_GREP_RESULTS))
         lines: list[str] = []
         failures: list[str] = []
+        truncated = False
         # Per root rather than one search over several paths: each root
         # needs its own relative paths and its own label prefix, and the
         # primary repo's hits lead because that is the one being changed.
         for label, root in workspace.read_roots():
-            if len(lines) >= cap:
+            remaining = cap - len(lines)
+            if remaining <= 0:
+                truncated = True
                 break
             try:
-                matches = grep_codebase(root, pattern, max_results=cap - len(lines))
+                # One more than fits, so a cut list is known to be cut.
+                matches = grep_codebase(root, pattern, max_results=remaining + 1)
             except Exception as exc:  # noqa: BLE001 - a bad regex or missing rg is data, not a crash
                 failures.append(f"{label}: {exc}")
                 continue
+            if len(matches) > remaining:
+                truncated = True
+                matches = matches[:remaining]
             lines.extend(
                 f"{workspace.display_path(label, m.file_path)}:{m.line_number}: {m.line_text}" for m in matches
             )
         if not lines:
             return "Search failed: " + "; ".join(failures) if failures else "No matches."
-        suffix = "\n... [truncated — narrow your pattern]" if len(lines) >= cap else ""
+        suffix = "\n... [truncated — narrow your pattern]" if truncated else ""
         return "\n".join(lines) + suffix
+
+    def outline_file_tool(path: str) -> str:
+        try:
+            _label, root, relative = workspace.root_for(path)
+            return outline_file(root, relative)
+        except FileNotFoundError:
+            return f"File not found: {path}"
+        except PathGuardError as exc:
+            return f"BLOCKED: {exc}"
+        except Exception as exc:  # noqa: BLE001 - surfaced to the model as a normal tool error
+            return f"Error outlining {path}: {exc}"
 
     def find_files_tool(glob_pattern: str, max_results: int = MAX_FIND_RESULTS) -> str:
         return find_files(workspace, glob_pattern, max_results)
 
-    functions = {"read_file_tool": read_file_tool, "grep_tool": grep_tool, "find_files_tool": find_files_tool}
+    functions = {
+        "read_file_tool": read_file_tool,
+        "outline_file_tool": outline_file_tool,
+        "grep_tool": grep_tool,
+        "find_files_tool": find_files_tool,
+    }
     schemas = [
         {
             "type": "function",
@@ -108,7 +132,8 @@ def make_planner_tools(
                     f"Pass offset (1-based line number) and limit (number of lines, max {MAX_READ_LINES}) to read "
                     f"exactly the range you need. A limit above {MAX_READ_LINES} is rejected. Without offset/limit "
                     f"you get the first {MAX_READ_LINES} lines plus a header with the file's total length and the "
-                    "offset to continue from. Prefer grep_tool to locate the lines that matter before reading."
+                    "offset to continue from. Prefer outline_file_tool (a file's declarations with line numbers) or "
+                    "grep_tool to locate the lines that matter before reading."
                 ),
                 "parameters": {
                     "type": "object",
@@ -117,6 +142,19 @@ def make_planner_tools(
                         "offset": {"type": "integer", "description": "1-based line number to start reading from. Defaults to 1."},
                         "limit": {"type": "integer", "description": f"Number of lines to read from offset (1-{MAX_READ_LINES}). Defaults to {MAX_READ_LINES}."},
                     },
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "outline_file_tool",
+                "description": OUTLINE_FILE_DESCRIPTION + workspace_note,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string", "description": "Path relative to the project root"}},
                     "required": ["path"],
                     "additionalProperties": False,
                 },

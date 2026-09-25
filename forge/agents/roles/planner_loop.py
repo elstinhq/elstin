@@ -56,7 +56,7 @@ from forge.llm.errors import LlmError
 from forge.llm.registry import LlmNotConfiguredError, get_provider
 from forge.llm.types import ImageBlock, LlmResponse, Message, ResponseFormat, TextBlock
 from forge.services.run_activity import append_activity
-from forge.services.usage import effective_budget_usd, record_phase_usage, record_run_outcome
+from forge.services.usage import effective_budget_usd, record_phase_usage, record_run_outcome, turn_usage_meta
 from forge.tools.planner_tools import READ_ONLY_TOOLS, make_planner_tools
 from forge.tools.workspace import Workspace
 
@@ -294,6 +294,14 @@ async def run_planner(
             usage_totals[key] += value
         if usage.cost_usd is not None:
             usage_cost_usd = (usage_cost_usd or 0.0) + usage.cost_usd
+        # Per turn, like dev's: the phase row keeps only sums. Explorer
+        # sub-agents share this hook, so their turns are logged here too.
+        total = usage.input_tokens + usage.output_tokens
+        if run_id and total > 0:
+            append_activity(
+                run_id, type="token", phase="planner", title=f"Token usage (planner turn {turn})", detail=f"{total} tokens",
+                meta=turn_usage_meta(usage),
+            )
 
     try:
         # See module docstring: RAG pre-seeding and prior-work discovery

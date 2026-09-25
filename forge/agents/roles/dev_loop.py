@@ -63,7 +63,7 @@ from forge.llm.errors import LlmError
 from forge.llm.registry import LlmNotConfiguredError, get_provider
 from forge.llm.types import ContentBlock, LlmResponse, history_from_json, history_to_json, text_message
 from forge.services.run_activity import append_activity
-from forge.services.usage import effective_budget_usd, record_phase_usage, record_run_outcome
+from forge.services.usage import effective_budget_usd, record_phase_usage, record_run_outcome, turn_usage_meta
 from forge.tools import language_hooks
 from forge.tools.dev_tools import BOOKKEEPING_TOOLS, PROGRESS_TOOLS, READ_ONLY_TOOLS, WEB_TOOLS, make_dev_tools
 from forge.tools.progress import render_progress, seed_progress_items
@@ -250,7 +250,7 @@ async def run_dev(
         if run_id and total > 0:
             append_activity(
                 run_id, type="token", phase="dev", title=f"Token usage (dev step {turn})", detail=f"{total} tokens",
-                meta={"prompt_tokens": usage.input_tokens, "completion_tokens": usage.output_tokens, "total_tokens": total, "cost_usd": usage.cost_usd},
+                meta=turn_usage_meta(usage),
             )
 
     def _on_retry(attempt: int, error: LlmError, delay: float) -> None:
