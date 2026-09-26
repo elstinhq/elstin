@@ -83,3 +83,65 @@ def test_clone_repository_bad_source_raises_and_cleans_up(tmp_path):
 )
 def test_derive_repo_name(url, expected):
     assert _derive_repo_name(url) == expected
+
+
+# --- attach: a repo already on disk, used in place ---------------------------
+
+from forge.services.repo_clone import RepoAttachError, attach_local_repository  # noqa: E402
+
+
+def _local_repo(path, *, commit: bool = True) -> str:
+    path.mkdir(parents=True)
+    _run_git(["git", "init", "-b", "main", str(path)], str(path))
+    if commit:
+        _run_git(["git", "config", "user.email", "test@example.com"], str(path))
+        _run_git(["git", "config", "user.name", "Test"], str(path))
+        (path / "README.md").write_text("hi\n")
+        _run_git(["git", "add", "README.md"], str(path))
+        _run_git(["git", "commit", "-m", "initial"], str(path))
+    return str(path)
+
+
+def test_attach_returns_the_resolved_repo_folder(tmp_path):
+    repo = _local_repo(tmp_path / "app")
+    link = tmp_path / "link-to-app"
+    link.symlink_to(repo)
+
+    assert attach_local_repository(str(link)) == str((tmp_path / "app").resolve())
+
+
+def test_attach_expands_a_home_relative_path(tmp_path, monkeypatch):
+    _local_repo(tmp_path / "code" / "app")
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert attach_local_repository("~/code/app") == str((tmp_path / "code" / "app").resolve())
+
+
+@pytest.mark.parametrize(
+    "setup,fragment",
+    [
+        (lambda tmp: "", "Folder path is required"),
+        (lambda tmp: "relative/app", "Give the full path"),
+        (lambda tmp: str(tmp / "missing"), "Only folders mounted into the app container are visible"),
+        (lambda tmp: (tmp / "plain").mkdir() or str(tmp / "plain"), "is not a git repository"),
+        (lambda tmp: _local_repo(tmp / "empty", commit=False), "has no commits yet"),
+    ],
+)
+def test_attach_refuses_what_forge_cannot_work_from(tmp_path, setup, fragment):
+    with pytest.raises(RepoAttachError, match=fragment):
+        attach_local_repository(setup(tmp_path))
+
+
+def test_attach_refuses_a_subfolder_and_names_the_repo_to_attach(tmp_path):
+    repo = _local_repo(tmp_path / "app")
+    (tmp_path / "app" / "src").mkdir()
+
+    with pytest.raises(RepoAttachError, match=f"inside the git repository at {repo}"):
+        attach_local_repository(str(tmp_path / "app" / "src"))
+
+
+def test_attach_refuses_forges_own_worktrees(tmp_path):
+    _local_repo(tmp_path / "worktrees" / "eng-2")
+
+    with pytest.raises(RepoAttachError, match="forge's own working folder"):
+        attach_local_repository(str(tmp_path / "worktrees" / "eng-2"), forbidden_dirs=[str(tmp_path / "worktrees")])

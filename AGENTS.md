@@ -94,7 +94,7 @@ state only (status, kind, worktree, gates, levels).
 | `daemon/` | Poll loop, ticket-filter sweep, worktree create, intent handling, PR/CI/merge, QA brief assembly | Call agents without going through the graph |
 | `state/` | **Only** DB access for epics/stories/PRs/projects | Import `forge.db.models` outside the allow-list in hard constraint #1 |
 | `db/` | SQLAlchemy models + engine | Business logic here |
-| `services/` | JIRA/GitHub clients, epic sync, ticket filters, story_kind, generation (verifier/QA's single-shot LLM call), repo cloning, run activity + its live fan-out, run telemetry (cost **and** run shape) | Bypass StateManager for persistence |
+| `services/` | JIRA/GitHub clients, epic sync, ticket filters, story_kind, generation (verifier/QA's single-shot LLM call), repo clone / attach, run activity + its live fan-out, run telemetry (cost **and** run shape) | Bypass StateManager for persistence |
 | `tools/` | Dev-agent tools, planner's read-only tools, language profiles, worktree, path guard, workspace (multi-repo read roots) | Hardcode language names — use `language_hooks`; give a reference repo a write path |
 | `mcp/` | MCP servers (jira/github standalone) | Assume agents already use JIRA/GitHub MCP — daemon calls services directly today |
 | `api/` | FastAPI routers | Long-running work — daemon owns that |
@@ -149,6 +149,32 @@ merge) rather than pretending otherwise.
 
 Migrations: `20260919_0018_story_project_repo.py`,
 `20260919_0019_multi_repo_stories.py`.
+
+### Where a project's repos come from: clone or attach
+
+`services/repo_clone.py` gives a project a repo in one of two ways, both
+behind `POST /api/projects/{id}/repos` (exactly one of `url` / `path`) and
+project create (`repo_url` / `repo_path`):
+
+- **Clone** a URL into `cloned_repos_base_dir/<project>/` — storage the
+  app owns, so it works identically on the host and inside Docker.
+- **Attach** a git repo already on disk, used in place
+  (`attach_local_repository`). The path must be absolute, a directory the
+  forge process can see, the repo's top level (a subfolder is refused,
+  naming the top), have at least one commit, and not sit under
+  `worktrees_base_dir`; one folder is attached once (`409`). Inside Docker
+  that means a bind mount (`docker-compose.yml` has the commented example)
+  and the in-container path; the image trusts every repo
+  (`safe.directory '*'`) because a mounted one is owned by the host user.
+
+**An attached folder's own checkout is never touched** — forge only adds
+branches and worktrees to its `.git`, exactly as with a clone. An attached
+repo may have no `origin` (never pushed): `tools/worktree.py` then skips
+the fetch and branches from the local default branch (`origin/<default>`,
+else local `main`/`master`, else `HEAD`), stories merge locally as usual,
+and the epic ends `complete` with the reason recorded on its
+`epic_pull_requests` row ("origin is not a GitHub remote") — there is
+nothing to open a PR against.
 
 ## Project guide (an AGENTS.md for the repos forge works on)
 
@@ -666,7 +692,7 @@ LangGraph checkpointer creates its own tables on first use
 | Area | Prefix | Examples |
 |------|--------|----------|
 | Config | `/api/config` | Global settings CRUD |
-| Projects | `/api/projects` | Projects, repos (cloned from a URL — `forge/services/repo_clone.py`), overrides, ticket filter (+ `/preview`, `/sync`) |
+| Projects | `/api/projects` | Projects, repos (cloned from a URL or attached from a local folder — `forge/services/repo_clone.py`), overrides, ticket filter (+ `/preview`, `/sync`) |
 | Epics | `/api/epics` | Sync from JIRA, assign repo, manual gate |
 | Stories | `/api/stories` | Approve gate, set kind, get story, get plan |
 

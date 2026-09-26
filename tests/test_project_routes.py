@@ -131,6 +131,72 @@ def test_add_project_repo_clone_failure_returns_400(monkeypatch: pytest.MonkeyPa
         assert response.json()["detail"] == "auth failed"
 
 
+def _git_repo_at(path) -> str:
+    import subprocess
+
+    path.mkdir(parents=True)
+    for args in (["init", "-b", "main"], ["config", "user.email", "t@e.com"], ["config", "user.name", "T"]):
+        subprocess.run(["git", *args], cwd=path, check=True, capture_output=True)
+    (path / "README.md").write_text("hi\n")
+    subprocess.run(["git", "add", "."], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True)
+    return str(path.resolve())
+
+
+def test_attach_an_existing_folder_and_refuse_it_twice(tmp_path):
+    from forge.state.manager import StateManager
+
+    folder = _git_repo_at(tmp_path / "shop-app")
+    project_id = StateManager().create_project("Shop")
+
+    with _client() as client:
+        response = client.post(f"/api/projects/{project_id}/repos", json={"path": folder})
+        assert response.status_code == 200
+        repo = response.json()
+        assert repo["path"] == folder and repo["label"] == "shop-app" and repo["clone_url"] is None
+
+        again = client.post(f"/api/projects/{project_id}/repos", json={"path": folder + "/"})
+        assert again.status_code == 409
+        assert "already attached" in again.json()["detail"]
+
+
+@pytest.mark.parametrize("body", [{}, {"url": "https://example.com/a.git", "path": "/tmp/a"}, {"url": " ", "path": ""}])
+def test_add_repo_needs_exactly_one_of_url_or_path(body):
+    from forge.state.manager import StateManager
+
+    project_id = StateManager().create_project("Shop")
+    with _client() as client:
+        response = client.post(f"/api/projects/{project_id}/repos", json=body)
+    assert response.status_code == 400
+    assert "either a repository URL" in response.json()["detail"]
+
+
+def test_attaching_a_folder_that_is_not_there_explains_docker(tmp_path):
+    from forge.state.manager import StateManager
+
+    project_id = StateManager().create_project("Shop")
+    with _client() as client:
+        response = client.post(f"/api/projects/{project_id}/repos", json={"path": str(tmp_path / "nope")})
+    assert response.status_code == 400
+    assert "mounted into the app container" in response.json()["detail"]
+
+
+def test_create_a_project_with_an_attached_folder(tmp_path):
+    folder = _git_repo_at(tmp_path / "shop-app")
+    with _client() as client:
+        response = client.post("/api/projects", json={"name": "Shop", "repo_path": folder})
+        assert response.status_code == 200
+        assert [repo["path"] for repo in response.json()["repos"]] == [folder]
+
+
+def test_a_bad_folder_leaves_no_empty_project_behind(tmp_path):
+    with _client() as client:
+        before = len(client.get("/api/projects").json())
+        response = client.post("/api/projects", json={"name": "Shop", "repo_path": str(tmp_path / "nope")})
+        assert response.status_code == 400
+        assert len(client.get("/api/projects").json()) == before
+
+
 def test_remove_project_repo_blocked_while_referenced_by_epic(tmp_path):
     from forge.state.manager import StateManager
 

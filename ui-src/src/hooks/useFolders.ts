@@ -6,10 +6,10 @@ export function useProjectRepos(projectId: number) {
   return useQuery({ queryKey: queryKeys.projectRepos(projectId), queryFn: () => api.listProjectRepos(projectId) });
 }
 
-export function useCloneProjectRepo(projectId: number) {
+export function useAddProjectRepo(projectId: number) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (url: string) => api.cloneProjectRepo(projectId, { url }),
+    mutationFn: (body: { url: string } | { path: string }) => api.addProjectRepo(projectId, body),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.projectRepos(projectId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) });

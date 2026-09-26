@@ -168,6 +168,8 @@ def _fetch_origin(project_path: str) -> None:
     when it was made, which is what this call used to fall back on
     silently. A base that is merely stale is recoverable; a story that
     cannot start is not."""
+    if not _has_origin(project_path):
+        return  # an attached local repo with no remote: its own refs are all there is
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     askpass_path = None
     try:
@@ -203,11 +205,22 @@ def _fetch_origin(project_path: str) -> None:
         )
 
 
+def _has_origin(project_path: str) -> bool:
+    return _git(project_path, "remote", "get-url", "origin", check=False).returncode == 0
+
+
 def _default_branch(project_path: str) -> str:
+    """origin's default branch; for a repo without one (an attached local
+    repo that was never pushed) the local main/master, else whatever is
+    checked out."""
     proc = _git(project_path, "symbolic-ref", "refs/remotes/origin/HEAD", check=False)
     if proc.returncode == 0 and proc.stdout.strip():
         return proc.stdout.strip().rsplit("/", 1)[-1]
-    return "main"
+    for candidate in ("main", "master"):
+        if _git(project_path, "rev-parse", "--verify", "-q", f"refs/heads/{candidate}", check=False).returncode == 0:
+            return candidate
+    current = _git(project_path, "symbolic-ref", "--short", "HEAD", check=False)
+    return current.stdout.strip() if current.returncode == 0 and current.stdout.strip() else "main"
 
 
 def _resolve_base_ref(project_path: str, base_ref: str | None) -> str:
@@ -218,7 +231,13 @@ def _resolve_base_ref(project_path: str, base_ref: str | None) -> str:
         verify = _git(project_path, "rev-parse", "--verify", base_ref, check=False)
         if verify.returncode == 0:
             return base_ref
-    return f"origin/{_default_branch(project_path)}"
+    default = _default_branch(project_path)
+    remote = f"origin/{default}"
+    if _git(project_path, "rev-parse", "--verify", "-q", remote, check=False).returncode == 0:
+        return remote
+    # No remote copy of it (an attached repo without origin): the local branch.
+    local = _git(project_path, "rev-parse", "--verify", "-q", default, check=False)
+    return default if local.returncode == 0 else "HEAD"
 
 
 # Public aliases — forge/orchestration/integration.py needs the same git
@@ -276,7 +295,9 @@ def create_worktree(
     repos gets one worktree per repo and they must share a branch name, so
     the caller that already knows the story's branch passes it rather than
     recomputing from a different summary in each repo."""
-    if not os.path.isdir(os.path.join(project_path, ".git")):
+    # A file, not a folder, when the repo is itself a linked worktree — git
+    # adds worktrees from one of those just the same.
+    if not os.path.exists(os.path.join(project_path, ".git")):
         raise WorktreeError(f"Not a git repository: {project_path}")
 
     branch = branch or branch_name_for(

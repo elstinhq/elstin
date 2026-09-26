@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { Plus, X } from "lucide-react";
-import { RepoUrlInput, normalizeRepoUrl } from "../shared/RepoUrlInput";
+import { EMPTY_REPO_SOURCE, RepoSourceInput, repoSourceBody, type RepoSource } from "../shared/RepoSourceInput";
 import { api } from "../../lib/api";
-import { useCloneProjectRepo, useProjectRepos, useRemoveProjectRepo } from "../../hooks/useFolders";
+import { useAddProjectRepo, useProjectRepos, useRemoveProjectRepo } from "../../hooks/useFolders";
 import { useToast } from "../../lib/toast";
 import type { ProjectRepo } from "../../types/api";
 import { Button } from "../ui/button";
@@ -16,7 +16,7 @@ import { RepoGuideControl } from "./RepoGuide";
 // (forge/services/epic_sync.py, the project's first-added repo). This
 // covers the one case that misses: an epic synced before this project had
 // any repo at all, which stays folder-less until the daemon's next sweep
-// backfills it — cloning a repo here backfills it immediately instead.
+// backfills it — adding a repo here backfills it immediately instead.
 async function backfillFolderlessEpics(projectId: number, repoId: number) {
   const epics = await api.listProjectEpics(projectId);
   await Promise.all(epics.filter((epic) => !epic.repo).map((epic) => api.setEpicRepo(epic.jira_key, repoId)));
@@ -30,7 +30,11 @@ function FolderRow({ projectId, repo }: { projectId: number; repo: ProjectRepo }
     <div className="flex items-center justify-between gap-3">
       <div className="min-w-0">
         <div className="truncate text-sm font-medium">{repo.label || repo.path}</div>
-        {repo.clone_url ? <div className="text-muted-foreground truncate text-xs">{repo.clone_url}</div> : null}
+        {/* Where it came from: the URL it was cloned from, or — for a
+            folder attached in place — where it lives. */}
+        <div className="text-muted-foreground truncate text-xs" title={repo.clone_url || repo.path}>
+          {repo.clone_url || `attached · ${repo.path}`}
+        </div>
         <RepoGuideControl projectId={projectId} repoId={repo.id} />
       </div>
       <Button
@@ -53,25 +57,26 @@ function FolderRow({ projectId, repo }: { projectId: number; repo: ProjectRepo }
 
 export function FoldersPanel({ projectId }: { projectId: number }) {
   const reposQuery = useProjectRepos(projectId);
-  const cloneRepo = useCloneProjectRepo(projectId);
+  const addRepo = useAddProjectRepo(projectId);
   const { showToast } = useToast();
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [repoUrl, setRepoUrl] = useState("");
+  const [source, setSource] = useState<RepoSource>(EMPTY_REPO_SOURCE);
   const repos = reposQuery.data ?? [];
+  const attaching = source.mode === "attach";
 
-  function handleClone() {
-    const url = normalizeRepoUrl(repoUrl);
-    if (!url) {
-      showToast("Repository URL is required", "error");
+  function handleAdd() {
+    const body = repoSourceBody(source);
+    if (!body) {
+      showToast(attaching ? "Folder path is required" : "Repository URL is required", "error");
       return;
     }
-    cloneRepo.mutate(url, {
+    addRepo.mutate(body, {
       onSuccess: async (repo) => {
         setDialogOpen(false);
-        showToast("Repository cloned", "success");
+        showToast(attaching ? "Folder attached" : "Repository cloned", "success");
         await backfillFolderlessEpics(projectId, repo.id);
       },
-      onError: (err) => showToast(err.message || "Could not clone repository", "error"),
+      onError: (err) => showToast(err.message || (attaching ? "Could not attach folder" : "Could not clone repository"), "error"),
     });
   }
 
@@ -81,7 +86,7 @@ export function FoldersPanel({ projectId }: { projectId: number }) {
         <div className="flex flex-col gap-3">
           <div className="flex items-center justify-between gap-2">
             <span className="text-sm font-medium">Folders</span>
-            <Button variant="ghost" size="icon" className="size-7" aria-label="Add folder" onClick={() => { setRepoUrl(""); setDialogOpen(true); }}>
+            <Button variant="ghost" size="icon" className="size-7" aria-label="Add folder" onClick={() => { setSource(EMPTY_REPO_SOURCE); setDialogOpen(true); }}>
               <Plus />
             </Button>
           </div>
@@ -110,14 +115,14 @@ export function FoldersPanel({ projectId }: { projectId: number }) {
               Git repos this project can run against. Every repo added here is readable and writable by the plan — a
               ticket spanning several repos just works, it doesn't need one picked per repo.
             </p>
-            <RepoUrlInput value={repoUrl} onChange={setRepoUrl} />
+            <RepoSourceInput source={source} onChange={setSource} />
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)}>
               Cancel
             </Button>
-            <Button loading={cloneRepo.isPending} onClick={handleClone}>
-              Clone
+            <Button loading={addRepo.isPending} onClick={handleAdd}>
+              {attaching ? "Attach" : "Clone"}
             </Button>
           </DialogFooter>
         </DialogContent>

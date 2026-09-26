@@ -18,6 +18,11 @@ RUN npm run build
 FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+# A repo bind-mounted from the host to be *attached* (docker-compose.yml) is
+# owned by the host user, not by root in here, and git refuses to work in a
+# repo owned by someone else ("dubious ownership"). That check guards shared
+# multi-user machines; this container is one person's, so trust every path.
+RUN git config --system --add safe.directory '*'
 
 WORKDIR /app
 COPY pyproject.toml ./

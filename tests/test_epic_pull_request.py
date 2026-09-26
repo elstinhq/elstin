@@ -190,3 +190,45 @@ async def test_a_manual_run_epic_opens_its_pull_request_after_its_last_story(
     assert len(_FakeGitHub.created) == 1
     assert sm.get_epic("ENG-1")["phase"] == "pr_open"
 
+
+async def test_an_attached_repo_without_origin_runs_merges_and_ends_ready_locally(tmp_path, project_id, monkeypatch):
+    """An attached local repo that was never pushed: no `origin`, default
+    branch `master`. Stories still branch (from the local master), merge on
+    the epic branch, and the epic ends complete — there is no GitHub remote
+    to propose it to, even with a token configured."""
+    import subprocess
+
+    import forge.daemon.main as daemon
+
+    repo = tmp_path / "local-app"
+    repo.mkdir()
+    for args in (["init", "-b", "master"], ["config", "user.email", "t@e.com"], ["config", "user.name", "T"]):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    (repo / "README.md").write_text("local\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+    class _ConfiguredGitHub(_FakeGitHub):
+        pass
+
+    _ConfiguredGitHub.configured, _ConfiguredGitHub.created = True, []
+    monkeypatch.setattr(daemon, "GitHubService", _ConfiguredGitHub)
+
+    sm = _setup(tmp_path, project_id, str(repo), monkeypatch, stories=("ENG-2", "ENG-3"))
+    await _run_to_merged(sm)
+    assert {sm.get_story(k)["status"] for k in ("ENG-2", "ENG-3")} == {"merged"}
+
+    await poll_once(sm, wait=True)
+
+    epic_branch = integration_branch_name("ENG-1")
+    files = subprocess.run(["git", "-C", str(repo), "ls-tree", "--name-only", epic_branch], capture_output=True, text=True)
+    assert set(files.stdout.split()) == {"README.md", "ENG-2.txt", "ENG-3.txt"}
+    base = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", "master", epic_branch])
+    assert base.returncode == 0  # branched from the local master
+    assert sm.get_epic("ENG-1")["phase"] == "complete"
+    assert _ConfiguredGitHub.created == []
+    [row] = sm.list_epic_pull_requests("ENG-1")
+    assert row["error"] == "origin is not a GitHub remote"
+    # The attached folder's own checkout was never touched.
+    assert subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True).stdout == ""
+    assert subprocess.run(["git", "-C", str(repo), "branch", "--show-current"], capture_output=True, text=True).stdout.strip() == "master"

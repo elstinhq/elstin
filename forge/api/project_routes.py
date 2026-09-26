@@ -31,7 +31,7 @@ from forge.config.store import (
 from forge.api.epic_routes import _with_stories
 from forge.services.jira_filter import build_jql, preview_filter, sync_project_filter
 from forge.services.project_guide import MAX_GUIDE_CHARS, GuideError, generate_project_guide, read_repo_guide
-from forge.services.repo_clone import RepoCloneError, clone_repository
+from forge.services.repo_clone import RepoAttachError, RepoCloneError, attach_local_repository, clone_repository
 from forge.services.ticket_source import known_sources
 from forge.state.manager import StateManager
 
@@ -41,7 +41,9 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 class ProjectCreateRequest(BaseModel):
     name: str
     description: str = ""
+    # At most one: a repo to clone, or a folder already on disk to attach.
     repo_url: str | None = None
+    repo_path: str | None = None
 
 
 class ProjectUpdateRequest(BaseModel):
@@ -51,7 +53,11 @@ class ProjectUpdateRequest(BaseModel):
 
 
 class ProjectRepoCreateRequest(BaseModel):
-    url: str
+    """Exactly one of `url` (clone it) or `path` (attach a repo already on
+    disk) — see forge/services/repo_clone.py for the difference."""
+
+    url: str | None = None
+    path: str | None = None
     label: str | None = None
 
 
@@ -85,6 +91,25 @@ def _clone_dest_base_dir(project_id: int) -> str:
     return os.path.join(base, str(project_id))
 
 
+def _attach_and_register(sm: StateManager, project_id: int, path: str, *, label: str | None = None) -> int:
+    worktrees_base = get_config("worktrees_base_dir") or "/data/repos"
+    try:
+        folder = attach_local_repository(path, forbidden_dirs=[worktrees_base])
+    except RepoAttachError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if any(os.path.realpath(repo["path"]) == folder for repo in sm.list_project_repos(project_id)):
+        raise HTTPException(status_code=409, detail=f"{folder} is already attached to this project")
+    return sm.add_project_repo(project_id, folder, label=label or os.path.basename(folder))
+
+
+def _add_repo(sm: StateManager, project_id: int, *, url: str | None, path: str | None, label: str | None = None) -> int:
+    if bool((url or "").strip()) == bool((path or "").strip()):
+        raise HTTPException(status_code=400, detail="Give either a repository URL to clone or a folder path to attach")
+    if (path or "").strip():
+        return _attach_and_register(sm, project_id, path or "", label=label)
+    return _clone_and_register(sm, project_id, url or "", label=label)
+
+
 def _clone_and_register(sm: StateManager, project_id: int, url: str, *, label: str | None = None) -> int:
     try:
         path = clone_repository(url, dest_base_dir=_clone_dest_base_dir(project_id))
@@ -101,9 +126,18 @@ def list_projects() -> list[dict]:
 @router.post("")
 def create_project(body: ProjectCreateRequest) -> dict:
     sm = StateManager()
+    if (body.repo_url or "").strip() and (body.repo_path or "").strip():
+        raise HTTPException(status_code=400, detail="Give either a repository URL to clone or a folder path to attach")
+    if (body.repo_path or "").strip():
+        # Checked before the project exists, so a mistyped path does not
+        # leave an empty project behind (a clone can only fail by trying).
+        try:
+            attach_local_repository(body.repo_path or "", forbidden_dirs=[get_config("worktrees_base_dir") or "/data/repos"])
+        except RepoAttachError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     project_id = sm.create_project(body.name, description=body.description)
-    if body.repo_url:
-        _clone_and_register(sm, project_id, body.repo_url)
+    if (body.repo_url or "").strip() or (body.repo_path or "").strip():
+        _add_repo(sm, project_id, url=body.repo_url, path=body.repo_path)
     return sm.get_project(project_id)
 
 
@@ -142,7 +176,7 @@ def add_project_repo(project_id: int, body: ProjectRepoCreateRequest) -> dict:
     sm = StateManager()
     if sm.get_project(project_id) is None:
         raise HTTPException(status_code=404, detail=f"No such project: {project_id}")
-    repo_id = _clone_and_register(sm, project_id, body.url, label=body.label)
+    repo_id = _add_repo(sm, project_id, url=body.url, path=body.path, label=body.label)
     return sm.get_project_repo(repo_id)
 
 

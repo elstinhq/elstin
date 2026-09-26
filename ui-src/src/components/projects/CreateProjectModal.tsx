@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { RepoUrlInput, normalizeRepoUrl } from "../shared/RepoUrlInput";
+import { EMPTY_REPO_SOURCE, RepoSourceInput, repoSourceBody, type RepoSource } from "../shared/RepoSourceInput";
 import { useCreateProject } from "../../hooks/useProjects";
 import { useToast } from "../../lib/toast";
 import { Button } from "../ui/button";
@@ -16,7 +16,7 @@ interface CreateProjectModalProps {
 export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [repoUrl, setRepoUrl] = useState("");
+  const [repoSource, setRepoSource] = useState<RepoSource>(EMPTY_REPO_SOURCE);
   const createProject = useCreateProject();
   const { showToast } = useToast();
 
@@ -24,7 +24,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
     if (open) {
       setName("");
       setDescription("");
-      setRepoUrl("");
+      setRepoSource(EMPTY_REPO_SOURCE);
     }
   }, [open]);
 
@@ -34,8 +34,14 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
       showToast("Project name is required", "error");
       return;
     }
+    const repo = repoSourceBody(repoSource);
     createProject.mutate(
-      { name: trimmedName, description: description.trim(), repo_url: normalizeRepoUrl(repoUrl) },
+      {
+        name: trimmedName,
+        description: description.trim(),
+        repo_url: repo && "url" in repo ? repo.url : null,
+        repo_path: repo && "path" in repo ? repo.path : null,
+      },
       {
         onSuccess: (project) => {
           window.location.href = `/projects/${project.id}`;
@@ -66,7 +72,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
               onChange={(e) => setDescription(e.target.value)}
             />
           </div>
-          <RepoUrlInput value={repoUrl} onChange={setRepoUrl} />
+          <RepoSourceInput source={repoSource} onChange={setRepoSource} suffix="(optional)" />
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>

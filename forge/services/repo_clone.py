@@ -1,9 +1,20 @@
-"""Clones a project's git remote into storage the API process controls
-(forge/db/models/project.py's ProjectRepo). Replaces the old "attach an
-existing local folder" flow: that only worked when the API process could
-already see the path (true for a local `uvicorn --reload` dev run, false
-inside `docker compose up`, which has no view of the host filesystem
-unless it's explicitly bind-mounted). Cloning works identically in both.
+"""The two ways a project gets a git repo (forge/db/models/project.py's
+ProjectRepo):
+
+- **Clone** (`clone_repository`): a remote URL, cloned into storage the API
+  process controls. Works the same whether forge runs on the host or inside
+  `docker compose up`.
+- **Attach** (`attach_local_repository`): a repo that already exists on disk,
+  used in place. Only works for a path the forge process can see — any path
+  when forge runs directly on the host (`uvicorn`), and inside Docker only a
+  folder bind-mounted into the app container (see docker-compose.yml). The
+  errors say so, because "no such folder" for a path that plainly exists on
+  the host is otherwise baffling.
+
+forge never changes an attached repo's checked-out files: it fetches,
+creates its story branches and worktrees from the repo's refs, and keeps the
+worktrees under its own worktrees folder. The branches do appear in the
+repo's `git branch` list until a ticket is removed.
 """
 from __future__ import annotations
 
@@ -25,6 +36,53 @@ _ERROR_MESSAGE_MAX_CHARS = 2000
 
 class RepoCloneError(RuntimeError):
     pass
+
+
+class RepoAttachError(RuntimeError):
+    pass
+
+
+def attach_local_repository(path: str, *, forbidden_dirs: list[str] | None = None) -> str:
+    """Validates `path` as a repo forge can work from, and returns it as an
+    absolute, symlink-resolved path. Refuses — with a message naming what to
+    do instead — anything that is not the top folder of a normal git
+    repository with at least one commit, and anything inside `forbidden_dirs`
+    (forge's own worktrees: attaching one of those would have forge branch
+    from its own scratch space)."""
+    raw = (path or "").strip()
+    if not raw:
+        raise RepoAttachError("Folder path is required")
+    expanded = os.path.expanduser(raw)
+    if not os.path.isabs(expanded):
+        raise RepoAttachError(f"Give the full path to the folder (e.g. /Users/you/code/app), not {raw!r}")
+    folder = os.path.realpath(expanded)
+    if not os.path.isdir(folder):
+        raise RepoAttachError(
+            f"No folder at {folder} on the machine forge runs on. Running in Docker? Only folders mounted "
+            "into the app container are visible — mount it (see docker-compose.yml) and attach the path "
+            "inside the container, or clone the repo by URL instead."
+        )
+    for managed in forbidden_dirs or []:
+        managed_real = os.path.realpath(managed)
+        if folder == managed_real or folder.startswith(managed_real + os.sep):
+            raise RepoAttachError(f"{folder} is inside forge's own working folder ({managed_real}) — attach the original repo")
+
+    top = _git_output(folder, "rev-parse", "--show-toplevel")
+    if top is None:
+        raise RepoAttachError(f"{folder} is not a git repository — run `git init` there, or attach its repository folder")
+    if os.path.realpath(top) != folder:
+        raise RepoAttachError(f"{folder} is inside the git repository at {top} — attach that top folder instead")
+    if _git_output(folder, "rev-parse", "--verify", "HEAD") is None:
+        raise RepoAttachError(f"{folder} has no commits yet — forge branches every story from an existing commit")
+    logger.info("attached local repo %s", folder)
+    return folder
+
+
+def _git_output(cwd: str, *args: str) -> str | None:
+    proc = subprocess.run(
+        ["git", "-C", cwd, *args], capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL,
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else None
 
 
 def clone_repository(url: str, *, dest_base_dir: str, timeout: int = _CLONE_TIMEOUT_SECONDS) -> str:

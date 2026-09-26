@@ -50,7 +50,7 @@ const put = (body: unknown): RequestInit => ({ method: "PUT", body: JSON.stringi
 export const api = {
   // -- projects --------------------------------------------------------
   listProjects: () => request<Project[]>("/api/projects"),
-  createProject: (body: { name: string; description: string; repo_url: string | null }) =>
+  createProject: (body: { name: string; description: string; repo_url?: string | null; repo_path?: string | null }) =>
     request<Project>("/api/projects", json(body)),
   getProject: (id: number) => request<Project>(`/api/projects/${id}`),
   updateProject: (id: number, body: { ticket_source?: string; name?: string; description?: string }) =>
@@ -58,7 +58,8 @@ export const api = {
 
   // -- folders (project repos) -----------------------------------------
   listProjectRepos: (projectId: number) => request<ProjectRepo[]>(`/api/projects/${projectId}/repos`),
-  cloneProjectRepo: (projectId: number, body: { url: string; label?: string | null }) =>
+  // Exactly one of url (clone it) or path (attach a repo already on disk).
+  addProjectRepo: (projectId: number, body: { url?: string; path?: string; label?: string | null }) =>
     request<ProjectRepo>(`/api/projects/${projectId}/repos`, json(body)),
   removeProjectRepo: (projectId: number, repoId: number) =>
     request<{ repo_id: number; removed: boolean }>(`/api/projects/${projectId}/repos/${repoId}`, {

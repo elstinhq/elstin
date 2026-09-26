@@ -63,6 +63,13 @@ services:
       - forge-data:/data
       - forge-repos:/data/repos
       - forge-cloned-repos:/data/cloned-repos
+      # To ATTACH a repo that already lives on your machine instead of
+      # cloning it by URL (Folders -> + -> "Attach a folder"), mount it here
+      # and attach the path INSIDE the container. The container sees nothing
+      # of the host filesystem otherwise. For example:
+      #   - /Users/you/code/shop-app:/workspace/shop-app
+      # then attach /workspace/shop-app. Running forge directly on the host
+      # (uvicorn) needs none of this — attach the host path as is.
     depends_on:
       postgres:
         condition: service_healthy
