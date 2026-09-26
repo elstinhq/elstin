@@ -116,7 +116,6 @@ def test_retry_story_redispatches_a_run_failure(epic):
 
 
 def test_retry_story_reattempts_a_merge_failure(epic):
-    epic.set_story_gate_approved("ENG-2", True)
     epic.set_story_status("ENG-2", "failed", failure_stage="merge")
 
     with _client() as client:
@@ -124,8 +123,8 @@ def test_retry_story_reattempts_a_merge_failure(epic):
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "awaiting_pr_review"
-    assert body["gate_approved"] is False
+    assert body["status"] == "ready_to_merge"
+    assert body["merge_attempts"] == 0
 
 
 def test_retry_non_failed_story_is_refused(epic):
@@ -265,15 +264,13 @@ def test_sync_story_404_when_jira_ticket_missing(epic, monkeypatch: pytest.Monke
 @pytest.fixture()
 def manual_run_epic(project_id, git_repo, tmp_path) -> StateManager:
     """A one-story, one-level epic under a project with auto_run_enabled
-    off and every approval gate off too, wired to a real repo — nothing
+    off and plan approval off too, wired to a real repo — nothing
     dispatches it except an explicit POST .../start."""
     from forge.config.store import set_config, set_project_config
 
     set_config("worktrees_base_dir", str(tmp_path / "worktrees"))
     set_project_config(project_id, "auto_run_enabled", "false")
     set_project_config(project_id, "require_plan_approval", "false")
-    set_project_config(project_id, "require_pr_open_approval", "false")
-    set_project_config(project_id, "require_pr_review", "false")
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2"]], manual_gate=False)
@@ -289,8 +286,8 @@ def test_start_story_dispatches_a_pending_story(manual_run_epic):
 
     assert response.status_code == 200
     assert response.json()["triggered"] == "DispatchStory"
-    # Every gate is off, so the run doesn't stop until the PR-open gate.
-    assert manual_run_epic.get_story("ENG-2")["status"] == "awaiting_pr_open"
+    # Plan approval is off, so the run goes straight through to merge-ready.
+    assert manual_run_epic.get_story("ENG-2")["status"] == "ready_to_merge"
 
 
 def test_start_story_blocked_when_epic_on_hold(epic):
@@ -312,7 +309,7 @@ def test_start_story_blocked_for_a_later_unresolved_level(manual_run_epic):
         response = client.post("/api/stories/ENG-3/start")
 
     assert response.status_code == 409
-    assert "earlier_level_unresolved" in response.json()["detail"]
+    assert "waiting_on_dependencies" in response.json()["detail"]
 
 
 def test_start_unknown_story_is_a_404():
@@ -322,10 +319,10 @@ def test_start_unknown_story_is_a_404():
 
 
 def test_approve_drives_a_manual_run_story_to_the_next_gate(manual_run_epic, monkeypatch: pytest.MonkeyPatch):
-    """With every auto-approval gate off, dispatch alone already reaches
-    the terminal awaiting_pr_open state (see test_start_story_dispatches_a_
-    pending_story), so this exercises the approve-triggers-immediately path
-    by turning the plan-approval gate back on for just this scenario."""
+    """With plan approval off, dispatch alone already reaches ready_to_merge
+    (see test_start_story_dispatches_a_pending_story), so this exercises the
+    approve-triggers-immediately path by turning the plan-approval gate back
+    on for just this scenario."""
     from forge.config.store import set_project_config
 
     project_id = manual_run_epic.get_epic("ENG-1")["project_id"]
@@ -340,9 +337,8 @@ def test_approve_drives_a_manual_run_story_to_the_next_gate(manual_run_epic, mon
 
     assert approve_response.status_code == 200
     # No poll loop runs for this project — approve had to drive the resume
-    # itself, landing straight on awaiting_pr_open (the other two gates are
-    # still off).
-    assert manual_run_epic.get_story("ENG-2")["status"] == "awaiting_pr_open"
+    # itself, landing on ready_to_merge.
+    assert manual_run_epic.get_story("ENG-2")["status"] == "ready_to_merge"
     assert manual_run_epic.get_story("ENG-2")["gate_approved"] is False
 
 

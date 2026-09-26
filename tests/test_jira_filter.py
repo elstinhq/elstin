@@ -205,13 +205,13 @@ def test_re_walking_leaves_human_decisions_and_in_flight_stories_untouched(proje
 
     sm = StateManager()
     sm.set_epic_manual_gate("ENG-1", False)  # the human resumed it
-    sm.set_story_status("ENG-2", "awaiting_pr_review")  # and it is mid-flight
+    sm.set_story_status("ENG-2", "ready_to_merge")  # and it is mid-flight
 
     fake_jira.tree_by_root["ENG-1"].append(_ticket("ENG-3", parent_key="ENG-1"))
     jira_filter.sync_project_filter(project_id)
 
     assert sm.get_epic("ENG-1")["manual_gate"] is False
-    assert sm.get_story("ENG-2")["status"] == "awaiting_pr_review"
+    assert sm.get_story("ENG-2")["status"] == "ready_to_merge"
     assert sm.get_story("ENG-3")["status"] == "pending"
 
 

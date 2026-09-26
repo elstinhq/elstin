@@ -127,10 +127,12 @@ def _clean_local_artifacts(footprint: dict[str, Any]) -> dict[str, Any]:
         warnings.extend(result["errors"])
 
     # The epic's integration branch exists in each repo the ticket merged
-    # into, and its worktree is one path shared by all of them.
-    integration_worktree = integration_worktree_path(worktrees_base, epic_key)
+    # into, each with its own worktree (see integration_worktree_path).
     integration_branches = {integration_branch_name(epic_key), footprint["integration_branch"]} - {None}
+    integration_worktrees: list[str] = []
     for repo in sorted(repos):
+        integration_worktree = integration_worktree_path(worktrees_base, epic_key, repo)
+        integration_worktrees.append(integration_worktree)
         for branch in sorted(integration_branches):
             result = discard_worktree(repo, integration_worktree, branch)
             if result["worktree_removed"] and integration_worktree not in removed_worktrees:
@@ -139,7 +141,8 @@ def _clean_local_artifacts(footprint: dict[str, Any]) -> dict[str, Any]:
                 deleted_branches.append(branch)
             warnings.extend(result["errors"])
 
-    _remove_dir(integration_worktree, worktrees_base, removed_dirs, warnings)
+    for integration_worktree in dict.fromkeys([*integration_worktrees, integration_worktree_path(worktrees_base, epic_key)]):
+        _remove_dir(integration_worktree, worktrees_base, removed_dirs, warnings)
     for key in footprint["keys"]:
         _remove_dir(os.path.join(worktrees_base, key.lower()), worktrees_base, removed_dirs, warnings)
         _remove_dir(os.path.join(baselines_base, key), baselines_base, removed_dirs, warnings)

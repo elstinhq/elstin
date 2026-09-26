@@ -5,9 +5,11 @@ import {
   ExternalChangedTag,
   GATE_ACTION,
   KindTag,
+  MergeAttemptsTag,
   PARKED_REASON_LABEL,
-  PrOpenErrorTag,
   StatusTagFor,
+  WaitingOnTag,
+  unmetDependencies,
 } from "../shared/StatusTag";
 import { Twisty } from "../shared/Twisty";
 import { CancelRunButton } from "./CancelRunButton";
@@ -23,6 +25,8 @@ interface StoryRowProps {
   story: Story;
   subtasks?: Story[];
   isSubtask?: boolean;
+  // Every story's status in the epic, by key — what "waits for …" reads.
+  statusByKey?: Map<string, string>;
   autoRunEnabled: boolean;
   expandedStories: Set<string>;
   onToggleExpand: (key: string) => void;
@@ -34,6 +38,7 @@ export function StoryRow({
   story,
   subtasks = [],
   isSubtask = false,
+  statusByKey = new Map(),
   autoRunEnabled,
   expandedStories,
   onToggleExpand,
@@ -46,6 +51,7 @@ export function StoryRow({
 
   const isOpen = expandedStories.has(story.jira_key);
   const gate = GATE_ACTION[story.status];
+  const waiting = unmetDependencies(story, statusByKey).length > 0;
 
   return (
     <>
@@ -74,16 +80,17 @@ export function StoryRow({
         </span>
         <KindTag story={story} />
         <CoverageGapTag story={story} />
-        <PrOpenErrorTag story={story} />
         <StatusTagFor status={story.status} />
+        <WaitingOnTag story={story} statusByKey={statusByKey} />
+        <MergeAttemptsTag story={story} />
         <CodeWrittenTag story={story} />
         <ExternalChangedTag story={story} />
         <ClosedExternallyTag story={story} />
 
-        {/* The three gate reasons (plan_approval_gate, pr_open_gate,
-            pr_review_gate) only repeat what the status tag and the button
-            already say; any other reason (ci_pending, closed_externally, ...)
-            is new information and stays. */}
+        {/* A gate reason (plan_approval_gate) only repeats what the status
+            tag and the button already say; any other reason
+            (already_satisfied, closed_externally, ...) is new information
+            and stays. */}
         {story.parked_reason && !story.parked_reason.endsWith("_gate") ? (
           <span className="text-muted-foreground text-xs">({PARKED_REASON_LABEL[story.parked_reason] ?? story.parked_reason})</span>
         ) : null}
@@ -102,20 +109,13 @@ export function StoryRow({
           <span className="flex-1" />
         )}
 
-        {story.pull_request && story.pull_request.number ? (
-          <Button variant="outline" size="sm" className="shrink-0" asChild>
-            <a href={story.pull_request.url || "#"} target="_blank" rel="noreferrer">
-              #{story.pull_request.number} ({story.pull_request.state})
-            </a>
-          </Button>
-        ) : null}
-
         {/* Manual-run projects (auto_run_enabled off) need an explicit tap
             to dispatch a pending top-level story — nothing autopicks it.
             Sub-tasks are never dispatched on their own (see AGENTS.md), so
             they never get this button even though their status can also be
-            "pending". */}
-        {!autoRunEnabled && story.status === "pending" && !isSubtask ? (
+            "pending" — nor does a story still waiting on a dependency, which
+            the daemon would refuse to start. */}
+        {!autoRunEnabled && story.status === "pending" && !isSubtask && !waiting ? (
           <Button
             size="sm"
             className="shrink-0"

@@ -23,6 +23,7 @@ class _StoryMixin:
         status: str = "pending",
         external_source: str | None = None,
         external_id: str | None = None,
+        depends_on: list[str] | None = None,
     ) -> None:
         with session_scope() as session:
             if session.get(Story, jira_key) is not None:
@@ -33,6 +34,10 @@ class _StoryMixin:
                 kind=kind, kind_reason=kind_reason, parent_key=parent_key,
                 issue_type=issue_type, labels=list(labels) if labels else None,
                 external_source=external_source, external_id=external_id,
+                # None (not []) when the caller does not know them: readers then
+                # fall back to the epic's levels (epic_sync.stored_dependencies)
+                # rather than treating the story as free to start at once.
+                depends_on=list(depends_on) if depends_on is not None else None,
             ))
 
     def list_subtasks(self, parent_key: str) -> list[dict]:
@@ -183,6 +188,23 @@ class _StoryMixin:
             if story is not None:
                 story.wave = wave
 
+    def set_story_dependencies(self, jira_key: str, depends_on: list[str]) -> None:
+        """The stories this one waits for (Story.depends_on) — written by
+        forge/services/epic_sync.py on every sync and relevel."""
+        with session_scope() as session:
+            story = session.get(Story, jira_key)
+            if story is not None:
+                story.depends_on = list(depends_on)
+
+    def increment_story_merge_attempts(self, jira_key: str) -> int:
+        """One more send-back over landing this story; returns the new count."""
+        with session_scope() as session:
+            story = session.get(Story, jira_key)
+            if story is None:
+                return 0
+            story.merge_attempts = (story.merge_attempts or 0) + 1
+            return story.merge_attempts
+
     def set_story_gate_approved(self, jira_key: str, approved: bool = True) -> None:
         with session_scope() as session:
             story = session.get(Story, jira_key)
@@ -246,14 +268,12 @@ class _StoryMixin:
         too, not just the story).
 
         failure_stage picks the recovery path: "merge" (the run succeeded,
-        only merging the story's branch into the epic's integration branch
-        conflicted) goes back to awaiting_pr_review with gate_approved
-        cleared, mirroring how a CI failure already parks a story rather
-        than discarding its work (see forge/daemon/main.py's
-        _ci_checks_block_merge). Anything else — "run", or unset for a
-        story that failed before this column existed — goes back to
-        pending for a full redispatch, since a run failure never reaches a
-        PR to preserve.
+        only landing it on the epic branch failed) goes back to
+        ready_to_merge, so the merge queue tries again with the story's work
+        intact and a fresh attempt budget. Anything else — "run", or unset
+        for a story that failed before this column existed — goes back to
+        pending for a full redispatch, since a run failure has nothing
+        committed worth keeping.
         """
         with session_scope() as session:
             story = session.get(Story, jira_key)
@@ -263,9 +283,9 @@ class _StoryMixin:
             story.retry_count += 1
             story.parked_reason = None
             story.failure_stage = None
+            story.merge_attempts = 0
             if stage == "merge":
-                story.status = "awaiting_pr_review"
-                story.gate_approved = False
+                story.status = "ready_to_merge"
             else:
                 story.status = "pending"
             epic_key = story.epic_key
@@ -321,6 +341,9 @@ def _story_to_dict(session, story: Story) -> dict:
         "issue_type": story.issue_type,
         "labels": list(story.labels or []),
         "wave": story.wave,
+        # None only for a row that predates the column and was never
+        # re-synced — see forge/services/epic_sync.py's stored_dependencies.
+        "depends_on": list(story.depends_on) if story.depends_on is not None else None,
         "status": story.status,
         "kind": story.kind,
         "kind_reason": story.kind_reason,
@@ -336,6 +359,7 @@ def _story_to_dict(session, story: Story) -> dict:
         "pr_open_error": story.pr_open_error,
         "retry_count": story.retry_count,
         "failure_stage": story.failure_stage,
+        "merge_attempts": story.merge_attempts or 0,
         "external_source": story.external_source,
         "external_id": story.external_id,
         "external_synced_at": story.external_synced_at.isoformat() if story.external_synced_at else None,

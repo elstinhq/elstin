@@ -20,6 +20,7 @@ from forge.db.engine import session_scope
 from forge.db.models import (
     ActivityEvent,
     Epic,
+    EpicPullRequest,
     JiraWatermark,
     ProjectRepo,
     PullRequest,
@@ -54,6 +55,9 @@ class _RemovalMixin:
             pull_requests = session.execute(
                 select(PullRequest).where(PullRequest.story_key.in_(story_keys)).order_by(PullRequest.id)
             ).scalars().all()
+            epic_pull_requests = session.execute(
+                select(EpicPullRequest).where(EpicPullRequest.epic_key == epic_key).order_by(EpicPullRequest.id)
+            ).scalars().all()
 
             return {
                 "epic": epic_key,
@@ -72,6 +76,10 @@ class _RemovalMixin:
                 "pull_requests": [
                     {"story_key": p.story_key, "repo_label": p.repo_label, "number": p.number, "url": p.url, "state": p.state}
                     for p in pull_requests
+                ] + [
+                    # The epic's own pull request — never closed by a removal.
+                    {"story_key": epic_key, "repo_label": p.repo_label, "number": p.number, "url": p.url, "state": p.state}
+                    for p in epic_pull_requests if p.number
                 ],
             }
 
@@ -92,6 +100,7 @@ class _RemovalMixin:
                 "usage_rows": gone(delete(StoryUsage).where(StoryUsage.run_id.in_(keys))),
                 "run_outcomes": gone(delete(StoryRunOutcome).where(StoryRunOutcome.run_id.in_(keys))),
                 "pull_requests": gone(delete(PullRequest).where(PullRequest.story_key.in_(story_keys))),
+                "epic_pull_requests": gone(delete(EpicPullRequest).where(EpicPullRequest.epic_key == epic_key)),
                 "worktree_rows": gone(delete(StoryWorktree).where(StoryWorktree.story_key.in_(story_keys))),
                 "watermarks": gone(delete(JiraWatermark).where(JiraWatermark.jira_key.in_(keys))),
                 "stories": gone(delete(Story).where(Story.epic_key == epic_key)),

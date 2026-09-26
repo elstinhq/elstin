@@ -93,6 +93,11 @@ def fake_agents(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(graph_module, "run_planner", fake_run_planner)
     monkeypatch.setattr(graph_module, "run_dev", fake_run_dev)
     monkeypatch.setattr(graph_module, "run_deterministic_gate", fake_run_deterministic_gate)
+    # The merge queue re-runs the gate on a story brought up to date with the
+    # epic branch (forge/daemon/main.py) — the same fake, imported there.
+    import forge.daemon.main as daemon_module
+
+    monkeypatch.setattr(daemon_module, "run_deterministic_gate", fake_run_deterministic_gate)
     monkeypatch.setattr(graph_module, "run_verifier", fake_run_verifier)
     monkeypatch.setattr(graph_module, "run_epic_qa", fake_run_epic_qa)
 

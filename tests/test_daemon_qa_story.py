@@ -52,13 +52,13 @@ def captured_jira_comments(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, s
 
 async def _drive_to_completion(sm: StateManager, story_key: str) -> None:
     """Walks one dev story through all three of its gates."""
-    await poll_once(sm)  # dispatch -> plan-approval gate
+    await poll_once(sm, wait=True)  # dispatch -> plan-approval gate
     sm.set_story_gate_approved(story_key)
-    await poll_once(sm)  # resume -> PR-open gate
+    await poll_once(sm, wait=True)  # resume -> PR-open gate
     sm.set_story_gate_approved(story_key)
-    await poll_once(sm)  # open PR -> PR-review gate
+    await poll_once(sm, wait=True)  # open PR -> PR-review gate
     sm.set_story_gate_approved(story_key)
-    await poll_once(sm)  # merge into the integration branch
+    await poll_once(sm, wait=True)  # merge into the integration branch
 
 
 async def test_qa_story_runs_last_and_reports_without_opening_a_pr(
@@ -75,27 +75,27 @@ async def test_qa_story_runs_last_and_reports_without_opening_a_pr(
     sm.create_story("ENG-9", epic_key="ENG-1", wave=1, summary="Validate the end-to-end flow", kind="qa")
 
     # The QA ticket must not move while the dev wave is still in flight.
-    await poll_once(sm)
+    await poll_once(sm, wait=True)
     assert sm.get_story("ENG-2")["status"] == "awaiting_plan_approval"
     assert sm.get_story("ENG-9")["status"] == "pending"
 
     sm.set_story_gate_approved("ENG-2")
-    await poll_once(sm)  # resume -> PR-open gate
+    await poll_once(sm, wait=True)  # resume -> PR-open gate
     assert sm.get_story("ENG-9")["status"] == "pending"  # still gated behind wave 0
 
     sm.set_story_gate_approved("ENG-2")
-    await poll_once(sm)  # open PR -> PR-review gate
+    await poll_once(sm, wait=True)  # open PR -> PR-review gate
     assert sm.get_story("ENG-9")["status"] == "pending"  # still gated behind wave 0
 
     sm.set_story_gate_approved("ENG-2")
-    await poll_once(sm)
+    await poll_once(sm, wait=True)
     assert sm.get_story("ENG-2")["status"] == "merged"
 
     # --- wave 1: the QA ticket ---
-    await poll_once(sm)
+    await poll_once(sm, wait=True)
     qa_story = sm.get_story("ENG-9")
 
-    # Terminal-ok, not awaiting_pr_review: a QA story produces a report, so
+    # Terminal-ok, not ready_to_merge: a QA story produces a report, so
     # there is no branch to review and no PR to open.
     assert qa_story["status"] == "done"
     assert sm.get_pull_request("ENG-9") is None
@@ -105,7 +105,7 @@ async def test_qa_story_runs_last_and_reports_without_opening_a_pr(
     assert "Automated epic QA — ENG-1" in captured_jira_comments[0][1]
 
     # And the epic is now complete.
-    await poll_once(sm)
+    await poll_once(sm, wait=True)
     assert sm.get_epic("ENG-1")["phase"] == "complete"
 
 
@@ -202,6 +202,44 @@ async def test_story_brief_without_subtasks_is_just_the_ticket(git_repo: str, tm
     assert brief == "Add a widget\n\nDo it well."
 
 
+async def test_story_brief_carries_the_epic_and_its_other_stories(git_repo: str, tmp_path, project_id, monkeypatch):
+    """The planner of one story sees the whole epic: what it is for, and
+    which sibling stories exist and have merged — so it neither guesses the
+    epic's vocabulary nor plans a sibling's work."""
+    monkeypatch.setenv("DATABASE_URL", os.environ["DATABASE_URL"])
+    _configure(str(tmp_path / "worktrees"))
+
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id, manual_gate=False, levels=[["ENG-2", "ENG-3"], ["ENG-4"]],
+                   summary="Multi-item pricing", description="Buyers price several item types in one quote.")
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0, summary="Price model", depends_on=[])
+    sm.create_story("ENG-3", epic_key="ENG-1", wave=0, summary="Currency column", depends_on=[])
+    sm.create_story("ENG-4", epic_key="ENG-1", wave=1, summary="Quote screen", description="Show the quote.",
+                    depends_on=["ENG-2"])
+    sm.set_story_status("ENG-2", "merged")
+
+    brief = daemon._build_story_brief(sm, sm.get_story("ENG-4"))
+
+    assert brief.startswith("Quote screen\n\nShow the quote.")  # the story itself leads
+    assert "## Epic ENG-1: Multi-item pricing" in brief
+    assert "Buyers price several item types in one quote." in brief
+    assert "- ENG-2: Price model [merged into the epic branch; this story depends on it]" in brief
+    assert "- ENG-3: Currency column [not merged yet]" in brief
+    assert "implement only this story's own scope" in brief
+
+
+async def test_a_lone_story_that_is_its_own_epic_gets_no_epic_section(git_repo: str, tmp_path, project_id, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", os.environ["DATABASE_URL"])
+    _configure(str(tmp_path / "worktrees"))
+
+    sm = StateManager()
+    sm.create_epic("ENG-7", project_id=project_id, manual_gate=False, levels=[["ENG-7"]],
+                   summary="Fix the header", description="It overlaps.")
+    sm.create_story("ENG-7", epic_key="ENG-7", wave=0, summary="Fix the header", description="It overlaps.")
+
+    assert daemon._build_story_brief(sm, sm.get_story("ENG-7")) == "Fix the header\n\nIt overlaps."
+
+
 async def test_story_brief_appends_a_codebase_skeleton_when_given_the_repo(git_repo: str, tmp_path, project_id, monkeypatch):
     """The planner's brief carries a pre-computed map of the repo so the
     model starts at the right files instead of exploring the tree."""
@@ -235,7 +273,7 @@ async def test_subtasks_are_never_dispatched(git_repo: str, tmp_path, project_id
     sm.create_story("ENG-20", epic_key="ENG-1", wave=0, parent_key="ENG-2", status="skipped",
                     summary="[New] SelectedItemLine model")
 
-    await poll_once(sm)
+    await poll_once(sm, wait=True)
 
     assert sm.get_story("ENG-2")["status"] == "awaiting_plan_approval"
     subtask = sm.get_story("ENG-20")
@@ -353,7 +391,7 @@ async def test_dispatch_hands_every_repo_to_the_planner(
 
     monkeypatch.setattr(graph_module, "run_planner", capturing_planner)
 
-    await poll_once(sm)
+    await poll_once(sm, wait=True)
 
     assert seen["repo_roots"] == {"web-ui": git_repo, "api": api}
     assert seen["default_label"] == "web-ui"

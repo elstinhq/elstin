@@ -4,10 +4,21 @@ import { Badge } from "../ui/badge";
 type TagVariant = "default" | "secondary" | "destructive" | "success" | "warning" | "info" | "outline";
 
 export const PHASE_APPEARANCE: Record<EpicPhase, TagVariant> = {
+  merged: "success",
   complete: "success",
+  pr_open: "info",
   failed: "destructive",
   planning: "warning",
   implementing: "info",
+};
+
+export const PHASE_LABEL: Record<EpicPhase, string> = {
+  merged: "merged",
+  complete: "complete",
+  pr_open: "PR open",
+  failed: "failed",
+  planning: "planning",
+  implementing: "implementing",
 };
 
 export const STATUS_APPEARANCE: Record<StoryStatus, TagVariant> = {
@@ -15,8 +26,8 @@ export const STATUS_APPEARANCE: Record<StoryStatus, TagVariant> = {
   done: "success",
   failed: "destructive",
   awaiting_plan_approval: "warning",
-  awaiting_pr_open: "warning",
-  awaiting_pr_review: "warning",
+  ready_to_merge: "info",
+  merging: "info",
   dispatched: "info",
   pending: "secondary",
   skipped: "secondary",
@@ -27,18 +38,17 @@ export const STATUS_LABEL: Record<StoryStatus, string> = {
   done: "done",
   failed: "failed",
   awaiting_plan_approval: "plan needs approval",
-  awaiting_pr_open: "ready to open PR",
-  awaiting_pr_review: "PR needs review",
+  ready_to_merge: "ready to merge",
+  merging: "merging",
   dispatched: "dispatched",
   pending: "pending",
   skipped: "skipped",
 };
 
-// A story parks at one of three human gates, and the same click means a
-// different thing at each: approving a plan starts development, approving
-// the PR-open gate creates the pull request, approving the review merges it.
-// A bare "Approve" on all three made a row at the second gate read like one
-// at the third, so the button names what it does and says what it won't.
+// The one human gate a story can stop at: plan approval (and the planner's
+// clarification questions, answered in the detail dialog). A finished story
+// merges into the epic branch by itself; the epic's pull request is the
+// review point. The button names what it does.
 export interface GateAction {
   label: string;
   hint: string;
@@ -53,20 +63,10 @@ export const GATE_ACTION: Partial<Record<StoryStatus, GateAction>> = {
     hint: "Approve the plan so the dev agent starts writing code.",
     approved: "approved — starting dev",
   },
-  awaiting_pr_open: {
-    label: "Open PR",
-    hint: "Open a pull request on GitHub for this branch. Nothing is merged yet.",
-    approved: "approved — opening PR",
-  },
-  awaiting_pr_review: {
-    label: "Approve & merge",
-    hint: "Approve this pull request. It is merged into the epic's integration branch once CI passes.",
-    approved: "approved — merging",
-  },
 };
 
 // Reasons a story stops that the row can say in words. Anything else is shown
-// as the raw code, and the three *_gate reasons are not shown at all.
+// as the raw code, and a *_gate reason is not shown at all.
 export const PARKED_REASON_LABEL: Record<string, string> = {
   already_satisfied: "already satisfied — no changes needed",
   cancelled: "cancelled",
@@ -107,7 +107,7 @@ export function StatusTagFor({ status }: { status: StoryStatus }) {
 }
 
 export function PhaseTagFor({ phase }: { phase: EpicPhase }) {
-  return <Tag label={phase} appearance={PHASE_APPEARANCE[phase]} />;
+  return <Tag label={PHASE_LABEL[phase] || phase} appearance={PHASE_APPEARANCE[phase]} />;
 }
 
 // The ticket's source changed it after a plan or run was built on the old
@@ -147,15 +147,34 @@ export function CoverageGapTag({ story }: { story: Story }) {
   return <Tag label="Coverage gap" appearance="warning" />;
 }
 
-// _maybe_open_pull_request (forge/daemon/main.py) is best-effort — a push
-// or GitHub API failure never blocks the story's own gate progress, so a
-// story can sit at "awaiting PR review" with no real PR behind it. This is
-// the only visible sign of that short of reading server logs; it's cleared
-// the moment a PR-open attempt succeeds, so its presence always means "the
-// most recent attempt failed," not stale history.
-export function PrOpenErrorTag({ story }: { story: Story }) {
-  if (!story.pr_open_error) return null;
-  return <Tag label="PR not opened" appearance="destructive" title={story.pr_open_error} />;
+// A pending story whose dependencies have not all merged yet — it starts on
+// its own once they have. Says which, so a waiting row is never mistaken for
+// a stuck one.
+export function unmetDependencies(story: Story, statusByKey: Map<string, string>): string[] {
+  if (story.status !== "pending" || !story.depends_on?.length) return [];
+  return story.depends_on.filter((key) => {
+    const status = statusByKey.get(key);
+    return status !== undefined && status !== "merged" && status !== "done" && status !== "skipped";
+  });
+}
+
+export function WaitingOnTag({ story, statusByKey }: { story: Story; statusByKey: Map<string, string> }) {
+  const waiting = unmetDependencies(story, statusByKey);
+  if (!waiting.length) return null;
+  return <Tag label={`waits for ${waiting.join(", ")}`} appearance="secondary" title="Starts once these have merged into the epic branch" />;
+}
+
+// Landing it on the epic branch sent it back to dev (a conflict with a story
+// that merged meanwhile, or the combined code failing its checks).
+export function MergeAttemptsTag({ story }: { story: Story }) {
+  if (!story.merge_attempts || story.status === "merged") return null;
+  return (
+    <Tag
+      label={`re-landing ${story.merge_attempts}×`}
+      appearance="warning"
+      title="Bringing it up to date with the epic branch needed another dev pass"
+    />
+  );
 }
 
 // A "failed" story that never got past planning and one where dev actually

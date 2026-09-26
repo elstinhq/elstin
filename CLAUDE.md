@@ -14,9 +14,10 @@ commands and orientation AGENTS.md doesn't cover.
 
 A local, single-tenant JIRA-epic-to-PR agent platform: a deterministic
 reconciler decides what to do next, a LangGraph planner → dev → verifier
-(or epic QA) loop runs per story in an isolated git worktree, and the
-daemon opens GitHub PRs, waits for CI, and merges into a shared epic
-integration branch. Runs as one process (`docker compose up`) with
+(or epic QA) loop runs per story in an isolated git worktree — independent
+stories in parallel, a story waiting only for the stories it depends on —
+each finished story is verified and merged into the epic branch locally,
+and once all have merged the epic opens one GitHub pull request. Runs as one process (`docker compose up`) with
 Postgres-backed state — no Kubernetes, no multi-tenancy, no `.env` file
 (the only process env var is `DATABASE_URL`; everything else is configured
 live at `/settings` and stored in Postgres).

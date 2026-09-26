@@ -67,67 +67,120 @@ from forge.state.manager import StateManager
 logger = logging.getLogger("forge.epic_sync")
 
 
-def _compute_levels(children: list[JiraTicket], kinds: dict[str, str] | None = None) -> list[list[str]]:
-    """Topologically levels the implementation tickets, then appends every
-    QA ticket as one final level (see this module's docstring). QA tickets
-    share that level rather than getting one each — they don't depend on
-    each other, only on all the dev work being done."""
+def compute_dependencies(children: list[JiraTicket], kinds: dict[str, str] | None = None) -> dict[str, list[str]]:
+    """{story key: the keys it must wait for}, for every top-level ticket.
+
+    This — not `Epic.levels` — is what the reconciler schedules on: a story
+    starts as soon as the stories it depends on have merged, whether or not
+    anything else in the epic is still running. Dev stories depend on what
+    their "blocks" / "is blocked by" links say (links leaving the synced set,
+    or pointing at a QA ticket, are ignored); every QA ticket depends on
+    every dev ticket, which is what a validation ticket means (see this
+    module's docstring). A dependency cycle is broken deterministically — see
+    `_break_cycles`."""
     kinds = kinds or {}
-    qa_keys = sorted((t.key for t in children if kinds.get(t.key) == KIND_QA), key=issue_key_sort_key)
-    dev_children = [t for t in children if kinds.get(t.key) != KIND_QA]
+    dev_keys = {t.key for t in children if kinds.get(t.key) != KIND_QA}
+    qa_keys = [t.key for t in children if kinds.get(t.key) == KIND_QA]
 
-    levels = _topological_levels(dev_children)
-    if qa_keys:
-        levels.append(qa_keys)
-    return levels
-
-
-def _topological_levels(children: list[JiraTicket]) -> list[list[str]]:
-    keys = {t.key for t in children}
-    # Ties within a level break on issue key, not on JIRA's search result
-    # order, which is arbitrary — it was returning PROJ-3480's stories
-    # newest-first, so the epic rendered 3485, 3484, 3483, …
-    order = {key: i for i, key in enumerate(sorted(keys, key=issue_key_sort_key))}
-
-    # depends_on[key] = keys that must reach a terminal-ok status first.
-    depends_on: dict[str, set[str]] = {t.key: set() for t in children}
+    depends_on: dict[str, set[str]] = {key: set() for key in dev_keys}
     for ticket in children:
+        if ticket.key not in dev_keys:
+            continue
         for link in ticket.linked_issues:
             other = link.get("key")
-            if other not in keys:
-                continue  # link points outside the synced set — ignore
+            if other not in dev_keys or other == ticket.key:
+                continue  # outside the synced set, or a QA ticket — ignore
             link_type = (link.get("link_type") or "").strip().lower()
             if link_type == "is blocked by":
                 depends_on[ticket.key].add(other)
             elif link_type == "blocks":
                 depends_on[other].add(ticket.key)
 
+    _break_cycles(depends_on)
+    dependencies = {key: sorted(deps, key=issue_key_sort_key) for key, deps in depends_on.items()}
+    for key in qa_keys:
+        dependencies[key] = sorted(dev_keys, key=issue_key_sort_key)
+    return dependencies
+
+
+def _reachable(start: str, depends_on: dict[str, set[str]]) -> set[str]:
+    """Every key `start` waits on, directly or through another story."""
+    seen: set[str] = set()
+    stack = list(depends_on.get(start, ()))
+    while stack:
+        key = stack.pop()
+        if key in seen:
+            continue
+        seen.add(key)
+        stack.extend(depends_on.get(key, ()))
+    return seen
+
+
+def _break_cycles(depends_on: dict[str, set[str]]) -> None:
+    """Make the graph acyclic, in place and deterministically: the members
+    of each cycle run one after another in issue-key order, and every
+    dependency into or out of the cycle is kept. (The old level sort dumped
+    whatever it could not place into one final level, together with
+    everything waiting on the cycle.) Epics are a few dozen stories at
+    most, so the quadratic reachability pass is not a concern."""
+    reach = {key: _reachable(key, depends_on) for key in depends_on}
+    handled: set[str] = set()
+    for key in sorted(depends_on, key=issue_key_sort_key):
+        if key in handled or key not in reach[key]:
+            continue
+        cycle = sorted((k for k in depends_on if k in reach[key] and key in reach[k]), key=issue_key_sort_key)
+        members = set(cycle)
+        for previous, member in zip([None, *cycle], cycle):
+            depends_on[member] = {d for d in depends_on[member] if d not in members}
+            if previous is not None:
+                depends_on[member].add(previous)
+        handled.update(members)
+
+
+def levels_from_dependencies(dependencies: dict[str, list[str]]) -> list[list[str]]:
+    """Group stories into levels (a story's level is one past its deepest
+    dependency) — for display: the dashboard groups by level, and
+    `Story.wave` is a story's level. Scheduling does not use levels.
+
+    Ties within a level break on issue key, not on the source's result
+    order, which is arbitrary — JIRA was returning PROJ-3480's stories
+    newest-first, so the epic rendered 3485, 3484, 3483, …"""
     levels: list[list[str]] = []
     placed: set[str] = set()
-    remaining = set(keys)
+    remaining = set(dependencies)
     while remaining:
-        ready = sorted((k for k in remaining if depends_on[k] <= placed), key=lambda k: order[k])
+        ready = sorted(
+            (k for k in remaining if {d for d in dependencies[k] if d in dependencies} <= placed),
+            key=issue_key_sort_key,
+        )
         if not ready:
-            # A dependency cycle among the synced tickets — dump whatever's
-            # left into one final level rather than looping forever.
-            ready = sorted(remaining, key=lambda k: order[k])
+            # Unreachable for graphs from compute_dependencies (acyclic by
+            # construction); a guard so a hand-edited row can never loop.
+            ready = sorted(remaining, key=issue_key_sort_key)
         levels.append(ready)
         placed.update(ready)
         remaining.difference_update(ready)
     return levels
 
 
-def relevel_epic(epic_key: str) -> list[list[str]]:
-    """Recomputes an epic's levels from the stories already in the DB,
-    after a human has reclassified one (PUT /api/stories/{key}/kind).
+def _compute_levels(children: list[JiraTicket], kinds: dict[str, str] | None = None) -> list[list[str]]:
+    """The levels `compute_dependencies` implies: dev tickets in link order,
+    then every QA ticket in one final level — they depend on all the dev
+    work, not on each other."""
+    return levels_from_dependencies(compute_dependencies(children, kinds))
 
-    Works purely from stored state — the JIRA issue links that produced the
-    original topology aren't persisted, so instead of re-deriving it this
-    *preserves* the existing dev ordering and only moves stories between
-    the dev levels and the trailing QA level. A story reclassified qa->dev
-    has no recoverable position in the topology, so it lands in a new final
-    dev level: always dependency-safe, since everything it could have
-    depended on already runs before it.
+
+def relevel_epic(epic_key: str) -> list[list[str]]:
+    """Recomputes an epic's dependencies and levels from the stories already
+    in the DB, after a human has reclassified one (PUT /api/stories/{key}/kind).
+
+    Works purely from stored state: each dev story keeps its stored
+    dependencies on other dev stories, and a QA story depends on every dev
+    story. So a story reclassified dev->qa stops being waited on by dev work
+    and now waits on all of it; one reclassified qa->dev keeps the "every
+    dev story" dependencies it had as QA — it lands after all the other dev
+    work, which is always dependency-safe, since its real position in the
+    link topology is not recoverable from here.
     """
     sm = StateManager()
     epic = sm.get_epic(epic_key)
@@ -138,29 +191,59 @@ def relevel_epic(epic_key: str) -> list[list[str]]:
     # never belong in levels. Their wave is mirrored from their parent
     # below, purely so the UI can sort them alongside it.
     stories = sm.list_stories_for_epic(epic_key)
-    kinds = {s["jira_key"]: (s.get("kind") or "dev") for s in stories if s.get("parent_key") is None}
+    top_level = {s["jira_key"]: s for s in stories if s.get("parent_key") is None}
+    kinds = {key: (s.get("kind") or "dev") for key, s in top_level.items()}
     subtasks_by_parent: dict[str, list[str]] = {}
     for story in stories:
         if story.get("parent_key"):
             subtasks_by_parent.setdefault(story["parent_key"], []).append(story["jira_key"])
 
-    dev_levels = [keep for level in (epic["levels"] or []) if (keep := [k for k in level if kinds.get(k) == "dev"])]
-    placed = {key for level in dev_levels for key in level}
-    orphan_dev = sorted((k for k, kind in kinds.items() if kind == "dev" and k not in placed), key=issue_key_sort_key)
-    if orphan_dev:
-        dev_levels.append(orphan_dev)
+    stored = stored_dependencies(epic["levels"] or [], top_level)
+    dev_keys = {key for key, kind in kinds.items() if kind != KIND_QA}
+    depends_on = {key: {d for d in stored.get(key, []) if d in dev_keys and d != key} for key in dev_keys}
+    _break_cycles(depends_on)
+    dependencies = {key: sorted(deps, key=issue_key_sort_key) for key, deps in depends_on.items()}
+    for key, kind in kinds.items():
+        if kind == KIND_QA:
+            dependencies[key] = sorted(dev_keys, key=issue_key_sort_key)
+    levels = levels_from_dependencies(dependencies)
 
-    qa_keys = sorted((k for k, kind in kinds.items() if kind == KIND_QA), key=issue_key_sort_key)
-    levels = dev_levels + ([qa_keys] if qa_keys else [])
+    _store_levels_and_dependencies(sm, epic_key, levels, dependencies, subtasks_by_parent)
+    logger.info("epic %s releveled: %s", epic_key, levels)
+    return levels
 
+
+def stored_dependencies(levels: list[list[str]], stories: dict[str, dict]) -> dict[str, list[str]]:
+    """Each story's stored `depends_on`, or — for a row synced before
+    dependencies were stored (NULL) — every story in an earlier level, which
+    is exactly the order the old level-by-level scheduling enforced."""
+    earlier: dict[str, list[str]] = {}
+    seen: list[str] = []
+    for level in levels:
+        for key in level:
+            earlier[key] = list(seen)
+        seen.extend(level)
+    result: dict[str, list[str]] = {}
+    for key, story in stories.items():
+        deps = story.get("depends_on")
+        result[key] = list(deps) if deps is not None else earlier.get(key, [])
+    return result
+
+
+def _store_levels_and_dependencies(
+    sm: StateManager,
+    epic_key: str,
+    levels: list[list[str]],
+    dependencies: dict[str, list[str]],
+    subtasks_by_parent: dict[str, list[str]],
+) -> None:
     sm.set_epic_levels(epic_key, levels)
     for idx, level in enumerate(levels):
         for key in level:
             sm.set_story_wave(key, idx)
+            sm.set_story_dependencies(key, dependencies.get(key, []))
             for subtask_key in subtasks_by_parent.get(key, []):
                 sm.set_story_wave(subtask_key, idx)
-    logger.info("epic %s releveled: %s", epic_key, levels)
-    return levels
 
 
 def sync_epic_from_jira(jira_key: str, *, project_id: int) -> ReconcileReport:
@@ -237,7 +320,8 @@ def sync_epic_from_jira(jira_key: str, *, project_id: int) -> ReconcileReport:
             kinds[key] = kind
             logger.info("story %s classified kind=%s (%s)", key, kind, reason)
 
-    levels = _compute_levels(top_level, kinds)
+    dependencies = compute_dependencies(top_level, kinds)
+    levels = levels_from_dependencies(dependencies)
     wave_of = {key: idx for idx, level in enumerate(levels) for key in level}
 
     sm.create_epic(
@@ -264,7 +348,15 @@ def sync_epic_from_jira(jira_key: str, *, project_id: int) -> ReconcileReport:
             kind=kind, kind_reason=reason,
             issue_type=ticket.issue_type, labels=ticket.labels,
             external_source=source.name, external_id=ticket.external_id or ticket.key,
+            depends_on=dependencies.get(ticket.key, []),
         )
+        # create_story no-ops on an existing row, but a "blocked by" link
+        # added at the source since the last walk must still reach the
+        # scheduler — dependencies (and the display wave) are recomputed on
+        # every sync, like the levels above. Only a pending story's
+        # dependencies are ever read, so rewriting a finished one's is inert.
+        sm.set_story_dependencies(ticket.key, dependencies.get(ticket.key, []))
+        sm.set_story_wave(ticket.key, wave_of[ticket.key])
 
     for ticket in subtasks:
         # Status "skipped" is belt-and-braces: sub-tasks are already absent

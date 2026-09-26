@@ -1,7 +1,11 @@
-"""The deterministic reconciler — the central architectural idea: a level
-loop over the epic's dependency graph (stories in the same level run
-concurrently, a level only starts once every earlier level is fully merged,
-any failure halts everything downstream).
+"""The deterministic reconciler — the central architectural idea: a scan
+over the epic's dependency graph. A story is ready as soon as every story it
+depends on (`StorySnapshot.depends_on`, from the source's "blocks" links —
+see forge/services/epic_sync.py) has merged, so independent stories run in
+parallel and a story waits only for its own blockers, not for everything in
+an earlier level. A failure stops only the stories that depend on it,
+directly or through another story; the rest of the epic carries on, and the
+epic is "failed" only once nothing in it can make progress any more.
 
 Pure function, no I/O, no LLM calls, no imports from forge.state or forge.db
 — `plan_orchestration(snapshot, ctx) -> list[Intent]` takes a plain
@@ -31,21 +35,23 @@ _NOT_STARTED = frozenset({"pending", "awaiting_plan_approval", "skipped"})
 @dataclass(frozen=True)
 class StorySnapshot:
     jira_key: str
-    status: str  # "pending" | "awaiting_plan_approval" | "dispatched" | "awaiting_pr_open" | "awaiting_pr_review" | "merged" | "done" | "failed" | "skipped"
+    # "pending" | "awaiting_plan_approval" | "dispatched" | "ready_to_merge" | "merging"
+    # | "merged" | "done" | "failed" | "skipped"
+    status: str
     thread_id: str | None = None
-    # Set when the verifier's only blocker was a coverage-threshold miss,
-    # not a real implementation failure (see forge/tools/vue_tools.py).
-    # Forces the pr_open_gate on below regardless of
-    # ctx.require_pr_open_approval — a story that didn't fully verify
-    # shouldn't ride along on a gate a project configured for the
-    # fully-verified case.
-    coverage_gap: bool = False
+    # The stories this one waits for. The daemon always fills it (falling
+    # back to "every story in an earlier level" for a row that predates
+    # stored dependencies — epic_sync.stored_dependencies).
+    depends_on: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class EpicSnapshot:
     jira_key: str
-    levels: list[list[str]]  # topological levels, list of story-key lists
+    # Topological levels, list of story-key lists. Which stories are work
+    # units (only top-level stories appear) and the order intents come out
+    # in — scheduling itself follows each story's depends_on.
+    levels: list[list[str]]
     stories: dict[str, StorySnapshot]  # jira_key -> snapshot, for every story referenced in `levels`
     # A human-set hold on this epic alone (persisted on Epic.manual_gate) —
     # distinct from OrchestratorContext.dispatch_paused, which is a
@@ -56,13 +62,13 @@ class EpicSnapshot:
 @dataclass(frozen=True)
 class OrchestratorContext:
     dispatch_paused: bool = False
+    # Stories with a run or a merge executing in this process right now.
     live_thread_ids: frozenset[str] = field(default_factory=frozenset)
     require_plan_approval: bool = True
-    require_pr_open_approval: bool = True
-    require_pr_review: bool = True
-    # Story keys where a human has cleared whichever gate currently applies
-    # to them (plan-approval, PR-open, or PR-review — a story is only ever
-    # waiting on one at a time, so this single set serves all three).
+    # Story keys where a human has cleared the plan-approval gate. It is the
+    # only per-story human gate: a story is verified and merged into the epic
+    # branch locally, and the one pull request is the epic's (see
+    # forge/orchestration/integration.py).
     approved_story_keys: frozenset[str] = field(default_factory=frozenset)
 
 
@@ -79,16 +85,15 @@ class ResumeStory:
 @dataclass(frozen=True)
 class ParkForGate:
     story_key: str
-    reason: str  # "plan_approval_gate" | "pr_open_gate" | "pr_review_gate"
+    reason: str  # "plan_approval_gate"
 
 
 @dataclass(frozen=True)
-class OpenPullRequest:
-    story_key: str
+class MergeIntoEpic:
+    """Bring a finished story up to date with the epic branch, re-verify it,
+    and fast-forward the epic branch to it — locally; see
+    forge/orchestration/integration.py."""
 
-
-@dataclass(frozen=True)
-class MergeIntegrationBranch:
     story_key: str
 
 
@@ -98,7 +103,7 @@ class NoOp:
     story_key: str | None = None
 
 
-Intent = DispatchStory | ResumeStory | ParkForGate | OpenPullRequest | MergeIntegrationBranch | NoOp
+Intent = DispatchStory | ResumeStory | ParkForGate | MergeIntoEpic | NoOp
 
 
 @dataclass(frozen=True)
@@ -113,7 +118,9 @@ class Blocked:
     HTTP 409 rather than a quiet no-op."""
 
     story_key: str
-    reason: str  # "unknown_story" | "epic_on_hold" | "no_levels" | "epic_halted" | "epic_resolved" | "earlier_level_unresolved"
+    # "unknown_story" | "epic_on_hold" | "no_levels" | "epic_resolved" | "story_finished" | "story_failed"
+    # | "dependency_failed" | "waiting_on_dependencies"
+    reason: str
 
 
 def plan_orchestration(snapshot: EpicSnapshot, ctx: OrchestratorContext) -> list[Intent]:
@@ -126,20 +133,60 @@ def plan_orchestration(snapshot: EpicSnapshot, ctx: OrchestratorContext) -> list
     if not snapshot.levels:
         return [NoOp(reason="no_levels")]
 
-    for level_idx, level_keys in enumerate(snapshot.levels):
-        level_stories = [snapshot.stories[key] for key in level_keys if key in snapshot.stories]
+    keys = _work_units(snapshot)
+    if all(snapshot.stories[key].status in _TERMINAL_OK for key in keys):
+        return [NoOp(reason="epic_complete")]
 
-        if any(story.status == "failed" for story in level_stories):
-            return [NoOp(reason="epic_failed", story_key=_first_failed(level_stories))]
+    halted = _halted_by_failure(snapshot, keys)
+    intents: list[Intent] = []
+    for key in keys:
+        story = snapshot.stories[key]
+        if story.status in _TERMINAL_OK or story.status == "failed":
+            continue
+        if key in halted:
+            intents.append(NoOp(story_key=key, reason="dependency_failed"))
+        elif story.status == "pending" and not _dependencies_met(snapshot, story):
+            intents.append(NoOp(story_key=key, reason="waiting_on_dependencies"))
+        else:
+            intents.append(_intent_for(story, ctx))
 
-        if all(story.status in _TERMINAL_OK for story in level_stories):
-            continue  # this level is fully resolved — look at the next one
+    if all(isinstance(intent, NoOp) and intent.reason == "dependency_failed" for intent in intents):
+        # Nothing left can make progress: every unfinished story failed or
+        # waits on one that did.
+        return [NoOp(reason="epic_failed", story_key=_first_failed(snapshot, keys))]
+    return intents
 
-        # First not-fully-resolved level is the only one that gets acted on
-        # this pass, mirroring epic_runner's sequential-levels behavior.
-        return [_intent_for(story, ctx) for story in level_stories if story.status not in _TERMINAL_OK]
 
-    return [NoOp(reason="epic_complete")]
+def _work_units(snapshot: EpicSnapshot) -> list[str]:
+    """The epic's dispatchable stories, in level order (then issue-key
+    order within a level, as sync stored them)."""
+    return [key for level in snapshot.levels for key in level if key in snapshot.stories]
+
+
+def _dependencies_met(snapshot: EpicSnapshot, story: StorySnapshot) -> bool:
+    """Every dependency has merged (or is done/skipped). A dependency that is
+    not a work unit of this epic — a key removed at the source — does not
+    hold anything up."""
+    return all(
+        snapshot.stories[dep].status in _TERMINAL_OK for dep in story.depends_on if dep in snapshot.stories
+    )
+
+
+def _halted_by_failure(snapshot: EpicSnapshot, keys: list[str]) -> set[str]:
+    """Stories that cannot proceed because something they depend on, directly
+    or through another story, has failed."""
+    failed = {key for key in keys if snapshot.stories[key].status == "failed"}
+    halted: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for key in keys:
+            if key in halted or key in failed:
+                continue
+            if any(dep in failed or dep in halted for dep in snapshot.stories[key].depends_on):
+                halted.add(key)
+                changed = True
+    return halted
 
 
 def _intent_for(story: StorySnapshot, ctx: OrchestratorContext) -> Intent:
@@ -156,39 +203,33 @@ def _intent_for(story: StorySnapshot, ctx: OrchestratorContext) -> Intent:
             return NoOp(story_key=story.jira_key, reason="already_running")
         return ResumeStory(story.jira_key)  # no live process for it — resume from checkpoint
 
-    if story.status == "awaiting_pr_open":
-        gate_required = ctx.require_pr_open_approval or story.coverage_gap
-        if not gate_required or story.jira_key in ctx.approved_story_keys:
-            return OpenPullRequest(story.jira_key)
-        return ParkForGate(story.jira_key, "pr_open_gate")
-
-    if story.status == "awaiting_pr_review":
-        if not ctx.require_pr_review or story.jira_key in ctx.approved_story_keys:
-            return MergeIntegrationBranch(story.jira_key)
-        return ParkForGate(story.jira_key, "pr_review_gate")
+    if story.status in ("ready_to_merge", "merging"):
+        # "merging" left behind by a crash mid-merge is simply merged again:
+        # every step of the merge is safe to repeat.
+        if story.jira_key in ctx.live_thread_ids:
+            return NoOp(story_key=story.jira_key, reason="already_merging")
+        return MergeIntoEpic(story.jira_key)
 
     return NoOp(story_key=story.jira_key, reason=f"unknown_status:{story.status}")
 
 
-def _first_failed(stories: list[StorySnapshot]) -> str | None:
-    return next((s.jira_key for s in stories if s.status == "failed"), None)
+def _first_failed(snapshot: EpicSnapshot, keys: list[str]) -> str | None:
+    return next((key for key in keys if snapshot.stories[key].status == "failed"), None)
 
 
 def describe_story_action(snapshot: EpicSnapshot, ctx: OrchestratorContext, story_key: str) -> Intent | Blocked:
     """The manual-run-mode counterpart to plan_orchestration: instead of
-    scanning every level and acting on everything in the first open one,
-    this validates and decides for exactly one requested story — the pure
-    logic behind a project's Start button, and behind an approve/retry
-    follow-through once a project has turned auto_run_enabled off (see
-    forge/daemon/main.py). Deliberately mirrors plan_orchestration's own
-    level walk rather than sharing code with it, so that function — pinned
-    by tests/test_reconciler.py — never has to change shape for this.
+    scanning the epic and acting on everything ready, this validates and
+    decides for exactly one requested story — the pure logic behind a
+    project's Start button, and behind an approve/retry follow-through once
+    a project has turned auto_run_enabled off (see forge/daemon/main.py).
 
     Reuses `_intent_for` so a manual Start produces exactly the same Intent
     plan_orchestration would have produced for the same story in auto mode:
-    dependency ordering (a story must be in the first not-yet-resolved
-    level) and the epic-wide failure halt both still apply, only the
-    "what's ready gets acted on automatically" part is gone.
+    dependency ordering (a pending story's dependencies must have merged)
+    and failure propagation (nothing starts on top of a failed dependency)
+    both still apply, only the "what's ready gets acted on automatically"
+    part is gone.
     """
     if story_key not in snapshot.stories:
         return Blocked(story_key, "unknown_story")
@@ -197,20 +238,19 @@ def describe_story_action(snapshot: EpicSnapshot, ctx: OrchestratorContext, stor
     if not snapshot.levels:
         return Blocked(story_key, "no_levels")
 
-    for level_keys in snapshot.levels:
-        level_stories = [snapshot.stories[key] for key in level_keys if key in snapshot.stories]
-
-        if any(story.status == "failed" for story in level_stories):
-            return Blocked(story_key, "epic_halted")
-
-        if all(story.status in _TERMINAL_OK for story in level_stories):
-            continue  # this level is fully resolved — look at the next one
-
-        if story_key not in level_keys:
-            return Blocked(story_key, "earlier_level_unresolved")
-        return _intent_for(snapshot.stories[story_key], ctx)
-
-    return Blocked(story_key, "epic_resolved")  # every level already terminal
+    keys = _work_units(snapshot)
+    if all(snapshot.stories[key].status in _TERMINAL_OK for key in keys):
+        return Blocked(story_key, "epic_resolved")
+    story = snapshot.stories[story_key]
+    if story.status in _TERMINAL_OK:
+        return Blocked(story_key, "story_finished")
+    if story.status == "failed":
+        return Blocked(story_key, "story_failed")
+    if story_key in _halted_by_failure(snapshot, keys):
+        return Blocked(story_key, "dependency_failed")
+    if story.status == "pending" and not _dependencies_met(snapshot, story):
+        return Blocked(story_key, "waiting_on_dependencies")
+    return _intent_for(story, ctx)
 
 
 def display_epic_phase(stored_phase: str, story_statuses: Iterable[str]) -> str:
@@ -234,19 +274,22 @@ def display_epic_phase(stored_phase: str, story_statuses: Iterable[str]) -> str:
 
 
 def epic_completion_status(snapshot: EpicSnapshot) -> str | None:
-    """"complete" once every level is fully resolved, "failed" if any level
-    contains a failed story, else None (still in progress). plan_orchestration
-    computes this inline as part of its own scan; forge/daemon/main.py's
+    """"complete" once every story is resolved, "failed" once nothing left
+    can make progress (every unfinished story failed or waits on one that
+    did), else None (still in progress). plan_orchestration computes this
+    inline as part of its own scan; forge/daemon/main.py's
     trigger_story_action calls this explicitly after a single-story action
     because poll_once's automatic scan skips epics whose project has
     auto_run_enabled off, so nothing else keeps Epic.phase accurate for
     them."""
     if not snapshot.levels:
         return None
-    for level_keys in snapshot.levels:
-        level_stories = [snapshot.stories[key] for key in level_keys if key in snapshot.stories]
-        if any(story.status == "failed" for story in level_stories):
-            return "failed"
-        if not all(story.status in _TERMINAL_OK for story in level_stories):
-            return None
-    return "complete"
+    keys = _work_units(snapshot)
+    if all(snapshot.stories[key].status in _TERMINAL_OK for key in keys):
+        return "complete"
+    failed = {key for key in keys if snapshot.stories[key].status == "failed"}
+    halted = _halted_by_failure(snapshot, keys)
+    unfinished = {key for key in keys if snapshot.stories[key].status not in _TERMINAL_OK}
+    if failed and unfinished <= failed | halted:
+        return "failed"
+    return None

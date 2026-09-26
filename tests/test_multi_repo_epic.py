@@ -103,7 +103,7 @@ async def test_each_story_gets_its_worktree_in_its_own_repo(split_project):
     epic's default repo and the API story wrote UI code."""
     sm = split_project["sm"]
 
-    await poll_once(sm)
+    await poll_once(sm, wait=True)
 
     ui_worktree = sm.get_story("ENG-2")["worktree_path"]
     api_worktree = sm.get_story("ENG-3")["worktree_path"]
@@ -142,7 +142,7 @@ async def test_every_story_gets_the_whole_project_to_read(split_project, monkeyp
 
     monkeypatch.setattr(graph_module, "run_planner", capturing_planner)
 
-    await poll_once(split_project["sm"])
+    await poll_once(split_project["sm"], wait=True)
 
     ui, api = split_project["ui"], split_project["api"]
     whole_project = {"web-ui": ui, "api": api}
@@ -170,12 +170,12 @@ async def test_the_branch_and_commit_land_in_the_storys_own_repo(split_project, 
     monkeypatch.setattr(graph_module, "run_dev", dev_writes_a_file)
     sm = split_project["sm"]
 
-    await poll_once(sm)
+    await poll_once(sm, wait=True)
     sm.set_story_gate_approved("ENG-3")
-    await poll_once(sm)
+    await poll_once(sm, wait=True)
 
     story = sm.get_story("ENG-3")
-    assert story["status"] == "awaiting_pr_open"
+    assert story["status"] == "ready_to_merge"
 
     # The commit exists on the API repo's branch, and the UI repo has no
     # such branch at all.
@@ -298,9 +298,9 @@ async def test_a_single_story_writes_every_repo_its_plan_names(split_project, mo
     monkeypatch.setattr(dev_loop_module, "get_provider", lambda: _FakeProvider())
 
     sm = split_project["sm"]
-    await poll_once(sm)
+    await poll_once(sm, wait=True)
     sm.set_story_gate_approved("ENG-2")
-    await poll_once(sm)
+    await poll_once(sm, wait=True)
 
     worktrees = {e["repo_label"]: e for e in sm.list_story_worktrees("ENG-2")}
 

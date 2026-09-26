@@ -122,8 +122,10 @@ export type StoryStatus =
   | "pending"
   | "dispatched"
   | "awaiting_plan_approval"
-  | "awaiting_pr_open"
-  | "awaiting_pr_review"
+  // The run passed; its work waits for the merge queue to land it on the
+  // epic branch, locally (forge/daemon/main.py).
+  | "ready_to_merge"
+  | "merging"
   | "merged"
   | "done"
   | "failed"
@@ -193,6 +195,9 @@ export interface Story {
   summary: string | null;
   description: string | null;
   wave: number;
+  // The stories this one waits for; null only for a row synced before
+  // dependencies were stored.
+  depends_on: string[] | null;
   status: StoryStatus;
   kind: StoryKind;
   kind_reason: string | null;
@@ -208,6 +213,8 @@ export interface Story {
   pr_open_error: string | null;
   retry_count: number;
   failure_stage: string | null;
+  // Times landing it on the epic branch sent it back to dev.
+  merge_attempts: number;
   external_source: string | null;
   external_id: string | null;
   external_status: string | null;
@@ -218,7 +225,22 @@ export interface Story {
   run_outcome: RunOutcome | null;
 }
 
-export type EpicPhase = "planning" | "implementing" | "complete" | "failed";
+// "pr_open": every story merged and the epic's one pull request is open;
+// "merged": a person merged it; "complete": done without an open pull request
+// (GitHub not configured, nothing to propose, or the PR was closed).
+export type EpicPhase = "planning" | "implementing" | "complete" | "pr_open" | "merged" | "failed";
+
+// The epic's pull request, per repo — the only one forge opens.
+export interface EpicPullRequest {
+  repo_label: string;
+  repo_path: string;
+  branch: string;
+  number: number | null;
+  url: string | null;
+  state: "open" | "merged" | "closed";
+  ci_status: "pending" | "success" | "failure" | null;
+  error: string | null;
+}
 
 export interface EpicLevel {
   wave: number;
@@ -258,6 +280,7 @@ export interface Epic {
   phase: EpicPhase;
   levels: EpicLevel[];
   integration_branch: string | null;
+  pull_requests: EpicPullRequest[];
   plan_approved: boolean;
   manual_gate: boolean;
   external_source: string | null;

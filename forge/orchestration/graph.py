@@ -162,6 +162,7 @@ async def dev_node(state: FeatureRunState) -> dict:
             # module docstring). Takes precedence over verifier_report,
             # which may be stale from an earlier review round.
             gate_feedback=gate_feedback,
+            integration_paths=state.get("integration_paths") or None,
             repo_roots=state.get("repo_roots") or None,
             default_label=state.get("default_repo_label") or "",
             story_worktrees=state.get("story_worktrees") or None,

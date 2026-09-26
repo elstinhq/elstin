@@ -22,7 +22,12 @@ export function RemoveEpicButton({ projectId, epic }: { projectId: number; epic:
   const stories = epic.stories ?? [];
   const running = stories.some((s) => s.status === "dispatched");
   const taskCount = stories.filter((s) => !s.parent_key).length;
-  const pullRequests = stories.map((s) => s.pull_request).filter((pr) => pr && pr.number);
+  // The epic's own pull request, plus any a story opened before stories
+  // merged locally — removal closes none of them.
+  const pullRequests = [
+    ...(epic.pull_requests ?? []),
+    ...stories.map((s) => s.pull_request),
+  ].filter((pr) => pr && pr.number);
   // A GitHub ticket lives on GitHub already; naming it twice would just be noise.
   const remote = epic.external_source === "github" ? "on GitHub" : `in ${sourceLabel(epic.external_source)} or on GitHub`;
   const label = displayKey(epic);

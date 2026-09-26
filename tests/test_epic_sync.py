@@ -150,6 +150,65 @@ def test_sync_handles_dependency_cycle_without_hanging(project_id):
     assert sorted(key for level in levels for key in level) == ["ENG-2", "ENG-3"]
 
 
+def test_sync_stores_each_storys_own_dependencies(project_id):
+    """What the reconciler schedules on: ENG-4 waits for ENG-2 only, not
+    for ENG-3 as well — the old levels would have made it wait for both."""
+    _FakeJiraService.tree_by_root["ENG-1"] = [
+        _ticket("ENG-1"),
+        _ticket("ENG-2"),
+        _ticket("ENG-3"),
+        _ticket("ENG-4", links=[{"key": "ENG-2", "link_type": "is blocked by"}]),
+    ]
+
+    epic_sync.sync_epic_from_jira("ENG-1", project_id=project_id)
+
+    sm = StateManager()
+    assert sm.get_story("ENG-2")["depends_on"] == []
+    assert sm.get_story("ENG-3")["depends_on"] == []
+    assert sm.get_story("ENG-4")["depends_on"] == ["ENG-2"]
+
+
+def test_resync_picks_up_a_blocking_link_added_at_the_source(project_id):
+    _FakeJiraService.tree_by_root["ENG-1"] = [_ticket("ENG-1"), _ticket("ENG-2"), _ticket("ENG-3")]
+    epic_sync.sync_epic_from_jira("ENG-1", project_id=project_id)
+
+    _FakeJiraService.tree_by_root["ENG-1"] = [
+        _ticket("ENG-1"),
+        _ticket("ENG-2", links=[{"key": "ENG-3", "link_type": "blocks"}]),
+        _ticket("ENG-3"),
+    ]
+    epic_sync.sync_epic_from_jira("ENG-1", project_id=project_id)
+
+    sm = StateManager()
+    assert sm.get_story("ENG-3")["depends_on"] == ["ENG-2"]
+    assert sm.get_story("ENG-3")["wave"] == 1
+
+
+def test_a_dependency_cycle_becomes_a_chain_in_key_order(project_id):
+    _FakeJiraService.tree_by_root["ENG-1"] = [
+        _ticket("ENG-1"),
+        _ticket("ENG-2", links=[{"key": "ENG-3", "link_type": "is blocked by"}]),
+        _ticket("ENG-3", links=[{"key": "ENG-2", "link_type": "is blocked by"}]),
+    ]
+
+    epic_sync.sync_epic_from_jira("ENG-1", project_id=project_id)
+
+    sm = StateManager()
+    assert sm.get_story("ENG-2")["depends_on"] == []
+    assert sm.get_story("ENG-3")["depends_on"] == ["ENG-2"]
+
+
+def test_relevel_keeps_dependencies_consistent_with_kinds(project_id):
+    sm = _sync_proj_3480(project_id)
+    sm.set_story_kind("PROJ-3485", "qa")
+
+    epic_sync.relevel_epic("PROJ-3480")
+
+    assert sm.get_story("PROJ-3485")["depends_on"] == ["PROJ-3481", "PROJ-3482", "PROJ-3483", "PROJ-3484"]
+    assert sm.get_story("PROJ-3722")["depends_on"] == ["PROJ-3481", "PROJ-3482", "PROJ-3483", "PROJ-3484"]
+    assert sm.get_story("PROJ-3481")["depends_on"] == []
+
+
 def test_resync_picks_up_new_ticket_without_resetting_existing_story(project_id):
     _FakeJiraService.tree_by_root["ENG-1"] = [_ticket("ENG-1"), _ticket("ENG-2")]
     epic_sync.sync_epic_from_jira("ENG-1", project_id=project_id)

@@ -23,12 +23,18 @@ def _utcnow() -> datetime:
 
 # Epic-level phase — trimmed to what a single-tenant local reconciler needs
 # to branch on.
-EpicPhase = str  # "planning" | "awaiting_plan_approval" | "implementing" | "awaiting_pr_review" | "complete" | "failed"
+# "complete": every story merged and the epic's pull request is not open yet
+# (or GitHub is not configured); "pr_open": the epic's one pull request is
+# open; "merged": a human merged it.
+EpicPhase = str  # "planning" | "implementing" | "complete" | "pr_open" | "merged" | "failed"
 
 # Coarse per-story status the reconciler reasons about. Fine-grained progress
 # within a dispatched story (planning/developing/verifying/qa — a
 # RunStatus) lives inside that story's LangGraph checkpoint, not here.
-StoryStatus = str  # "pending" | "ready" | "dispatched" | "awaiting_pr_review" | "pr_open" | "merged" | "done" | "failed" | "skipped"
+# "ready_to_merge": the run passed and its work is committed on the story
+# branch; "merging": the merge queue is landing it on the epic branch
+# (forge/daemon/main.py); "merged": it is on the epic branch.
+StoryStatus = str  # "pending" | "awaiting_plan_approval" | "dispatched" | "ready_to_merge" | "merging" | "merged" | "done" | "failed" | "skipped"
 
 # What kind of work a story represents, which decides how it is routed
 # through the graph: "dev" runs planner -> dev -> verifier, "qa" skips all
@@ -125,6 +131,15 @@ class Story(Base):
     project_repo_id: Mapped[int | None] = mapped_column(ForeignKey("project_repos.id"), nullable=True)
 
     wave: Mapped[int] = mapped_column(Integer, nullable=False)  # index into epic.levels
+
+    # The top-level stories this one must wait for — list[story_key], from
+    # the source's "blocks"/"is blocked by" links (a QA story waits for every
+    # dev story). What the reconciler schedules on: a story starts once each
+    # of these has merged, regardless of the rest of the epic. See
+    # forge/services/epic_sync.py's compute_dependencies. NULL only on a row
+    # that predates the column and has not been re-synced; readers fall back
+    # to "every story in an earlier level" (epic_sync.stored_dependencies).
+    depends_on: Mapped[list | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
 
     # "dev" | "qa" — see StoryKind above. `kind_reason` records which
@@ -179,9 +194,9 @@ class Story(Base):
     # coverage-threshold miss (tests passed; coverage percentage below the
     # repo's bar) — see forge/tools/vue_tools.py's coverage-only-failure
     # detection. Distinct from a real implementation failure: the story
-    # still completes and reaches the PR-open gate, but that gate is forced
-    # on regardless of require_pr_open_approval (forge/orchestration/
-    # reconciler.py) so a human looks before a not-fully-verified PR opens.
+    # still completes and merges; the gap is called out in the epic's pull
+    # request (forge/daemon/main.py) so the reviewer knows which story did
+    # not fully verify.
     coverage_gap: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     coverage_gap_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -205,6 +220,11 @@ class Story(Base):
     # retry means only re-attempting the merge). Cleared on every other
     # status transition, same convention as parked_reason.
     failure_stage: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
+    # How many times landing this story on the epic branch has sent it back to
+    # dev (a conflict, or checks failing on the combined code) — see
+    # forge/daemon/main.py's merge queue. Capped there; reset by a retry.
+    merge_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     # Where this ticket came from — see alembic revision 20260920_0020.
     # `external_source` is NULL for a ticket created natively on the board.
@@ -235,6 +255,39 @@ class Story(Base):
     epic: Mapped[Epic] = relationship(back_populates="stories")
     # One per repo the story wrote — see PullRequest's docstring.
     pull_requests: Mapped[list["PullRequest"]] = relationship(back_populates="story", cascade="all, delete-orphan")
+
+
+class EpicPullRequest(Base):
+    """The epic's pull request — the only one forge opens, per repo the epic's
+    stories wrote: every story merges into the epic branch locally
+    (forge/orchestration/integration.py), and once they all have, the epic
+    branch is pushed and proposed for the default branch (forge/daemon/
+    main.py's _open_epic_pull_request). A human reviews and merges it.
+
+    `number`/`url` are NULL while it could not be opened yet — `error` then
+    says why (a push or API failure), and the next poll tries again.
+    `ci_status` is GitHub's combined status for its head ("pending" |
+    "success" | "failure"), refreshed while it is open.
+    """
+
+    __tablename__ = "epic_pull_requests"
+    __table_args__ = (UniqueConstraint("epic_key", "repo_label", name="uq_epic_pull_requests_epic_repo"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    epic_key: Mapped[str] = mapped_column(ForeignKey("epics.jira_key"), nullable=False, index=True)
+    repo_label: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    repo_path: Mapped[str] = mapped_column(String(1024), default="", nullable=False)
+    branch: Mapped[str] = mapped_column(String(256), default="", nullable=False)
+    number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    state: Mapped[str] = mapped_column(String(32), default="open", nullable=False)  # "open" | "merged" | "closed"
+    ci_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
 
 
 class PullRequest(Base):

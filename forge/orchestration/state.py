@@ -101,6 +101,11 @@ class FeatureRunState(TypedDict, total=False):
     gate_attempts: int
     max_gate_attempts: int
     gate_feedback: str | None
+    # Paths dev may write beyond the plan's, set when the merge queue sends a
+    # finished story back to land it on the epic branch (forge/daemon/main.py's
+    # _send_back_to_dev): the files a conflict or the combined-code check
+    # involve, which the story's own plan may not name.
+    integration_paths: list[str]
     error: str | None
     approved: bool
     rejected: bool

@@ -93,11 +93,11 @@ def tickets(git_repo: str, tmp_path: Path, project_id: int):
 
 async def _drive_to_merge(t: dict) -> None:
     sm = t["sm"]
-    await poll_once(sm)                          # dispatch -> plan approval gate
+    await poll_once(sm, wait=True)                          # dispatch -> plan approval gate
     for _ in range(3):                           # plan, PR open, PR review
         for key in ("ENG-2", "ENG-10"):
             sm.set_story_gate_approved(key)
-        await poll_once(sm)
+        await poll_once(sm, wait=True)
     assert {sm.get_story(k)["status"] for k in ("ENG-2", "ENG-10")} == {"merged"}
 
     # Traces the fake agents never write.

@@ -31,7 +31,7 @@ def test_list_epics_includes_stories_and_pr_state(project_id):
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2"]])
     sm.create_story("ENG-2", epic_key="ENG-1", wave=0, summary="Add a widget")
-    sm.set_story_status("ENG-2", "awaiting_pr_review")
+    sm.set_story_status("ENG-2", "ready_to_merge")
     sm.upsert_pull_request("ENG-2", number=7, url="https://github.com/acme/widgets/pull/7", state="open")
 
     with _client() as client:
@@ -41,7 +41,7 @@ def test_list_epics_includes_stories_and_pr_state(project_id):
         assert len(epics[0]["stories"]) == 1
         story = epics[0]["stories"][0]
         assert story["jira_key"] == "ENG-2"
-        assert story["status"] == "awaiting_pr_review"
+        assert story["status"] == "ready_to_merge"
         # repo_label is "" for a story that wrote only its default repo.
         assert story["pull_request"] == {
             "story_key": "ENG-2", "repo_label": "", "number": 7,
@@ -141,7 +141,7 @@ def test_epic_phase_is_read_off_its_stories(project_id):
     with _client() as client:
         assert client.get("/api/epics/ENG-1").json()["phase"] == "planning"
 
-        sm.set_story_status("ENG-2", "awaiting_pr_open", parked_reason="pr_open_gate")
+        sm.set_story_status("ENG-2", "ready_to_merge")
         assert client.get("/api/epics/ENG-1").json()["phase"] == "implementing"
         assert [e["phase"] for e in client.get("/api/epics").json()] == ["implementing"]
         assert [e["phase"] for e in client.get(f"/api/projects/{project_id}/epics").json()] == ["implementing"]

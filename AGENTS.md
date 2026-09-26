@@ -9,9 +9,11 @@ this document is the map of where those contracts live.
 **code_forge** is a local, single-tenant JIRA-epic-to-PR platform. A
 deterministic reconciler decides what to do next; a LangGraph loop runs
 planner → dev → verifier (or epic QA) per story in an isolated git
-worktree; the daemon opens GitHub PRs, waits for CI, and merges into a
-shared epic integration branch. Human gates sit at plan review, PR open,
-and PR review by default.
+worktree, with independent stories in parallel. Each finished story is
+verified and merged into the epic branch **locally**; once every story has
+merged, the epic opens **one** GitHub pull request, which a human reviews
+and merges. The only per-story human gate is plan review (and the
+planner's clarification questions).
 
 Designed for a laptop: `docker compose up`, one process, Postgres-backed
 state, no Kubernetes, no multi-tenancy.
@@ -66,8 +68,9 @@ Settings UI ──HTTP──► FastAPI (forge/app.py)
                                                 │           │                          ^_________|  (gate fail)  |
                                                 │           │                          ^______________________|  (review fail)
                                                 │           └── kind=qa:  epic QA → END
-                                                ├── ParkForGate
-                                                └── MergeIntegrationBranch / PR + CI
+                                                ├── ParkForGate (plan approval)
+                                                ├── MergeIntoEpic → merge queue: update from epic → gate → fast-forward
+                                                └── (all merged) → epic PR: push epic branch, open one PR
 
 Agent activity flows the other way, same process:
 
@@ -125,12 +128,13 @@ the task rather than configured ahead of it.
   by label and runs `compare_to_plan` in each worktree — a TypeScript UI
   and a Python API have different analyzers, and a planned API file does
   not exist in the UI worktree. Reports are merged with paths re-prefixed.
-- **Commit, PR, CI and merge are per repo.** One `PullRequest` per
-  (story, repo); the CI gate is the *conjunction* of every PR, so the UI
-  half cannot merge while the API half is red. The integration branch NAME
-  stays per epic, giving a same-named branch in each repo, which is what
-  keeps a cross-repo epic reviewable as one unit; epic QA diffs all of
-  them.
+- **Commit and merge are per repo.** A story's merge verifies every repo
+  it wrote before fast-forwarding any of them. The epic branch NAME stays
+  per epic, giving a same-named branch in each repo — and its own
+  integration worktree in each (`integration_worktree_path`; the first repo
+  keeps `_integration-<epic>`), which is what keeps a cross-repo epic
+  reviewable as one unit; epic QA diffs all of them. The epic opens one
+  pull request per repo it wrote (`epic_pull_requests`).
 - Plan scope still authorises every write. A writable repo is not a
   free-for-all: the path must be in the plan, prefix included.
 - A single-repo project is byte-identical to before — no prefixes, no note
@@ -138,9 +142,10 @@ the task rather than configured ahead of it.
   `TOOL_SCHEMAS` object rather than a patched copy.
 
 **The trade-off, stated plainly:** a story spanning two repos produces two
-branches and two pull requests, and git has no transaction across them, so
-it can land in one and fail in the other. Forge makes that visible (every
-PR must be green before the merge step) rather than pretending otherwise.
+branches, and git has no transaction across them, so it can land in one and
+fail in the other. Forge makes that unlikely (every repo is verified before
+any is fast-forwarded) and visible (a failed fast-forward fails the story's
+merge) rather than pretending otherwise.
 
 Migrations: `20260919_0018_story_project_repo.py`,
 `20260919_0019_multi_repo_stories.py`.
@@ -323,12 +328,26 @@ stories and sub-tasks.
 - Migrations: `alembic/versions/20260817_0007_story_kind.py`,
   `20260817_0008_story_parent.py`.
 
-### Levels (waves)
+### Dependencies (and levels, for display)
 
-Topological sort on JIRA blocks/is-blocked-by among **dev** stories; QA
-stories are forced to the final level. Same-level stories are ready
-together; a level advances when all members are terminal
-(`merged` / `done` / `skipped`).
+`stories.depends_on` holds the stories each one waits for, from the
+source's blocks / is-blocked-by links among **dev** stories
+(`epic_sync.compute_dependencies`, rewritten on every sync so a link added
+later still counts); every QA story depends on every dev story. A cycle is
+broken deterministically: its members run one after another in key order.
+**The reconciler schedules on these:** a story is ready as soon as each of
+its dependencies is `merged` / `done` / `skipped` — independent stories run
+in parallel, and a story waits only for its own blockers. A failure stops
+only the stories that depend on it (directly or transitively); the epic is
+`failed` only once nothing left can make progress. `Epic.levels` / `wave`
+are derived from the same graph purely to group rows in the UI. A row
+synced before `depends_on` existed falls back to "every story in an earlier
+level" (`epic_sync.stored_dependencies`), which is the old level order.
+
+The planner of each story also sees its epic: the epic's text and every
+sibling story with its state (`_epic_context_for_brief` in
+`daemon/main.py`), so it neither guesses the epic's vocabulary nor plans a
+sibling's work, and builds on the ones already merged.
 
 ## Agent roles
 
@@ -481,6 +500,10 @@ state, not a bespoke table.
     `failed`. Pass → `verifier`, which reuses the gate report
     (`tier1_gate`) instead of re-running the toolchain. Review fail →
     `dev` (verifier iteration budget, separate from the gate's).
+  - A run that ended `completed` can be **re-entered at `dev`** by the merge
+    queue: `graph.aupdate_state(..., as_node="gate")` with
+    `status="developing"`, a `gate_feedback` brief and `integration_paths`,
+    then an ordinary resume continues dev → gate → verifier → END.
   - `verifier` and `qa` catch `services/generation.py`'s `GenerationError`
     (provider call failed, or the reply carried no JSON object) and return
     `status="failed"`, for the same reason `dev` catches `DevLoopError`:
@@ -516,25 +539,52 @@ own analyze, test, verify, safe command prefixes, and prompt conventions.
 
 - `forge/orchestration/reconciler.py` is a **pure** function: snapshots in,
   `Intent` list out. No DB, no LLM, no network.
-- Daemon (`forge/daemon/main.py`) applies intents. Phase 1 dispatches
-  stories **sequentially** per poll even though the reconciler can emit a
-  ready set (parallelization is future work).
+- Daemon (`forge/daemon/main.py`) applies intents. Runs and merges start as
+  **background tasks** (`_launch`), up to `max_parallel_stories` (default 3)
+  across every epic, and `poll_once` returns without waiting — a story that
+  becomes ready when another merges starts on the next poll. A story is
+  never in two tasks at once (the run registry, `claim_run`, covers merges
+  too). Shutdown cancels them (`cancel_background_work`); each unwinds its
+  story's status. Tests pass `poll_once(sm, wait=True)`.
+- **Merge queue** (`_merge_story_into_epic`, one story at a time per epic;
+  git side in `orchestration/integration.py`): a `ready_to_merge` story is
+  (1) brought up to date with the epic branch (`update_story_from_epic`),
+  (2) re-checked with the Tier 1 gate when anything new came in, and (3)
+  fast-forwarded into it (`--ff-only`, so the epic branch only ever holds
+  verified code). A conflict is left in the story's worktree and the story
+  is sent back to dev with a brief naming the files and the stories that
+  landed meanwhile (`_send_back_to_dev`: the finished thread is re-entered
+  as if the gate had failed); a combined-code check failure the same way.
+  Those files are added to dev's write scope for that pass
+  (`integration_paths`). `stories.merge_attempts` caps it at
+  `_MAX_MERGE_ATTEMPTS`; then `failed` / `failure_stage="merge"`, whose
+  Retry re-attempts only the landing.
+- **The epic's pull request** (`_finish_epic`): once every story is
+  merged/done/skipped, the epic branch is pushed and one PR opened into the
+  default branch per repo with changes (`epic_pull_requests`); its body
+  lists each story, coverage gaps, already-satisfied declarations and the
+  planner's clarification decisions. Phase `pr_open` is still polled —
+  CI status and state are refreshed every cycle, in manual-run projects
+  too — until a human merges it (`merged`) or closes it (`complete`).
+  Without GitHub configured, or with nothing to propose, the epic ends
+  `complete` with its branch ready locally. Story branches are never
+  pushed.
 - Manual epic gate (`epics.manual_gate`) parks the whole epic independently
-  of plan/PR gates.
+  of the plan gate.
 - The ticket-filter sweep (`forge/daemon/ticket_sync.py`) is a **second,
   slower loop** in the same process, deliberately not folded into
   `poll_once`: it hits someone else's API for a set that changes a few
   times a day, and a JIRA outage must not stall stories mid-run. Each
   project's sweep runs in `asyncio.to_thread` (blocking HTTP + sync
   SQLAlchemy) and one project's failure never ends the loop.
-- Best-effort external side effects (JIRA QA comment, GitHub PR open/merge):
-  log and continue; do not fail the run for those alone.
+- Best-effort external side effects (JIRA QA comment, the epic's PR): log
+  and continue — a failed epic PR push or API call is recorded on its
+  `epic_pull_requests` row and retried next poll; neither fails a run.
 - `stories.coverage_gap` (set when the verifier's only blocker was a
   coverage-threshold miss, not a real failure — see
-  `forge/tools/vue_tools.py`'s coverage-only-failure detection) forces the
-  pr_open_gate on regardless of `require_pr_open_approval`: a story that
-  didn't fully verify always needs a human before its PR opens, even on a
-  project that has that gate turned off.
+  `forge/tools/vue_tools.py`'s coverage-only-failure detection) no longer
+  stops a story: it merges, and the gap is called out in the epic's pull
+  request.
 
 ## Spend caps
 
@@ -736,7 +786,6 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
   cheap **codebase skeleton** — every source file's path and top-level
   declarations, `tools/codebase_skeleton.py` — into the planner brief
   via `_build_story_brief`, but that is a filesystem walk, not retrieval)
-- Concurrent per-story LangGraph dispatch in the daemon
 - JIRA/GitHub MCP wired into agent roles (servers exist; daemon uses
   services)
 - A second `forge/llm/` provider adapter — `openai_compat.py` (OpenAI's

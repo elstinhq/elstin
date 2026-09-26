@@ -24,7 +24,7 @@ function StatChip({ value, label, dot = false }: { value: number; label: string;
   );
 }
 
-const GATED_STATUSES = new Set(["awaiting_plan_approval", "awaiting_pr_open", "awaiting_pr_review"]);
+const GATED_STATUSES = new Set(["awaiting_plan_approval"]);
 
 export function ProjectDetailPage({ projectId }: { projectId: number }) {
   const projectQuery = useProject(projectId);
@@ -85,7 +85,7 @@ export function ProjectDetailPage({ projectId }: { projectId: number }) {
               <span className="text-muted-foreground text-xs">Refreshes every 5s</span>
             </div>
             <p className="text-muted-foreground text-xs">
-              Approving a parked story clears whichever gate currently applies — the next daemon poll cycle (up to 15s) picks it up.
+              Approving a story's plan starts its development — the next daemon poll cycle (up to 15s) picks it up. Finished stories merge into the epic branch on their own; the epic opens one pull request once all have.
             </p>
             <EpicList
               projectId={projectId}

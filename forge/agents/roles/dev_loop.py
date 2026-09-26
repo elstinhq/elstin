@@ -55,6 +55,7 @@ from forge.agents.roles.dev import (
     _collect_required_fixes,
     _finalize_dev_changes,
     _format_skills_block,
+    _norm_rel,
     _plan_path_set,
     build_dev_system,
 )
@@ -155,6 +156,7 @@ async def run_dev(
     default_label: str = "",
     story_worktrees: dict[str, dict[str, str]] | None = None,
     gate_feedback: str | None = None,
+    integration_paths: list[str] | None = None,
     sdk_model: str | None = None,
     sdk_effort: str | None = None,
 ) -> dict[str, Any]:
@@ -165,6 +167,12 @@ async def run_dev(
     X, fix these" user message appended onto `prior_history`, so the model
     keeps every file it already read (and the prompt prefix stays cached)
     instead of re-deriving the task from a fresh FIX MODE brief.
+
+    integration_paths: files outside the plan this pass may also write — set
+    when the merge queue sends a finished story back to land it on the epic
+    branch (a conflict to resolve, or the combined code failing its checks;
+    forge/daemon/main.py's _send_back_to_dev). Plan scope stays the rule; this
+    names the exceptions that landing needs.
 
     prior_declared: the planned files an earlier pass declared already satisfy the
     ticket (dev_tools' declare_already_satisfied_tool), carried so a fix round
@@ -265,7 +273,7 @@ async def run_dev(
         if synced and run_id:
             append_activity(run_id, type="tool", phase="dev", title=f"Synced {len(synced)} file(s) from project", files=synced, meta={"tool": "sync_planned_files"})
 
-        allowed_paths = _plan_path_set(plan)
+        allowed_paths = _plan_path_set(plan) | {_norm_rel(p) for p in integration_paths or []}
 
         # --- which repos does this plan write? ---------------------------
         roots = dict(repo_roots or {default_label: worktree_path})

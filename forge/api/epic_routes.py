@@ -51,6 +51,8 @@ def _with_stories(sm: StateManager, epic: dict) -> dict:
     phase read off them (see display_epic_phase for why the stored one can't
     be shown as is)."""
     epic["stories"] = [_story_with_pr(sm, s["jira_key"]) for s in sm.list_stories_for_epic(epic["jira_key"])]
+    # The epic's own pull request, one per repo — the only one forge opens.
+    epic["pull_requests"] = sm.list_epic_pull_requests(epic["jira_key"])
     epic["phase"] = display_epic_phase(epic["phase"], (s.get("status") for s in epic["stories"]))
     return epic
 

@@ -228,7 +228,7 @@ def test_replan_applies_the_text_and_sends_a_planned_story_back_to_pending(proje
 
 
 def test_replan_is_refused_while_work_is_in_flight(project_id):
-    sm = _held(project_id, status="awaiting_pr_review")
+    sm = _held(project_id, status="ready_to_merge")
 
     with pytest.raises(ValueError, match="can be re-planned"):
         sm.resolve_external_change("ENG-2", "replan")
@@ -404,7 +404,7 @@ def test_the_route_resolves_a_held_change(project_id):
 
 
 def test_the_route_refuses_a_replan_with_work_in_flight_and_unknown_stories(project_id):
-    _held(project_id, status="awaiting_pr_review")
+    _held(project_id, status="ready_to_merge")
     with _client() as client:
         assert client.post("/api/stories/ENG-2/external-change", json={"action": "replan"}).status_code == 409
         assert client.post("/api/stories/NOPE-1/external-change", json={"action": "accept"}).status_code == 404

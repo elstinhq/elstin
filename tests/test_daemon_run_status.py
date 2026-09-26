@@ -234,7 +234,7 @@ async def test_a_cancel_that_lands_after_the_outcome_was_written_does_not_overri
     started, release = asyncio.Event(), asyncio.Event()
 
     async def run():
-        sm.set_story_status(STORY, "awaiting_pr_open")  # the run got as far as recording its result
+        sm.set_story_status(STORY, "ready_to_merge")  # the run got as far as recording its result
         started.set()
         await release.wait()
 
@@ -245,7 +245,7 @@ async def test_a_cancel_that_lands_after_the_outcome_was_written_does_not_overri
     await daemon.cancel_run(STORY)
     await task
 
-    assert sm.get_story(STORY)["status"] == "awaiting_pr_open"
+    assert sm.get_story(STORY)["status"] == "ready_to_merge"
 
 
 async def test_a_shutdown_is_still_a_restore_and_not_mistaken_for_a_person_cancelling(approved_story, monkeypatch):
@@ -289,7 +289,7 @@ async def test_the_poll_loop_survives_a_cancel_and_does_not_redispatch_the_story
     await poll  # poll_once completes normally
 
     assert sm.get_story(STORY)["status"] == "failed" and graph.invocations == 1
-    await daemon.poll_once(sm)  # a later cycle leaves the failed story alone
+    await daemon.poll_once(sm, wait=True)  # a later cycle leaves the failed story alone
     assert graph.invocations == 1 and sm.get_story(STORY)["status"] == "failed"
 
 

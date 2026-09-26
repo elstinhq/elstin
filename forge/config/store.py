@@ -78,8 +78,10 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         False, "true", "bool",
     ),
     ConfigField("require_plan_approval", "Require plan approval before dev starts", False, "true", "bool"),
-    ConfigField("require_pr_open_approval", "Require human approval before opening a PR", False, "true", "bool"),
-    ConfigField("require_pr_review", "Require human PR review before merge", False, "true", "bool"),
+    # Stories an epic's dependencies allow to run at once do run at once, up to
+    # this many across every epic (runs and merges both count — each one runs
+    # a build). The rest start on a later poll as slots free up.
+    ConfigField("max_parallel_stories", "Stories run in parallel at most (runs and merges, across all epics)", False, "3", "string"),
     ConfigField(
         "generate_project_guide",
         "Write an AGENTS.md-style guide (kept in forge, the repo is not touched) for a repo that has none, before its first plan",
@@ -138,8 +140,8 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
     ConfigField(
         "story_max_budget_usd",
         "Maximum total spend per story in USD across planning, investigation, development "
-        "and review (0 = unbounded). The outer bound the per-phase caps sit inside; only "
-        "counts models that have a row in forge/llm/pricing.py",
+        "and review (0 = unbounded). The outer bound the per-phase caps sit inside; "
+        "counts what the provider reports it billed, else the forge/llm/pricing.py estimate",
         False, "0", "string",
     ),
     ConfigField("verifier_qa_model", "Verifier/QA review model", False, "gpt-5.1-mini", "string"),
@@ -158,8 +160,6 @@ PROJECT_OVERRIDABLE_KEYS = frozenset({
     "jira_write_enabled",
     "auto_run_enabled",
     "require_plan_approval",
-    "require_pr_open_approval",
-    "require_pr_review",
     "generate_project_guide",
 })
 

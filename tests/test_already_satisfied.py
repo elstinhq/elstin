@@ -303,9 +303,9 @@ async def _drive(git_repo, tmp_path, project_id, monkeypatch, *, dev_result):
         return {"messages": [], "dev_history": [], "dev_build_runner": {}, **dev_result}
 
     monkeypatch.setattr(graph_module, "run_dev", dev)
-    await poll_once(sm)           # dispatch -> plan gate
+    await poll_once(sm, wait=True)           # dispatch -> plan gate
     sm.set_story_gate_approved("ENG-2")
-    await poll_once(sm)           # dev, gate, verifier
+    await poll_once(sm, wait=True)           # dev, gate, verifier
     return sm
 
 
@@ -326,7 +326,7 @@ async def test_a_run_that_changed_nothing_because_the_files_already_satisfy_the_
 
     from forge.daemon.main import poll_once
 
-    await poll_once(sm)
+    await poll_once(sm, wait=True)
     assert sm.get_epic("ENG-1")["phase"] == "complete"  # a finished story completes its epic
 
 
@@ -337,7 +337,7 @@ async def test_a_run_with_real_changes_still_goes_to_the_pr_gate_whatever_it_dec
         "file_changes": [{"path": "b.py"}], "truncated": False, "declared_unchanged": {"a.py": REASON},
     })
 
-    assert sm.get_story("ENG-2")["status"] == "awaiting_pr_open"
+    assert sm.get_story("ENG-2")["status"] == "ready_to_merge"
 
 
 @pytest.mark.asyncio
@@ -346,4 +346,4 @@ async def test_a_run_that_changed_nothing_and_declared_nothing_is_not_mistaken_f
     """Only an explicit, reasoned declaration ends a story with no changes."""
     sm = await _drive(git_repo, tmp_path, project_id, monkeypatch, dev_result={"file_changes": [], "truncated": False})
 
-    assert sm.get_story("ENG-2")["status"] == "awaiting_pr_open"
+    assert sm.get_story("ENG-2")["status"] == "ready_to_merge"

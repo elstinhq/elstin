@@ -3,9 +3,11 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from forge.db.engine import session_scope
-from forge.db.models import Epic, ProjectRepo
+from forge.db.models import Epic, EpicPullRequest, ProjectRepo
 
-_TERMINAL_EPIC_PHASES = frozenset({"complete", "failed"})
+# Epics the daemon no longer polls. "pr_open" is NOT terminal: the epic's
+# pull request is still refreshed (CI status, merged or closed) every poll.
+_TERMINAL_EPIC_PHASES = frozenset({"complete", "merged", "failed"})
 
 
 class _EpicMixin:
@@ -86,6 +88,32 @@ class _EpicMixin:
             if epic is not None:
                 epic.levels = levels
 
+    def list_epic_pull_requests(self, epic_key: str) -> list[dict]:
+        with session_scope() as session:
+            rows = session.execute(
+                select(EpicPullRequest).where(EpicPullRequest.epic_key == epic_key).order_by(EpicPullRequest.repo_label)
+            ).scalars().all()
+            return [_epic_pull_request_to_dict(row) for row in rows]
+
+    def upsert_epic_pull_request(self, epic_key: str, repo_label: str, **fields) -> None:
+        """Create or update the epic's pull request row for one repo. Only the
+        fields passed are written — `error=None` clears a recorded error."""
+        allowed = {"repo_path", "branch", "number", "url", "state", "ci_status", "error"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"unknown epic pull request field(s): {sorted(unknown)}")
+        with session_scope() as session:
+            row = session.execute(
+                select(EpicPullRequest).where(
+                    EpicPullRequest.epic_key == epic_key, EpicPullRequest.repo_label == repo_label,
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                row = EpicPullRequest(epic_key=epic_key, repo_label=repo_label)
+                session.add(row)
+            for name, value in fields.items():
+                setattr(row, name, value)
+
     def set_epic_phase(self, jira_key: str, phase: str) -> None:
         with session_scope() as session:
             epic = session.get(Epic, jira_key)
@@ -109,6 +137,19 @@ class _EpicMixin:
             epic = session.get(Epic, jira_key)
             if epic is not None:
                 epic.integration_branch = branch
+
+
+def _epic_pull_request_to_dict(row: EpicPullRequest) -> dict:
+    return {
+        "repo_label": row.repo_label,
+        "repo_path": row.repo_path,
+        "branch": row.branch,
+        "number": row.number,
+        "url": row.url,
+        "state": row.state,
+        "ci_status": row.ci_status,
+        "error": row.error,
+    }
 
 
 def _epic_to_dict(session, epic: Epic) -> dict:

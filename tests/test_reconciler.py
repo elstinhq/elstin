@@ -1,17 +1,20 @@
 """Pure unit tests, no database, no LLM — plan_orchestration is a plain
-function over in-memory fixtures. Mirrors epic_runner.py's level-by-level
-dispatch semantics: same-level stories run in parallel, a level only
-advances once every story in it is terminal, and any failure halts
-everything downstream."""
+function over in-memory fixtures. A story is ready once every story it
+depends on has merged; independent stories run in parallel; a failure stops
+only the stories that depend on it.
+
+`_snapshot` defaults each story's dependencies to "every story in an earlier
+level" — the fallback the daemon uses for a row synced before dependencies
+were stored — so a test that only passes levels reads the old way; tests
+about per-story scheduling pass `depends_on` explicitly."""
 from __future__ import annotations
 
 from forge.orchestration.reconciler import (
     Blocked,
     DispatchStory,
     EpicSnapshot,
-    MergeIntegrationBranch,
+    MergeIntoEpic,
     NoOp,
-    OpenPullRequest,
     OrchestratorContext,
     ParkForGate,
     ResumeStory,
@@ -28,11 +31,20 @@ def _snapshot(
     statuses: dict[str, str],
     thread_ids: dict[str, str] | None = None,
     manual_gate: bool = False,
-    coverage_gap_keys: frozenset[str] = frozenset(),
+    depends_on: dict[str, list[str]] | None = None,
 ) -> EpicSnapshot:
     thread_ids = thread_ids or {}
+    earlier: dict[str, list[str]] = {}
+    seen: list[str] = []
+    for level in levels:
+        for key in level:
+            earlier[key] = list(seen)
+        seen.extend(level)
+    deps = earlier if depends_on is None else depends_on
     stories = {
-        key: StorySnapshot(jira_key=key, status=status, thread_id=thread_ids.get(key), coverage_gap=key in coverage_gap_keys)
+        key: StorySnapshot(
+            jira_key=key, status=status, thread_id=thread_ids.get(key), depends_on=tuple(deps.get(key, [])),
+        )
         for key, status in statuses.items()
     }
     return EpicSnapshot(jira_key="ENG-1", levels=levels, stories=stories, manual_gate=manual_gate)
@@ -67,13 +79,70 @@ def test_single_pending_story_dispatches():
     assert intents == [DispatchStory("ENG-2")]
 
 
-def test_same_level_stories_dispatch_together_next_level_untouched():
+def test_stories_with_no_unmet_dependencies_dispatch_together_the_rest_wait():
     snapshot = _snapshot(
         [["ENG-2", "ENG-3"], ["ENG-4"]],
         {"ENG-2": "pending", "ENG-3": "pending", "ENG-4": "pending"},
     )
     intents = plan_orchestration(snapshot, OrchestratorContext())
-    assert set(intents) == {DispatchStory("ENG-2"), DispatchStory("ENG-3")}
+    assert intents == [
+        DispatchStory("ENG-2"), DispatchStory("ENG-3"), NoOp(story_key="ENG-4", reason="waiting_on_dependencies"),
+    ]
+
+
+def test_a_story_waits_only_for_its_own_dependencies_not_the_whole_earlier_level():
+    """The point of storing dependencies: ENG-4 needs ENG-2 only, so it
+    starts as soon as ENG-2 merges, while ENG-3 is still running."""
+    snapshot = _snapshot(
+        [["ENG-2", "ENG-3"], ["ENG-4"]],
+        {"ENG-2": "merged", "ENG-3": "dispatched", "ENG-4": "pending"},
+        thread_ids={"ENG-3": "ENG-3"},
+        depends_on={"ENG-4": ["ENG-2"]},
+    )
+    intents = plan_orchestration(snapshot, OrchestratorContext(live_thread_ids=frozenset({"ENG-3"})))
+    assert DispatchStory("ENG-4") in intents
+
+
+def test_a_failure_stops_only_its_dependents_and_independent_work_continues():
+    snapshot = _snapshot(
+        [["ENG-2", "ENG-3"], ["ENG-4", "ENG-5"]],
+        {"ENG-2": "failed", "ENG-3": "merged", "ENG-4": "pending", "ENG-5": "pending"},
+        depends_on={"ENG-4": ["ENG-2"], "ENG-5": ["ENG-3"]},
+    )
+    intents = plan_orchestration(snapshot, OrchestratorContext())
+    assert intents == [NoOp(story_key="ENG-4", reason="dependency_failed"), DispatchStory("ENG-5")]
+
+
+def test_a_failure_stops_dependents_transitively():
+    snapshot = _snapshot(
+        [["ENG-2"], ["ENG-3"], ["ENG-4"], ["ENG-5"]],
+        {"ENG-2": "failed", "ENG-3": "pending", "ENG-4": "pending", "ENG-5": "pending"},
+        depends_on={"ENG-3": ["ENG-2"], "ENG-4": ["ENG-3"], "ENG-5": []},
+    )
+    intents = plan_orchestration(snapshot, OrchestratorContext())
+    assert intents == [
+        NoOp(story_key="ENG-3", reason="dependency_failed"),
+        NoOp(story_key="ENG-4", reason="dependency_failed"),
+        DispatchStory("ENG-5"),
+    ]
+
+
+def test_the_epic_fails_only_once_nothing_can_make_progress():
+    running = _snapshot(
+        [["ENG-2", "ENG-3"]], {"ENG-2": "failed", "ENG-3": "dispatched"}, depends_on={},
+    )
+    stuck = _snapshot(
+        [["ENG-2", "ENG-3"]], {"ENG-2": "failed", "ENG-3": "merged"}, depends_on={},
+    )
+    assert all(i != NoOp(reason="epic_failed", story_key="ENG-2") for i in plan_orchestration(running, OrchestratorContext()))
+    assert epic_completion_status(running) is None
+    assert plan_orchestration(stuck, OrchestratorContext()) == [NoOp(reason="epic_failed", story_key="ENG-2")]
+    assert epic_completion_status(stuck) == "failed"
+
+
+def test_a_dependency_outside_the_epic_does_not_hold_a_story_back():
+    snapshot = _snapshot([["ENG-2"]], {"ENG-2": "pending"}, depends_on={"ENG-2": ["GONE-9"]})
+    assert plan_orchestration(snapshot, OrchestratorContext()) == [DispatchStory("ENG-2")]
 
 
 def test_plan_approval_gate_parks_when_unapproved():
@@ -108,49 +177,32 @@ def test_dispatched_story_without_live_thread_resumes():
     assert intents == [ResumeStory("ENG-2")]
 
 
-def test_pr_open_gate_parks_when_unapproved():
-    snapshot = _snapshot([["ENG-2"]], {"ENG-2": "awaiting_pr_open"})
-    intents = plan_orchestration(snapshot, OrchestratorContext(require_pr_open_approval=True))
-    assert intents == [ParkForGate("ENG-2", "pr_open_gate")]
+def test_a_finished_story_is_merged_into_the_epic_without_any_gate():
+    """No per-story pull request and no PR gates: a story that passed its
+    run is landed on the epic branch locally; the epic opens the one PR."""
+    snapshot = _snapshot([["ENG-2"]], {"ENG-2": "ready_to_merge"})
+    assert plan_orchestration(snapshot, OrchestratorContext()) == [MergeIntoEpic("ENG-2")]
 
 
-def test_pr_open_gate_opens_once_approved():
-    snapshot = _snapshot([["ENG-2"]], {"ENG-2": "awaiting_pr_open"})
-    ctx = OrchestratorContext(require_pr_open_approval=True, approved_story_keys=frozenset({"ENG-2"}))
-    intents = plan_orchestration(snapshot, ctx)
-    assert intents == [OpenPullRequest("ENG-2")]
+def test_a_merge_left_behind_by_a_crash_is_merged_again():
+    snapshot = _snapshot([["ENG-2"]], {"ENG-2": "merging"})
+    assert plan_orchestration(snapshot, OrchestratorContext()) == [MergeIntoEpic("ENG-2")]
 
 
-def test_pr_open_gate_off_opens_without_approval():
-    snapshot = _snapshot([["ENG-2"]], {"ENG-2": "awaiting_pr_open"})
-    intents = plan_orchestration(snapshot, OrchestratorContext(require_pr_open_approval=False))
-    assert intents == [OpenPullRequest("ENG-2")]
+def test_a_merge_in_flight_is_not_started_twice():
+    snapshot = _snapshot([["ENG-2"]], {"ENG-2": "merging"})
+    ctx = OrchestratorContext(live_thread_ids=frozenset({"ENG-2"}))
+    assert plan_orchestration(snapshot, ctx) == [NoOp(story_key="ENG-2", reason="already_merging")]
 
 
-def test_pr_open_gate_forced_on_for_coverage_gap_even_when_project_disabled_it():
-    """A coverage-gap story didn't fully verify — it must not silently ride
-    along on a gate the project turned off for the fully-verified case."""
-    snapshot = _snapshot([["ENG-2"]], {"ENG-2": "awaiting_pr_open"}, coverage_gap_keys=frozenset({"ENG-2"}))
-    intents = plan_orchestration(snapshot, OrchestratorContext(require_pr_open_approval=False))
-    assert intents == [ParkForGate("ENG-2", "pr_open_gate")]
-
-
-def test_pr_open_gate_coverage_gap_still_opens_once_approved():
-    snapshot = _snapshot([["ENG-2"]], {"ENG-2": "awaiting_pr_open"}, coverage_gap_keys=frozenset({"ENG-2"}))
-    ctx = OrchestratorContext(require_pr_open_approval=False, approved_story_keys=frozenset({"ENG-2"}))
-    intents = plan_orchestration(snapshot, ctx)
-    assert intents == [OpenPullRequest("ENG-2")]
-
-
-def test_pr_review_gate_parks_then_merges_once_approved():
-    snapshot = _snapshot([["ENG-2"]], {"ENG-2": "awaiting_pr_review"})
-
-    parked = plan_orchestration(snapshot, OrchestratorContext(require_pr_review=True))
-    assert parked == [ParkForGate("ENG-2", "pr_review_gate")]
-
-    approved_ctx = OrchestratorContext(require_pr_review=True, approved_story_keys=frozenset({"ENG-2"}))
-    merged = plan_orchestration(snapshot, approved_ctx)
-    assert merged == [MergeIntegrationBranch("ENG-2")]
+def test_a_dependent_starts_only_once_its_dependency_has_merged_not_when_it_finished():
+    """N1 done -> merged into the epic -> N2 starts from the epic branch."""
+    finished = _snapshot([["ENG-2"], ["ENG-3"]], {"ENG-2": "ready_to_merge", "ENG-3": "pending"})
+    merged = _snapshot([["ENG-2"], ["ENG-3"]], {"ENG-2": "merged", "ENG-3": "pending"})
+    assert plan_orchestration(finished, OrchestratorContext()) == [
+        MergeIntoEpic("ENG-2"), NoOp(story_key="ENG-3", reason="waiting_on_dependencies"),
+    ]
+    assert plan_orchestration(merged, OrchestratorContext()) == [DispatchStory("ENG-3")]
 
 
 def test_a_failed_story_halts_the_whole_epic():
@@ -212,12 +264,21 @@ def test_describe_story_action_blocks_when_no_levels():
     assert describe_story_action(snapshot, OrchestratorContext(), "ENG-2") == Blocked("ENG-2", "no_levels")
 
 
-def test_describe_story_action_blocks_a_story_in_an_unresolved_later_level():
+def test_describe_story_action_blocks_a_story_whose_dependencies_have_not_merged():
     snapshot = _snapshot(
         [["ENG-2"], ["ENG-3"]],
         {"ENG-2": "pending", "ENG-3": "pending"},
     )
-    assert describe_story_action(snapshot, OrchestratorContext(), "ENG-3") == Blocked("ENG-3", "earlier_level_unresolved")
+    assert describe_story_action(snapshot, OrchestratorContext(), "ENG-3") == Blocked("ENG-3", "waiting_on_dependencies")
+
+
+def test_describe_story_action_allows_a_later_level_story_with_no_dependencies():
+    snapshot = _snapshot(
+        [["ENG-2"], ["ENG-3"]],
+        {"ENG-2": "pending", "ENG-3": "pending"},
+        depends_on={},
+    )
+    assert describe_story_action(snapshot, OrchestratorContext(), "ENG-3") == DispatchStory("ENG-3")
 
 
 def test_describe_story_action_allows_the_earlier_story_in_the_same_open_level():
@@ -228,12 +289,21 @@ def test_describe_story_action_allows_the_earlier_story_in_the_same_open_level()
     assert describe_story_action(snapshot, OrchestratorContext(), "ENG-2") == DispatchStory("ENG-2")
 
 
-def test_describe_story_action_blocks_when_epic_halted_by_a_failure():
+def test_describe_story_action_blocks_a_story_whose_dependency_failed():
     snapshot = _snapshot(
-        [["ENG-2", "ENG-3"]],
-        {"ENG-2": "merged", "ENG-3": "failed"},
+        [["ENG-2", "ENG-3"], ["ENG-4"]],
+        {"ENG-2": "merged", "ENG-3": "failed", "ENG-4": "pending"},
     )
-    assert describe_story_action(snapshot, OrchestratorContext(), "ENG-2") == Blocked("ENG-2", "epic_halted")
+    assert describe_story_action(snapshot, OrchestratorContext(), "ENG-4") == Blocked("ENG-4", "dependency_failed")
+
+
+def test_describe_story_action_blocks_a_finished_or_failed_story_itself():
+    snapshot = _snapshot(
+        [["ENG-2", "ENG-3", "ENG-4"]],
+        {"ENG-2": "merged", "ENG-3": "failed", "ENG-4": "pending"},
+    )
+    assert describe_story_action(snapshot, OrchestratorContext(), "ENG-2") == Blocked("ENG-2", "story_finished")
+    assert describe_story_action(snapshot, OrchestratorContext(), "ENG-3") == Blocked("ENG-3", "story_failed")
 
 
 def test_describe_story_action_blocks_when_epic_already_resolved():

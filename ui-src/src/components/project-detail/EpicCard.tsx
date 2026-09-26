@@ -57,7 +57,11 @@ export function EpicCard({
     subtasksByParent.get(row.parent_key)!.push(row);
   }
 
+  const statusByKey = new Map(stories.map((s) => [s.jira_key, s.status as string]));
   const doneCount = stories.filter((s) => s.status === "merged" || s.status === "done").length;
+  // The epic's one pull request (per repo it wrote), opened once every story
+  // has merged into the epic branch.
+  const pullRequests = (epic.pull_requests || []).filter((pr) => pr.number || pr.error);
   const total = stories.length;
   const pct = total ? Math.round((doneCount / total) * 100) : 0;
 
@@ -99,6 +103,24 @@ export function EpicCard({
             />
           ) : null}
 
+          {pullRequests.map((pr) =>
+            pr.number ? (
+              <Button key={pr.repo_label || "default"} variant="outline" size="sm" className="shrink-0" asChild>
+                <a
+                  href={pr.url || "#"}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={pr.ci_status ? `CI: ${pr.ci_status}` : "The epic's pull request"}
+                >
+                  {pr.repo_label ? `${pr.repo_label} ` : ""}#{pr.number} ({pr.state}
+                  {pr.state === "open" && pr.ci_status ? `, CI ${pr.ci_status}` : ""})
+                </a>
+              </Button>
+            ) : (
+              <Tag key={pr.repo_label || "default"} label="PR not opened" appearance="destructive" title={pr.error || undefined} />
+            ),
+          )}
+
           {epic.manual_gate ? <Tag label="Paused" appearance="warning" /> : null}
           {epic.external_closed ? (
             <Tag label="closed in source" appearance="secondary" title="The source reports this epic closed, so forge put it on hold. Resume it to keep going." />
@@ -136,6 +158,7 @@ export function EpicCard({
                 projectId={projectId}
                 story={story}
                 subtasks={(subtasksByParent.get(story.jira_key) || []).sort(byWaveThenKey)}
+                statusByKey={statusByKey}
                 autoRunEnabled={autoRunEnabled}
                 expandedStories={expandedStories}
                 onToggleExpand={onToggleExpandStory}

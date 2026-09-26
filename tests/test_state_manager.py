@@ -154,23 +154,24 @@ def test_retry_story_run_failure_redispatches(project_id):
 
 
 def test_retry_story_merge_failure_reattempts_merge(project_id):
-    """failure_stage="merge" goes back to "awaiting_pr_review" with the gate
-    cleared, mirroring how a CI failure already parks a story rather than
-    discarding its work — the run itself already succeeded here."""
+    """failure_stage="merge" goes back to "ready_to_merge" with a fresh merge
+    budget — the run itself already succeeded, so its committed work is kept
+    and only the landing on the epic branch is tried again."""
     from forge.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id)
     sm.create_story("ENG-2", epic_key="ENG-1", wave=0)
-    sm.set_story_gate_approved("ENG-2", True)
     sm.set_story_status("ENG-2", "failed", failure_stage="merge")
+    sm.increment_story_merge_attempts("ENG-2")
+    sm.increment_story_merge_attempts("ENG-2")
 
     sm.retry_story("ENG-2")
 
     story = sm.get_story("ENG-2")
-    assert story["status"] == "awaiting_pr_review"
+    assert story["status"] == "ready_to_merge"
     assert story["failure_stage"] is None
-    assert story["gate_approved"] is False
+    assert story["merge_attempts"] == 0
     assert story["retry_count"] == 1
 
 

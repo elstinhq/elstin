@@ -361,7 +361,7 @@ async def test_a_dispatched_story_hands_its_planner_the_guide(git_repo, tmp_path
         return await original(**kwargs)
 
     monkeypatch.setattr(graph, "run_planner", spy)
-    await poll_once(sm)
+    await poll_once(sm, wait=True)
 
     assert seen["project_guide"]["found"] is True
     assert "generate:api" in seen["project_guide"]["content"]
