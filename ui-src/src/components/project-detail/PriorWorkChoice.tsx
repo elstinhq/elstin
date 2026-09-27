@@ -16,7 +16,8 @@ export function PriorWorkChoiceButton({ projectId, story }: { projectId: number;
   const [open, setOpen] = useState(false);
   const labels = needsChoice(story.prior_work);
   const label = labels[0];
-  if (story.status !== "pending" || label === undefined) return null;
+  // A ticket closed as done is picked for too: its branch is merged into the epic branch.
+  if ((story.status !== "pending" && story.status !== "skipped") || story.branch || label === undefined) return null;
   return (
     <>
       <Button

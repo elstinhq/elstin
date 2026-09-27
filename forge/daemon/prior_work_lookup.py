@@ -52,9 +52,13 @@ def look_up_prior_work(sm: StateManager, epic: dict, *, story_keys: list[str] | 
     if not repos:
         return []
     if story_keys is None:
+        # Tickets closed in the source too: "Done" is not "in the default
+        # branch", and a done ticket's branch is work the epic builds on
+        # (forge/daemon/main.py's _bring_done_work_into_epic).
         stories = [
             s for s in sm.list_stories_for_epic(epic_key)
-            if not s.get("parent_key") and s["status"] == "pending" and not s.get("branch") and lookup_due(s.get("prior_work"))
+            if not s.get("parent_key") and not s.get("branch") and lookup_due(s.get("prior_work"))
+            and (s["status"] == "pending" or (s["status"] == "skipped" and s.get("parked_reason") == "closed_externally"))
         ]
     else:
         stories = [
@@ -116,6 +120,8 @@ def look_up_prior_work(sm: StateManager, epic: dict, *, story_keys: list[str] | 
         picks = carry_picks(story.get("prior_work"), result["repos"])  # a "Look again" keeps what still applies
         if picks:
             result["picks"] = picks
+        if (story.get("prior_work") or {}).get("epic_merge"):
+            result["epic_merge"] = story["prior_work"]["epic_merge"]  # what already happened stays recorded
         sm.set_story_prior_work(story["jira_key"], result)
         _announce(story["jira_key"], result)
     if look_at_epic:

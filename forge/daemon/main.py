@@ -34,6 +34,7 @@ import asyncio
 import logging
 import os
 import threading
+from datetime import datetime, timezone
 
 from forge.config.store import get_config, get_int_config, resolve_bool_config
 from forge.db.engine import get_database_url
@@ -62,21 +63,22 @@ from forge.agents.roles.verifier import format_gate_feedback, run_deterministic_
 from forge.orchestration.state import initial_state
 from forge.daemon.prior_work_lookup import look_up_prior_work, planner_prior_work
 from forge.services.epic_sync import stored_dependencies
-from forge.services.prior_work import lookup_due, needs_choice, start_candidate
+from forge.services.prior_work import closed_as_done, lookup_due, needs_choice, start_candidate
 from forge.services.github_service import GitHubService, parse_github_remote, push_branch
 from forge.services.jira_service import issue_key_sort_key
 from forge.services.project_guide import project_guide_for_run
-from forge.services.run_activity import append_activity
+from forge.services.run_activity import append_activity, last_event_at
 from forge.services.ticket_source import get_ticket_source, ticket_source_configured
 from forge.services.usage import record_run_outcome
 from forge.state.manager import StateManager
 from forge.tools.codebase_skeleton import build_workspace_skeleton
 from forge.tools.git_tools import (
-    CODE_FORGE_CO_AUTHOR, GitMergeError, branch_exists, commit_all, get_branch_diff_summary,
+    CODE_FORGE_CO_AUTHOR, CODE_FORGE_EMAIL, CODE_FORGE_NAME, GitMergeError, branch_exists, commit_all,
+    get_branch_diff_summary,
 )
 from forge.tools.reference_folder import reference_copy_path, sync_reference_copy
 from forge.tools.workspace import REFERENCE_SIGIL, build_repo_roots
-from forge.tools.worktree import create_worktree, default_branch, resolve_base_ref, run_git
+from forge.tools.worktree import _repo_lock, create_worktree, default_branch, resolve_base_ref, run_git
 
 logger = logging.getLogger("forge.daemon")
 
@@ -372,6 +374,168 @@ def _commits_beyond_epic(sm: StateManager, story_key: str, epic: dict) -> int:
         count = run_git(path, "rev-list", "--count", f"{branch}..HEAD", check=False)
         total += int(count.stdout.strip() or 0) if count.returncode == 0 else 0
     return total
+
+
+# --- work from tickets closed as done, not yet in the default branch -------
+#
+# "Done" in the ticket's source is not "merged into the default branch": a
+# team closes a ticket when its work is reviewed, and the branch may still be
+# waiting to merge. That work is part of what the epic builds on, so it is
+# merged into the epic branch — otherwise every other story plans and builds
+# against a default branch that lacks it (the MKT2-846 case: two customer
+# search tickets Done, their branches unmerged, and the next story's planner
+# finding no customer search at all).
+
+
+def _bring_done_work_into_epic(sm: StateManager, epic: dict) -> dict[str, list[str]]:
+    """Merge into the epic branch the branch each ticket closed as done
+    continues (the prior-work lookup's `continue`, or a person's pick), in
+    every writable repo, where it is not there already. A ticket closed as
+    dropped (Removed, Won't do, …) is left out; a branch that conflicts is
+    not merged — the merge is undone and flagged for a person. Each result
+    is recorded on the ticket's prior_work["epic_merge"], so nothing is
+    retried until its branch moves. Returns what was newly merged or refused
+    this call: {"merged": [...], "conflicts": [...]}. Call it under the
+    epic's merge lock: it moves the epic branch."""
+    branch = epic.get("integration_branch")
+    if not branch or not epic.get("project_id"):
+        return {}
+    repos = sm.list_project_repos(epic["project_id"])
+    _default, all_roots = build_repo_roots(repos, epic.get("repo"))
+    writable = {repo["path"] for repo in repos if repo.get("kind", "repo") == "repo" and not repo.get("read_only")}
+    roots = {label: path for label, path in all_roots.items() if path in writable}
+    base = get_config("worktrees_base_dir") or "/data/repos"
+    closed = sorted(
+        (
+            s for s in sm.list_stories_for_epic(epic["jira_key"])
+            if not s.get("parent_key") and s["status"] == "skipped" and s.get("parked_reason") == "closed_externally"
+            and not s.get("branch") and s.get("prior_work") and not lookup_due(s["prior_work"])
+        ),
+        key=lambda s: (s.get("wave") or 0, issue_key_sort_key(s["jira_key"])),
+    )
+    merged: list[str] = []
+    refused: list[str] = []
+    for story in closed:
+        prior = story["prior_work"]
+        results = dict(prior.get("epic_merge") or {})
+        done = closed_as_done(story.get("external_status"))
+        changed = False
+        for label, finding in sorted((prior.get("repos") or {}).items()):
+            path = roots.get(label)
+            if path is None:
+                continue
+            previous = results.get(label) or {}
+            if not done:
+                if previous.get("result") != "not_done":
+                    results[label] = {"result": "not_done", "detail": f"closed as {story.get('external_status')} — not taken"}
+                    changed = True
+                continue
+            candidate = start_candidate(prior, label)
+            if candidate is None:
+                if label in needs_choice(prior) and previous.get("result") != "choose":
+                    results[label] = {"result": "choose", "detail": "several branches have diverged work — pick one"}
+                    changed = True
+                continue
+            ref = _prior_start_ref(path, candidate)
+            if not ref:
+                continue
+            tip = run_git(path, "rev-parse", f"{ref}^{{commit}}", check=False).stdout.strip()
+            if previous.get("tip") == tip and previous.get("result") in ("merged", "in_epic", "conflict"):
+                continue
+            outcome = _merge_into_epic_branch(path, epic, branch, ref, story["jira_key"], candidate["branch"], base)
+            # Full precision: compared with when plans started (_replan_behind_done_work).
+            results[label] = {**outcome, "tip": tip, "branch": candidate["branch"], "at": datetime.now(timezone.utc).isoformat()}
+            changed = True
+            if outcome["result"] == "merged":
+                merged.append(f"{story['jira_key']} ({label}: {candidate['branch']})")
+            elif outcome["result"] == "conflict":
+                refused.append(f"{story['jira_key']} ({label}: {outcome['detail']})")
+        if changed:
+            sm.set_story_prior_work(story["jira_key"], {**prior, "epic_merge": results})
+    if merged:
+        append_activity(
+            epic["jira_key"], type="status", phase="system", title="Merged work from tickets done in the source into the epic branch",
+            detail="\n".join(merged) + "\nTheir code was not in the default branch yet; every story now builds on it.",
+        )
+    if refused:
+        append_activity(
+            epic["jira_key"], type="status", phase="system", title="Work from a done ticket conflicts with the epic branch — not merged",
+            detail="\n".join(refused),
+        )
+    return {"merged": merged, "conflicts": refused}
+
+
+def _merge_into_epic_branch(
+    repo_path: str, epic: dict, epic_branch: str, ref: str, story_key: str, branch_name: str, worktrees_base_dir: str,
+) -> dict:
+    """{"result": "merged" | "in_epic" | "conflict", "detail"}. A conflict is
+    undone at once: the epic branch never holds a half-merge."""
+    worktree = existing_epic_worktree(worktrees_base_dir, epic["jira_key"], repo_path)
+    if worktree is None:
+        worktree = ensure_integration_worktree(repo_path, epic["jira_key"], worktrees_base_dir, branch=epic_branch)["worktree_path"]
+    with _repo_lock(repo_path):
+        if run_git(worktree, "merge-base", "--is-ancestor", ref, "HEAD", check=False).returncode == 0:
+            return {"result": "in_epic", "detail": None}
+        name, email = _commit_author() or (CODE_FORGE_NAME, CODE_FORGE_EMAIL)
+        message = (
+            f"Merge {branch_name} into {epic_branch}\n\n"
+            f"{story_key} is done in its source, but its work was not in the default branch yet."
+        )
+        proc = run_git(
+            worktree, "-c", f"user.name={name}", "-c", f"user.email={email}",
+            "merge", "--no-ff", "--no-edit", "-m", message, ref, check=False,
+        )
+        if proc.returncode == 0:
+            return {"result": "merged", "detail": None}
+        conflicted = run_git(worktree, "diff", "--name-only", "--diff-filter=U", check=False).stdout.split()
+        run_git(worktree, "merge", "--abort", check=False)
+        detail = f"conflicts in {', '.join(conflicted[:10])}" if conflicted else (proc.stderr.strip() or "merge failed")[:300]
+        return {"result": "conflict", "detail": detail}
+
+
+def _replan_behind_done_work(sm: StateManager, epic: dict) -> list[str]:
+    """Stories waiting for plan approval whose plan was made before done
+    work was merged into the epic branch go back to planning — with their
+    worktrees brought up to date first, so the new plan reads that code.
+    Stale is measured by time: a plan started before the latest such merge
+    was made without it (its planner read the epic branch, or a worktree
+    made from it). A story whose run is live is left alone; it is caught
+    here once it parks."""
+    latest = None
+    for story in sm.list_stories_for_epic(epic["jira_key"]):
+        for result in ((story.get("prior_work") or {}).get("epic_merge") or {}).values():
+            if result.get("result") == "merged" and result.get("at"):
+                at = datetime.fromisoformat(result["at"])
+                latest = at if latest is None or at > latest else latest
+    if latest is None:
+        return []
+    base = get_config("worktrees_base_dir") or "/data/repos"
+    live = live_run_keys()
+    replanned: list[str] = []
+    for story in sm.list_stories_for_epic(epic["jira_key"]):
+        key = story["jira_key"]
+        if story.get("parent_key") or story["status"] != "awaiting_plan_approval" or story.get("kind") == "qa" or key in live:
+            continue
+        started = last_event_at(key, phase="planner", title="Planning started")
+        if started is not None and started >= latest:
+            continue
+        for entry in sm.list_story_worktrees(key):
+            if not entry.get("worktree_path") or not os.path.isdir(entry["worktree_path"]):
+                continue
+            update = update_story_from_epic(
+                entry["repo_path"], epic["jira_key"], entry["worktree_path"], base, branch=epic["integration_branch"],
+            )
+            if update["conflicts"]:
+                _abort_merge_in_progress(entry["worktree_path"])
+        if sm.send_back_to_planning(key):
+            append_activity(
+                key, type="status", phase="system", title="Planning again: the epic branch gained work from done tickets",
+                detail="This plan was made before that work was in the epic branch. Its questions and answers are cleared.",
+            )
+            replanned.append(key)
+    if replanned:
+        logger.info("epic %s: re-planning %s — done work was merged into the epic branch", epic["jira_key"], replanned)
+    return replanned
 
 def _build_story_brief(
     sm: StateManager,
@@ -739,6 +903,11 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
         if not epic.get("integration_branch"):
             sm.set_integration_branch(epic["jira_key"], epic_branch)
             epic = {**epic, "integration_branch": epic_branch}
+        # Work from tickets done in the source but not in the default branch
+        # yet goes into the epic branch before this story branches from it.
+        await asyncio.to_thread(look_up_prior_work, sm, epic)
+        async with _epic_merge_lock(epic["jira_key"]):
+            await asyncio.to_thread(_bring_done_work_into_epic, sm, epic)
 
         # ...unless this ticket already has work on a branch of its own: then
         # its branch starts from that work, with the epic branch merged in,
@@ -1233,7 +1402,14 @@ def _epic_pr_body(sm: StateManager, epic: dict) -> str:
         elif story.get("parked_reason") == "already_satisfied":
             line += " — already satisfied by the existing code; no change"
         elif story["status"] == "skipped":
-            line += " — skipped"
+            brought = sorted({
+                result["branch"] for result in ((story.get("prior_work") or {}).get("epic_merge") or {}).values()
+                if result.get("result") in ("merged", "in_epic") and result.get("branch")
+            })
+            line += (
+                f" — done in the source; its branch {', '.join(f'`{b}`' for b in brought)} is merged into this one"
+                if brought else " — skipped"
+            )
         lines.append(line)
         for label, branch in _continued_branches(story.get("prior_work")):
             lines.append(f"  - continues `{branch}` ({label}): work that already existed for this ticket")
@@ -1519,6 +1695,17 @@ async def poll_once(sm: StateManager | None = None, *, wait: bool = False) -> No
                 epic = sm.get_epic(epic_key) or epic
         except Exception:  # noqa: BLE001 — first dispatch looks up again; one bad pass must not stall the epic
             logger.exception("epic %s: could not look up prior work", epic_key)
+        # Work from tickets done in the source but not in the default branch
+        # yet goes into the epic branch, and plans made without it are made
+        # again. Skipped for this pass while the epic's merge queue is busy —
+        # never waited on, a merge can take minutes.
+        if epic.get("integration_branch") and not _epic_merge_lock(epic_key).locked():
+            try:
+                async with _epic_merge_lock(epic_key):
+                    await asyncio.to_thread(_bring_done_work_into_epic, sm, epic)
+                await asyncio.to_thread(_replan_behind_done_work, sm, epic)
+            except Exception:  # noqa: BLE001 — retried next poll; never a reason to stall the epic
+                logger.exception("epic %s: could not bring in work from done tickets", epic_key)
         if not resolve_bool_config("auto_run_enabled", epic["project_id"]):
             # This project runs in manual mode — nothing here autopicks
             # ready work. Progress happens only via the /start route and

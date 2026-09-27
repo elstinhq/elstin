@@ -1,4 +1,4 @@
-import { continuedBranches, needsChoice, onlyInDefault } from "../../lib/priorWork";
+import { continuedBranches, doneWorkOutcome, needsChoice, onlyInDefault } from "../../lib/priorWork";
 import type { EpicPhase, Story, StoryStatus } from "../../types/api";
 import { Badge } from "../ui/badge";
 
@@ -171,6 +171,7 @@ export function WaitingOnTag({ story, statusByKey }: { story: Story; statusByKey
 // is never a surprise. A pending story still waiting for a branch pick shows
 // the Choose branch button instead (PriorWorkChoice.tsx).
 export function PriorWorkTag({ story }: { story: Story }) {
+  if (story.status === "skipped") return <DoneWorkTag story={story} />;
   const continued = continuedBranches(story.prior_work);
   const only = continued.length === 1 ? continued[0] : undefined;
   if (only) {
@@ -205,6 +206,26 @@ export function PriorWorkTag({ story }: { story: Story }) {
     );
   }
   return null;
+}
+
+// A ticket closed as done in its source is not run — but its branch may hold
+// work the default branch does not have yet, which forge merges into the
+// epic branch (forge/daemon/main.py's _bring_done_work_into_epic).
+function DoneWorkTag({ story }: { story: Story }) {
+  const results = Object.entries(story.prior_work?.epic_merge ?? {});
+  const lines = results.map(([label, r]) => `${label}: ${r.branch ?? ""} ${r.detail ? `— ${r.detail}` : ""}`.trim()).join("\n");
+  switch (doneWorkOutcome(story.prior_work)) {
+    case "merged":
+      return <Tag label="work merged into epic" appearance="info" title={`Done in the source; its branch was not in the default branch yet, so it was merged into the epic branch.\n${lines}`} />;
+    case "conflict":
+      return <Tag label="work conflicts" appearance="warning" title={`Done in the source, but its branch conflicts with the epic branch — not merged. A person has to resolve it.\n${lines}`} />;
+    case "choose":
+      return <Tag label="pick its branch" appearance="warning" title="Done in the source; several branches carry diverged work — pick the one to merge into the epic branch" />;
+    case "not_done":
+      return <Tag label="work not taken" appearance="secondary" title={`Closed as ${story.external_status ?? "dropped"}, so its branch is not merged into the epic branch.`} />;
+    default:
+      return null;
+  }
 }
 
 // Landing it on the epic branch sent it back to dev (a conflict with a story

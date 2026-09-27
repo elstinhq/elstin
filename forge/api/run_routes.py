@@ -160,7 +160,7 @@ def pick_prior_branch(story_key: str, body: PriorBranchPickRequest) -> dict:
     story = sm.get_story(story_key)
     if story is None:
         raise HTTPException(status_code=404, detail=f"No such story: {story_key}")
-    if story["status"] != "pending" or story.get("branch"):
+    if story["status"] not in ("pending", "skipped") or story.get("branch"):
         raise HTTPException(status_code=409, detail=f"{story_key} has already started; its branch exists")
     finding = ((story.get("prior_work") or {}).get("repos") or {}).get(body.repo_label)
     if not finding:

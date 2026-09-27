@@ -239,6 +239,18 @@ export interface PriorWork {
   picks?: Record<string, string>;
   errors?: Record<string, string>;
   stale?: boolean;
+  // A ticket closed as done: what became of its branch, per repo — merged
+  // into the epic branch, already there, conflicting, waiting for a pick,
+  // or not taken (closed as dropped).
+  epic_merge?: Record<string, EpicMergeResult>;
+}
+
+export interface EpicMergeResult {
+  result: "merged" | "in_epic" | "conflict" | "choose" | "not_done";
+  detail: string | null;
+  branch?: string;
+  tip?: string;
+  at?: string;
 }
 
 export interface Story {

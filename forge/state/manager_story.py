@@ -204,6 +204,23 @@ class _StoryMixin:
             if story is not None:
                 story.prior_work = dict(prior_work) if prior_work is not None else None
 
+    def send_back_to_planning(self, jira_key: str) -> bool:
+        """A plan waiting for approval that no longer fits the code — the
+        epic branch gained work it was made without — goes back to `pending`
+        to be planned again, its questions and answers with it. Only from
+        "awaiting_plan_approval": anything later has work to keep. False,
+        changing nothing, otherwise."""
+        with session_scope() as session:
+            story = session.get(Story, jira_key)
+            if story is None or story.status != "awaiting_plan_approval":
+                return False
+            story.status = "pending"
+            story.parked_reason = None
+            story.gate_approved = False
+            story.clarification_questions = None
+            story.clarification_answers = None
+            return True
+
     def pick_story_prior_branch(self, jira_key: str, repo_label: str, branch: str | None) -> bool:
         """A human's answer where several branches diverged: continue from
         `branch` in `repo_label`, or start fresh (None). False — nothing
@@ -211,7 +228,9 @@ class _StoryMixin:
         story has not started."""
         with session_scope() as session:
             story = session.get(Story, jira_key)
-            if story is None or story.status != "pending" or story.branch or not story.prior_work:
+            # A ticket closed as done is picked for too: its chosen branch is
+            # what gets merged into the epic branch.
+            if story is None or story.status not in ("pending", "skipped") or story.branch or not story.prior_work:
                 return False
             finding = (story.prior_work.get("repos") or {}).get(repo_label)
             if not finding:

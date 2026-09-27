@@ -4,7 +4,7 @@ import { Twisty } from "../shared/Twisty";
 import { RemoveEpicButton } from "./RemoveEpicButton";
 import { StoryRow } from "./StoryRow";
 import { useRefreshPriorWork, useSetEpicGate } from "../../hooks/useEpics";
-import { continuedBranches, lookupDue, needsChoice, onlyInDefault } from "../../lib/priorWork";
+import { continuedBranches, doneWorkOutcome, lookupDue, needsChoice, onlyInDefault } from "../../lib/priorWork";
 import { useToast } from "../../lib/toast";
 import type { Epic, ProjectRepo, Story } from "../../types/api";
 import { Button } from "../ui/button";
@@ -188,8 +188,14 @@ function PriorWorkSummary({ projectId, epic, stories }: { projectId: number; epi
   // Nothing is looked up until the project has a folder to look in.
   if (!epic.repo || (!lookups.length && !unstarted.length)) return null;
 
-  const continuing = stories.filter((s) => continuedBranches(s.prior_work).length).map((s) => displayKey(s));
-  const choosing = stories.filter((s) => s.status === "pending" && needsChoice(s.prior_work).length).map((s) => displayKey(s));
+  const continuing = stories
+    .filter((s) => s.status !== "skipped" && continuedBranches(s.prior_work).length)
+    .map((s) => displayKey(s));
+  const doneMerged = stories.filter((s) => s.status === "skipped" && doneWorkOutcome(s.prior_work) === "merged").map((s) => displayKey(s));
+  const doneConflicts = stories.filter((s) => s.status === "skipped" && doneWorkOutcome(s.prior_work) === "conflict").map((s) => displayKey(s));
+  const choosing = stories
+    .filter((s) => (s.status === "pending" || s.status === "skipped") && !s.branch && needsChoice(s.prior_work).length)
+    .map((s) => displayKey(s));
   const inMain = stories.filter((s) => onlyInDefault(s.prior_work)).map((s) => displayKey(s));
   const epicBranch = continuedBranches(epic.prior_work)[0]?.candidate.branch;
   const pendingLookup = unstarted.some((s) => lookupDue(s.prior_work));
@@ -197,6 +203,8 @@ function PriorWorkSummary({ projectId, epic, stories }: { projectId: number; epi
   const parts = [
     epicBranch ? `epic branch continues ${epicBranch}` : null,
     continuing.length ? `continuing existing work: ${continuing.join(", ")}` : null,
+    doneMerged.length ? `done tickets' work merged in: ${doneMerged.join(", ")}` : null,
+    doneConflicts.length ? `done work that conflicts: ${doneConflicts.join(", ")}` : null,
     choosing.length ? `pick a branch: ${choosing.join(", ")}` : null,
     inMain.length ? `already in main: ${inMain.join(", ")}` : null,
   ].filter(Boolean);

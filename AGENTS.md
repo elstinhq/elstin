@@ -308,6 +308,22 @@ Before any of an epic's branches exist, forge looks (git only, no model —
 - **Landing:** a story whose branch carries continued commits merges even
   when dev changes nothing (see below); the epic PR body names each
   continued branch.
+- **Tickets closed as done** are looked up too: "Done" in the source is not
+  "in the default branch" — a team closes a ticket when its work is
+  reviewed, and the branch may still wait to merge. Each done ticket's
+  `continue` branch (or pick) is merged into the epic branch
+  (`_bring_done_work_into_epic`, under the epic's merge lock; every poll
+  and at first dispatch, before any story branches), so every story plans
+  and builds on it. A ticket closed as dropped (`closed_as_done`: Removed,
+  Won't do, Cancelled, deleted…) is not taken; a branch that conflicts is
+  undone and flagged, never forced. The outcome is recorded per repo on
+  the ticket's `prior_work["epic_merge"]` (retried only when its branch
+  moves) and named in the epic PR body.
+- **Plans made before done work arrived are made again**
+  (`_replan_behind_done_work`): a story waiting for plan approval whose
+  planning started before the latest such merge has its worktrees updated
+  from the epic branch and goes back to `pending`
+  (`send_back_to_planning`, questions and answers cleared).
 
 ## Cancelling a run
 

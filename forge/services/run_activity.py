@@ -81,6 +81,19 @@ def append_activity(
     return event
 
 
+def last_event_at(run_id: str, *, phase: str, title: str):
+    """When the most recent event with this phase and title was written for
+    `run_id` (a timezone-aware datetime), or None. E.g. when a story's
+    planning last started ("planner", "Planning started")."""
+    with session_scope() as session:
+        return session.execute(
+            select(ActivityEvent.created_at)
+            .where(ActivityEvent.run_id == run_id, ActivityEvent.phase == phase, ActivityEvent.title == title)
+            .order_by(ActivityEvent.id.desc())
+            .limit(1)
+        ).scalars().first()
+
+
 def list_activity(run_id: str, *, limit: int | None = None, since_id: int = 0) -> list[dict[str, Any]]:
     """Chronological (oldest first) — matches the shape the ring buffer used
     to return. `limit` (when given) keeps the most recent N events, so a

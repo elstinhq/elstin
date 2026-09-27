@@ -308,6 +308,21 @@ def carry_picks(previous: dict | None, repos: dict[str, dict]) -> dict[str, str]
     return kept
 
 
+# A ticket closed as one of these was dropped, not finished: whatever its
+# branch holds is not work the epic builds on. Status names are all the
+# source gives forge (forge/services/external_sync.py), so this reads them.
+_DROPPED_STATUS_RE = re.compile(
+    r"remov|won'?t|wont|cancel|reject|duplicat|invalid|obsolete|declin|abandon|not needed|deleted|gone",
+    re.IGNORECASE,
+)
+
+
+def closed_as_done(status_text: str | None) -> bool:
+    """Whether a ticket closed in its source was finished (Done, Closed,
+    Resolved, …) rather than dropped (Removed, Won't do, Cancelled, …)."""
+    return bool((status_text or "").strip()) and not _DROPPED_STATUS_RE.search(status_text or "")
+
+
 def needs_choice(prior_work: dict | None) -> list[str]:
     """Repo labels where a human still has to pick a branch."""
     if not prior_work:

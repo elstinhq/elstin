@@ -38,6 +38,16 @@ export function continuedBranches(prior: PriorWork | null | undefined): { label:
     });
 }
 
+// A done ticket's branches, by what became of them in the epic branch.
+export function doneWorkOutcome(prior: PriorWork | null | undefined): "merged" | "conflict" | "choose" | "not_done" | null {
+  const results = Object.values(prior?.epic_merge ?? {});
+  if (!results.length) return null;
+  if (results.some((r) => r.result === "conflict")) return "conflict";
+  if (results.some((r) => r.result === "choose")) return "choose";
+  if (results.some((r) => r.result === "merged" || r.result === "in_epic")) return "merged";
+  return "not_done";
+}
+
 // Found only work that is already in the default branch.
 export function onlyInDefault(prior: PriorWork | null | undefined): boolean {
   const findings = Object.values(prior?.repos ?? {});

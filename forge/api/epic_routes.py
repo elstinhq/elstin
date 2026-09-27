@@ -174,8 +174,12 @@ def refresh_prior_work(epic_key: str) -> dict:
         raise HTTPException(status_code=404, detail=f"No such epic: {epic_key}")
     for story in sm.list_stories_for_epic(epic_key):
         prior = story.get("prior_work")
-        if story["status"] == "pending" and not story.get("branch") and prior is not None:
-            sm.set_story_prior_work(story["jira_key"], {"stale": True, "picks": prior.get("picks") or {}})
+        closed = story["status"] == "skipped" and story.get("parked_reason") == "closed_externally"
+        if (story["status"] == "pending" or closed) and not story.get("branch") and prior is not None:
+            sm.set_story_prior_work(story["jira_key"], {
+                "stale": True, "picks": prior.get("picks") or {},
+                **({"epic_merge": prior["epic_merge"]} if prior.get("epic_merge") else {}),
+            })
     if not epic.get("integration_branch"):
         sm.set_epic_prior_work(epic_key, None)
     return get_epic(epic_key)
