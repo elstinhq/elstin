@@ -35,6 +35,14 @@ export function useSetEpicGate(projectId: number) {
   });
 }
 
+export function useRefreshPriorWork(projectId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (epicKey: string) => api.refreshPriorWork(epicKey),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) }),
+  });
+}
+
 export function useRemoveEpic(projectId: number) {
   const queryClient = useQueryClient();
   return useMutation({

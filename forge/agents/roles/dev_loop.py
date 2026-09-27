@@ -153,6 +153,8 @@ async def run_dev(
     prior_progress: list[dict[str, str]] | None = None,
     prior_declared: dict[str, str] | None = None,
     repo_roots: dict[str, str] | None = None,
+    read_roots: dict[str, str] | None = None,
+    story_base_refs: dict[str, str] | None = None,
     default_label: str = "",
     story_worktrees: dict[str, dict[str, str]] | None = None,
     gate_feedback: str | None = None,
@@ -190,7 +192,13 @@ async def run_dev(
     approved plan, not from either of those — a prefixed path in
     files_to_create/files_to_modify names its repo, and a worktree is
     created here for any such repo that does not have one yet. That is why
-    the set can be one repo or several and is discovered per task."""
+    the set can be one repo or several and is discovered per task.
+
+    read_roots / story_base_refs: where a repo this story does not write is
+    read (the epic branch's worktree there, not the clone's stale checkout),
+    and what a worktree created here for a newly named repo branches from
+    (the epic branch in that repo, so it starts with the stories already
+    merged there). Both from the daemon; see FeatureRunState."""
     continuing = bool(prior_history)
     resolved_model = sdk_model or get_config("dev_sdk_model")
     logger.info("Dev starting worktree=%s model=%s resume=%s", worktree_path, resolved_model, continuing)
@@ -312,6 +320,7 @@ async def run_dev(
                 # and without the ticket's type) would give the same story a
                 # different branch per repo.
                 branch=story_branch or None,
+                base_ref=(story_base_refs or {}).get(label),
             )
             write_roots[label] = wt["worktree_path"]
             created[label] = {"repo_path": repo_path, "worktree_path": wt["worktree_path"], "branch": wt["branch"]}
@@ -325,8 +334,9 @@ async def run_dev(
         write_roots.setdefault(default_label, worktree_path)
 
         # Readable everywhere: a repo with a worktree is read there (so dev
-        # sees what it just wrote), any other repo at its own checkout.
-        read_roots = {**roots, **existing, **write_roots}
+        # sees what it just wrote), any other repo at the epic branch's
+        # worktree the daemon supplied, else at its own checkout.
+        read_roots = {**roots, **(read_roots or {}), **existing, **write_roots}
 
         # Analyze/test targets are classified inside the repo that owns
         # them — a TypeScript UI and a Python API have different profiles,

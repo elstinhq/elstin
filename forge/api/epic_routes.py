@@ -1,7 +1,9 @@
 """Epic/story views for the dashboard, plus the JIRA-sync endpoint that
 registers an epic and its child tickets under a project so the daemon has
 something to poll, the per-epic prose refresh (summary/description only),
-and the folder-assignment endpoint. A new epic gets a default repo
+the folder-assignment endpoint, and "look again" for prior work (branches
+that already carry a ticket's work — forge/services/prior_work.py). A new
+epic gets a default repo
 assigned automatically (forge/services/epic_sync.py, forge/daemon/main.py's
 poll_once backfills any that still slip through) — the endpoint below only
 exists for a human override, never a required setup step."""
@@ -156,6 +158,27 @@ async def remove_epic(epic_key: str) -> dict:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except TicketRemovalError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/{epic_key}/prior-work/refresh")
+def refresh_prior_work(epic_key: str) -> dict:
+    """Look again for work that already exists — e.g. after a branch was
+    pushed since the epic was added. Marks the lookup of every story that
+    has not started (and the epic's own, until its branch exists) for a
+    fresh one; the next daemon poll looks them up again, before any of them
+    is dispatched. A branch a person picked stays picked where it still
+    applies. A story already underway keeps the branch it started from."""
+    sm = StateManager()
+    epic = sm.get_epic(epic_key)
+    if epic is None:
+        raise HTTPException(status_code=404, detail=f"No such epic: {epic_key}")
+    for story in sm.list_stories_for_epic(epic_key):
+        prior = story.get("prior_work")
+        if story["status"] == "pending" and not story.get("branch") and prior is not None:
+            sm.set_story_prior_work(story["jira_key"], {"stale": True, "picks": prior.get("picks") or {}})
+    if not epic.get("integration_branch"):
+        sm.set_epic_prior_work(epic_key, None)
+    return get_epic(epic_key)
 
 
 @router.put("/{epic_key}/gate")

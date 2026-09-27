@@ -188,6 +188,52 @@ export interface StoryPlan {
   plan: Plan | null;
 }
 
+// A branch that already carried work for a ticket, found before forge made
+// its own branch (forge/services/prior_work.py).
+export interface PriorWorkCandidate {
+  branch: string;
+  ref: string;
+  tip: string;
+  ahead: number;
+  behind: number;
+  // Its changes are already in the default branch (squash merges included).
+  in_default: boolean;
+  commits: string[];
+  files: string[];
+  files_total: number;
+  last_author: string | null;
+  last_commit_at: string | null;
+  unpushed?: boolean;
+  diverged_from_origin?: boolean;
+  // Other tickets the same branch is named after.
+  shared_with?: string[];
+  pull_request?: { number: number; url: string; state: "open" | "merged" | "closed" };
+}
+
+// "continue": the ticket's branch starts from `chosen`; "choose": several
+// diverged, a person picks; "in_default": only already-merged work.
+export interface PriorWorkFinding {
+  verdict: "continue" | "choose" | "in_default" | "none";
+  default_branch: string;
+  base: string;
+  chosen: string | null;
+  candidates: PriorWorkCandidate[];
+  default_commits: string[];
+}
+
+// One lookup per ticket, keyed by repo label. `picks` is a person's answer
+// to a "choose" ("" = start fresh). Null until looked up; `stale` after
+// "Look again", until the next poll looks again (keeping picks that apply).
+export interface PriorWork {
+  looked_at?: string;
+  applicable?: boolean;
+  keys?: string[];
+  repos?: Record<string, PriorWorkFinding>;
+  picks?: Record<string, string>;
+  errors?: Record<string, string>;
+  stale?: boolean;
+}
+
 export interface Story {
   jira_key: string;
   epic_key: string;
@@ -198,6 +244,7 @@ export interface Story {
   // The stories this one waits for; null only for a row synced before
   // dependencies were stored.
   depends_on: string[] | null;
+  prior_work: PriorWork | null;
   status: StoryStatus;
   kind: StoryKind;
   kind_reason: string | null;
@@ -280,6 +327,7 @@ export interface Epic {
   phase: EpicPhase;
   levels: EpicLevel[];
   integration_branch: string | null;
+  prior_work: PriorWork | null;
   pull_requests: EpicPullRequest[];
   plan_approved: boolean;
   manual_gate: boolean;

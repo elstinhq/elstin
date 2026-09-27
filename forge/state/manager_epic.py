@@ -132,6 +132,14 @@ class _EpicMixin:
             if epic is not None:
                 epic.manual_gate = manual_gate
 
+    def set_epic_prior_work(self, jira_key: str, prior_work: dict | None) -> None:
+        """The lookup for the epic's own key (forge/services/prior_work.py),
+        or None to look again."""
+        with session_scope() as session:
+            epic = session.get(Epic, jira_key)
+            if epic is not None:
+                epic.prior_work = dict(prior_work) if prior_work is not None else None
+
     def set_integration_branch(self, jira_key: str, branch: str) -> None:
         with session_scope() as session:
             epic = session.get(Epic, jira_key)
@@ -173,6 +181,7 @@ def _epic_to_dict(session, epic: Epic) -> dict:
         "phase": epic.phase,
         "levels": epic.levels or [],
         "integration_branch": epic.integration_branch,
+        "prior_work": epic.prior_work,
         "plan_approved": epic.plan_approved,
         "manual_gate": epic.manual_gate,
         "external_source": epic.external_source,

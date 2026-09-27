@@ -23,19 +23,20 @@ dev_loop.py's dev loop needs one), and forge/agents/loop.py's tool
 dispatch is itself the permission boundary — see that module's docstring
 — so there is no separate can_use_tool layer to maintain here anymore.
 
-**Not yet built**: the RAG context pre-seeding (`discover_context`) and
-prior-work branch discovery (`discover_prior_work`/`select_base_ref`). Both
-pull in a genuinely separate subsystem — Qdrant-backed embeddings, a
+Prior work — branches that already carry this ticket's work — is looked up
+by the daemon before the story's branch exists (forge/services/prior_work.py,
+forge/daemon/prior_work_lookup.py) and arrives here as `prior_work`; the
+worktree already starts from the branch it selected. With nothing found (or
+no caller supplying it) it is the empty shape, which the prompt omits.
+
+**Not yet built**: the RAG context pre-seeding (`discover_context`). It
+pulls in a genuinely separate subsystem — Qdrant-backed embeddings, a
 multi-provider LLM "analyst" for RAG summarization, and a SQLite
-ticket/run-index store — worth building as its own piece of work, not a
-side effect of getting the planner loop running. Their absence doesn't
-break planning: the agent still explores the codebase live via its own
-tools every run, just without a pre-computed head start (search terms,
-grep hits, manifest summaries) or awareness of prior branches for this
-ticket. `context_bundle`/`prior_work` below are the same empty shape
-`discover_context`/`discover_prior_work` would return when they find
-nothing, so nothing downstream needs to special-case "not built yet"
-versus "built but found nothing".
+ticket/run-index store — worth building as its own piece of work. Its
+absence doesn't break planning: the agent still explores the codebase live
+via its own tools every run, just without a pre-computed head start (search
+terms, grep hits, manifest summaries). `context_bundle` below is the same
+empty shape `discover_context` would return when it finds nothing.
 """
 from __future__ import annotations
 
@@ -236,6 +237,7 @@ async def run_planner(
     repo_roots: dict[str, str] | None = None,
     default_label: str = "",
     project_guide: dict[str, Any] | None = None,
+    prior_work: dict[str, Any] | None = None,
     sdk_model: str | None = None,
     sdk_effort: str | None = None,
 ) -> dict[str, Any]:
@@ -304,15 +306,13 @@ async def run_planner(
             )
 
     try:
-        # See module docstring: RAG pre-seeding and prior-work discovery
-        # aren't ported yet — the agent still explores live via its own
-        # tools below.
+        # See module docstring: RAG pre-seeding isn't ported yet — the
+        # agent still explores live via its own tools below.
         context_bundle: dict[str, Any] = dict(_EMPTY_CONTEXT_BUNDLE)
         # Carried in the bundle so dev, which reads it from state after
         # planning, sees the same guide without a second lookup.
         context_bundle["project_guide"] = project_guide
-        prior_work: dict[str, Any] = dict(_EMPTY_PRIOR_WORK)
-        prior_work["selected_branch"] = None
+        prior_work = dict(prior_work) if prior_work and prior_work.get("found") else dict(_EMPTY_PRIOR_WORK)
         context_bundle["prior_work"] = prior_work
 
         # Parallel read-only recon before planning (forge/agents/roles/

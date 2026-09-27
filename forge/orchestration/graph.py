@@ -78,18 +78,24 @@ async def planner_node(state: FeatureRunState) -> dict:
     run_id = state.get("run_id", "")
     logger.info("planner starting run_id=%s", run_id)
     try:
+        # Planning reads the worktree and the epic branch, not the clones
+        # (FeatureRunState.read_roots); a run checkpointed before read_roots
+        # existed falls back to the clones as before.
+        read_roots = state.get("read_roots") or {}
+        default_label = state.get("default_repo_label") or ""
         result = await run_planner(
             user_request=state["user_request"],
-            project_path=state["project_path"],
+            project_path=read_roots.get(default_label) or state["project_path"],
             run_id=run_id or None,
             ticket_id=state.get("ticket_id"),
             attachment_paths=state.get("attachment_paths") or None,
             linked_issues_context=state.get("linked_issues_context"),
             acceptance_criteria_hint=state.get("acceptance_criteria_hint") or None,
             clarification_answers=state.get("clarification_answers") or None,
-            repo_roots=state.get("repo_roots") or None,
-            default_label=state.get("default_repo_label") or "",
+            repo_roots=read_roots or state.get("repo_roots") or None,
+            default_label=default_label,
             project_guide=state.get("project_guide") or None,
+            prior_work=state.get("prior_work") or None,
             sdk_model=state.get("sdk_model"),
             sdk_effort=state.get("sdk_effort"),
         )
@@ -164,6 +170,8 @@ async def dev_node(state: FeatureRunState) -> dict:
             gate_feedback=gate_feedback,
             integration_paths=state.get("integration_paths") or None,
             repo_roots=state.get("repo_roots") or None,
+            read_roots=state.get("read_roots") or None,
+            story_base_refs=state.get("story_base_refs") or None,
             default_label=state.get("default_repo_label") or "",
             story_worktrees=state.get("story_worktrees") or None,
             sdk_model=state.get("sdk_model"),

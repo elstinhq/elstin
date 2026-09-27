@@ -93,7 +93,7 @@ The PROJECT ARCHITECTURE GUIDE (AGENTS.md) in the user message is the single sou
 
 CRITICAL — prior implementation attempts:
 - If a "PRIOR IMPLEMENTATION ATTEMPTS" block is present in the user message, existing branches already carry work related to this ticket. Each candidate's `worktree_status` tells you whether its code will actually be on disk for this run — read that field before deciding what to plan.
-- For the candidate marked SELECTED: its changes are genuinely already implemented in your worktree. files_to_create/files_to_modify must reflect only the remaining gap between it and the current request/acceptance criteria — do not re-plan work its diff already shows as done, unless it is fundamentally wrong for this request (in which case say why in reasoning).
+- For the candidate marked SELECTED, and any marked ALREADY MERGED: its changes are genuinely already implemented in your worktree. files_to_create/files_to_modify must reflect only the remaining gap between it and the current request/acceptance criteria — do not re-plan work its diff already shows as done, unless it is fundamentally wrong for this request (in which case say why in reasoning).
 - For every OTHER candidate (marked "reference only"): its changes are NOT present in your worktree. If its implementation is worth reusing, the corresponding files still belong in files_to_create/files_to_modify — port the proven code from its diff_sample rather than skipping those files or re-deriving the implementation from scratch.
 - discovery_evidence and the plan_markdown "Current State" section must call out what each relevant branch covers and whether it's SELECTED (already in your worktree) or reference-only (still needs porting), referencing the branch name.
 """
@@ -114,47 +114,65 @@ def build_planner_system(project_path: str) -> str:
 
 
 def _format_prior_work_block(prior_work: dict[str, Any]) -> str:
-    """Prose block describing prior implementation attempts. Empty string
-    when nothing was found — in forge Phase 2, that's always today, since
-    discover_prior_work (a git-history-based branch scanner) is not yet
-    built (see forge/agents/roles/planner_loop.py's module docstring); the
-    function stays real/callable so it activates the instant that lands,
-    without another code change here."""
+    """Prose block describing work that already exists for this ticket.
+    Empty string when nothing was found.
+
+    Filled from the daemon's lookup before the story's branch was made
+    (forge/services/prior_work.py, shaped by forge/daemon/prior_work_lookup.py's
+    planner_prior_work): per repo, the branches carrying the ticket's key,
+    which one this worktree starts from (SELECTED — on disk), which are only
+    reference, which are already in the default branch, and commits on the
+    default branch that name the ticket."""
     if not prior_work.get("found"):
         return ""
     selected_branch = prior_work.get("selected_branch")
     trimmed = []
-    for c in prior_work["candidates"]:
+    for c in prior_work.get("candidates") or []:
         files = c.get("changed_files") or []
-        trimmed.append({
+        selected = bool(c.get("selected")) or bool(selected_branch and c.get("branch") == selected_branch)
+        in_default = str(c.get("status") or "").startswith("already in")
+        entry = {
+            "repo": c.get("repo"),
             "branch": c.get("branch"),
             "worktree_status": (
-                "SELECTED — this worktree will be created from this branch's tip"
-                if c.get("branch") == selected_branch and selected_branch
+                "SELECTED — this worktree was created from this branch's tip" if selected
+                else "ALREADY MERGED — its changes are in the default branch, so they are on disk too" if in_default
                 else "reference only — NOT present in your worktree"
             ),
             "match_reason": c.get("match_reason"),
             "status": c.get("status"),
+            "commits": (c.get("commits") or [])[:15],
             "changed_files": files[:50],
-            "changed_files_total": len(files),
-            "diff_sample": (c.get("diff") or "")[:2500],
-            "diff_truncated": c.get("diff_truncated") or len(c.get("diff") or "") > 2500,
-        })
+            "changed_files_total": c.get("changed_files_total") or len(files),
+        }
+        for key in ("also_carries", "pull_request"):
+            if c.get(key):
+                entry[key] = c[key]
+        if not selected and not in_default and c.get("diff"):
+            entry["diff_sample"] = c["diff"][:2500]
+            entry["diff_truncated"] = bool(c.get("diff_truncated")) or len(c["diff"]) > 2500
+        trimmed.append(entry)
+    merged = prior_work.get("merged_commits") or {}
     return (
-        "=== PRIOR IMPLEMENTATION ATTEMPTS (existing branches for this ticket) ===\n"
-        "Existing branches already carry work related to this ticket. Each candidate has a "
-        "`match_reason`: `ticket_id`/`title` = a previous agent run on this ticket; "
-        "`branch_name` = a branch named after this ticket's key (likely human-authored); "
-        "`epic_branch` = a branch for this ticket's parent epic (may already contain this "
-        "story's work). `changed_files` is capped (see `changed_files_total`) and `diff_sample` "
-        "is a prefix.\n"
-        "`worktree_status` tells you whether this candidate's code will actually be on disk: "
-        "only the candidate marked SELECTED will be — its worktree is branched from that "
-        "branch's tip, so its changes are genuinely already implemented and must NOT be "
-        "re-planned. Every other candidate is reference only: its changes are NOT present in "
-        "the worktree you're planning for, so if you want to reuse them, the corresponding "
-        "files still belong in files_to_create/files_to_modify (port the proven implementation "
-        "from diff_sample rather than re-deriving it from scratch).\n"
+        "=== PRIOR IMPLEMENTATION ATTEMPTS (work that already exists for this ticket) ===\n"
+        "Before this run, the repos were searched for branches carrying this ticket's key. "
+        "`match_reason`: `branch_name` = a branch named after this ticket (or one of its "
+        "sub-tasks), most likely a person's work in progress; `epic_branch` = a branch named "
+        "after the parent epic (may already contain this story's work). `commits` and "
+        "`changed_files` are capped (see `changed_files_total`); `diff_sample` is a prefix. "
+        "`also_carries` names other tickets the same branch was named after — do not implement "
+        "their scope here.\n"
+        "`worktree_status` tells you whether a candidate's code is actually on disk: the SELECTED "
+        "one is (the worktree starts from its tip), and so is an ALREADY MERGED one (its changes "
+        "are in the default branch) — do not re-plan either's work; plan only what is still "
+        "missing for this ticket. A reference-only candidate is NOT on disk: if it is worth "
+        "reusing, its files still belong in files_to_create/files_to_modify — port the proven "
+        "implementation from diff_sample rather than re-deriving it.\n"
         + json.dumps(trimmed, indent=2)[:15000]
+        + (
+            "\nCommits on the default branch that name this ticket (already merged, so on disk):\n"
+            + json.dumps(merged, indent=2)[:3000]
+            if merged else ""
+        )
         + "\n=== END PRIOR IMPLEMENTATION ATTEMPTS ===\n\n"
     )

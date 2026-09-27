@@ -127,6 +127,29 @@ def test_a_failure_stops_dependents_transitively():
     ]
 
 
+def test_a_story_waiting_for_a_branch_pick_holds_only_itself_and_its_dependents():
+    """Several diverged branches carry this ticket's work and nobody has said
+    which to build on (forge/services/prior_work.py): it waits, like a
+    dependency would, and nothing else does."""
+    base = _snapshot(
+        [["ENG-2", "ENG-3"], ["ENG-4"]],
+        {"ENG-2": "pending", "ENG-3": "pending", "ENG-4": "pending"},
+        depends_on={"ENG-2": [], "ENG-3": [], "ENG-4": ["ENG-2"]},
+    )
+    stories = {**base.stories, "ENG-2": StorySnapshot("ENG-2", "pending", needs_branch_choice=True)}
+    snapshot = EpicSnapshot(jira_key="ENG-1", levels=base.levels, stories=stories)
+
+    intents = plan_orchestration(snapshot, OrchestratorContext())
+
+    assert intents == [
+        NoOp(story_key="ENG-2", reason="choose_prior_branch"),
+        DispatchStory("ENG-3"),
+        NoOp(story_key="ENG-4", reason="waiting_on_dependencies"),
+    ]
+    assert describe_story_action(snapshot, OrchestratorContext(), "ENG-2") == Blocked("ENG-2", "choose_prior_branch")
+    assert describe_story_action(snapshot, OrchestratorContext(), "ENG-3") == DispatchStory("ENG-3")
+
+
 def test_the_epic_fails_only_once_nothing_can_make_progress():
     running = _snapshot(
         [["ENG-2", "ENG-3"]], {"ENG-2": "failed", "ENG-3": "dispatched"}, depends_on={},

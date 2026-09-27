@@ -7,12 +7,15 @@ import {
   KindTag,
   MergeAttemptsTag,
   PARKED_REASON_LABEL,
+  PriorWorkTag,
   StatusTagFor,
   WaitingOnTag,
   unmetDependencies,
 } from "../shared/StatusTag";
 import { Twisty } from "../shared/Twisty";
 import { CancelRunButton } from "./CancelRunButton";
+import { PriorWorkChoiceButton } from "./PriorWorkChoice";
+import { needsChoice } from "../../lib/priorWork";
 import { useApproveStory, useRetryStory, useStartStory } from "../../hooks/useStories";
 import { useToast } from "../../lib/toast";
 import type { Story } from "../../types/api";
@@ -52,6 +55,9 @@ export function StoryRow({
   const isOpen = expandedStories.has(story.jira_key);
   const gate = GATE_ACTION[story.status];
   const waiting = unmetDependencies(story, statusByKey).length > 0;
+  // Several diverged branches and no pick yet: the daemon would refuse to
+  // start it, so Start gives way to Choose branch.
+  const choosing = story.status === "pending" && needsChoice(story.prior_work).length > 0;
 
   return (
     <>
@@ -82,6 +88,7 @@ export function StoryRow({
         <CoverageGapTag story={story} />
         <StatusTagFor status={story.status} />
         <WaitingOnTag story={story} statusByKey={statusByKey} />
+        <PriorWorkTag story={story} />
         <MergeAttemptsTag story={story} />
         <CodeWrittenTag story={story} />
         <ExternalChangedTag story={story} />
@@ -115,7 +122,9 @@ export function StoryRow({
             they never get this button even though their status can also be
             "pending" — nor does a story still waiting on a dependency, which
             the daemon would refuse to start. */}
-        {!autoRunEnabled && story.status === "pending" && !isSubtask && !waiting ? (
+        {!isSubtask ? <PriorWorkChoiceButton projectId={projectId} story={story} /> : null}
+
+        {!autoRunEnabled && story.status === "pending" && !isSubtask && !waiting && !choosing ? (
           <Button
             size="sm"
             className="shrink-0"

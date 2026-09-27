@@ -65,6 +65,11 @@ class Epic(Base):
     levels: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     integration_branch: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # What already existed for the epic's own key before forge made its
+    # branch — a branch named after the epic, which the epic branch then
+    # starts from. Shape and meaning: forge/services/prior_work.py. NULL
+    # until looked up; never looked up once integration_branch is set.
+    prior_work: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     plan_approved: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     # A human-set hold on this epic alone — independent of the per-story
@@ -140,6 +145,14 @@ class Story(Base):
     # that predates the column and has not been re-synced; readers fall back
     # to "every story in an earlier level" (epic_sync.stored_dependencies).
     depends_on: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Work already done on this ticket, found before forge created its
+    # branch: per repo, the branches carrying the key and whether their work
+    # is already in the default branch, plus a human's pick where several
+    # diverged (forge/services/prior_work.py). The story's branch starts
+    # from what this found. NULL until looked up — which happens only while
+    # the story is pending and has no branch, so a story already underway is
+    # never re-based.
+    prior_work: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
 
     # "dev" | "qa" — see StoryKind above. `kind_reason` records which

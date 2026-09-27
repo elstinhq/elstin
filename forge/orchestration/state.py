@@ -45,6 +45,20 @@ class FeatureRunState(TypedDict, total=False):
     # this state is JSON in a LangGraph checkpoint.
     repo_roots: dict[str, str]
     default_repo_label: str
+    # Where each repo's code is READ while planning and by dev's reads of a
+    # repo it does not write: the story's own worktree where it has one,
+    # else the epic branch's worktree in that repo. Never the clone's own
+    # checkout, which is frozen at clone time and knows nothing of the epic
+    # branch, the stories merged into it, or prior work the story continues.
+    # `repo_roots` stays the clones: git operations and repo locks key on it.
+    read_roots: dict[str, str]
+    # {label: ref} a repo the plan names but the story has no worktree in yet
+    # branches from — the epic branch in that repo, not its default branch.
+    story_base_refs: dict[str, str]
+    # What already existed for this ticket before its branch was made —
+    # forge/daemon/prior_work_lookup.py's planner_prior_work, for the
+    # planner prompt's prior-work block. Empty when nothing was found.
+    prior_work: dict[str, Any]
     # The AGENTS.md-style guide the planner (and, through context_bundle, dev)
     # reads first: {"found", "path", "content", "generated"}. Resolved by the
     # daemon, which owns the DB; see forge/services/project_guide.py.
@@ -131,6 +145,9 @@ def initial_state(run_id: str, user_request: str, project_path: str) -> FeatureR
         project_path=project_path,
         worktree_path=None,
         repo_roots={},
+        read_roots={},
+        story_base_refs={},
+        prior_work={},
         default_repo_label="",
         project_guide={},
         story_worktrees={},

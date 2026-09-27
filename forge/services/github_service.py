@@ -120,6 +120,21 @@ class GitHubService:
         logger.info("Opened PR #%d for %s/%s: %s <- %s", pr.number, owner, repo, base, head)
         return {"number": pr.number, "url": pr.html_url, "state": "open"}
 
+    def find_pull_requests(self, owner: str, repo: str, head_branch: str, *, limit: int = 3) -> list[dict]:
+        """Pull requests from `head_branch` (a branch of this same repo),
+        newest first — what the prior-work lookup shows next to a branch
+        it found (forge/services/prior_work.py)."""
+        gh_repo = self._client.get_repo(f"{owner}/{repo}")
+        found = []
+        for pr in gh_repo.get_pulls(state="all", head=f"{owner}:{head_branch}", sort="created", direction="desc"):
+            found.append({
+                "number": pr.number, "url": pr.html_url,
+                "state": "merged" if pr.merged else ("closed" if pr.state == "closed" else "open"),
+            })
+            if len(found) >= limit:
+                break
+        return found
+
     def get_pull_request(self, owner: str, repo: str, number: int) -> dict:
         gh_repo = self._client.get_repo(f"{owner}/{repo}")
         pr = gh_repo.get_pull(number)

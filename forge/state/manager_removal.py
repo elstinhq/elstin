@@ -58,12 +58,19 @@ class _RemovalMixin:
             epic_pull_requests = session.execute(
                 select(EpicPullRequest).where(EpicPullRequest.epic_key == epic_key).order_by(EpicPullRequest.id)
             ).scalars().all()
+            # The epic branch is made in every repo on the project at the
+            # epic's first dispatch (forge/daemon/main.py), not only in the
+            # repos its stories wrote.
+            project_repos = session.execute(
+                select(ProjectRepo.path).where(ProjectRepo.project_id == epic.project_id)
+            ).scalars().all()
 
             return {
                 "epic": epic_key,
                 "project_id": epic.project_id,
                 "integration_branch": epic.integration_branch,
                 "epic_repo": epic_repo,
+                "project_repos": sorted(p for p in project_repos if p),
                 "keys": keys,
                 "stories": [_story_to_dict(session, s) for s in stories],
                 "worktrees": [

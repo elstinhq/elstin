@@ -196,6 +196,33 @@ class _StoryMixin:
             if story is not None:
                 story.depends_on = list(depends_on)
 
+    def set_story_prior_work(self, jira_key: str, prior_work: dict | None) -> None:
+        """The lookup of work already done on this ticket
+        (forge/services/prior_work.py) — or None to look again."""
+        with session_scope() as session:
+            story = session.get(Story, jira_key)
+            if story is not None:
+                story.prior_work = dict(prior_work) if prior_work is not None else None
+
+    def pick_story_prior_branch(self, jira_key: str, repo_label: str, branch: str | None) -> bool:
+        """A human's answer where several branches diverged: continue from
+        `branch` in `repo_label`, or start fresh (None). False — nothing
+        recorded — unless that repo's lookup offered that branch and the
+        story has not started."""
+        with session_scope() as session:
+            story = session.get(Story, jira_key)
+            if story is None or story.status != "pending" or story.branch or not story.prior_work:
+                return False
+            finding = (story.prior_work.get("repos") or {}).get(repo_label)
+            if not finding:
+                return False
+            if branch is not None and branch not in {c.get("branch") for c in finding.get("candidates") or []}:
+                return False
+            prior_work = dict(story.prior_work)
+            prior_work["picks"] = {**(prior_work.get("picks") or {}), repo_label: branch or ""}
+            story.prior_work = prior_work  # a new object: JSON columns do not track in-place edits
+            return True
+
     def increment_story_merge_attempts(self, jira_key: str) -> int:
         """One more send-back over landing this story; returns the new count."""
         with session_scope() as session:
@@ -344,6 +371,7 @@ def _story_to_dict(session, story: Story) -> dict:
         # None only for a row that predates the column and was never
         # re-synced — see forge/services/epic_sync.py's stored_dependencies.
         "depends_on": list(story.depends_on) if story.depends_on is not None else None,
+        "prior_work": story.prior_work,
         "status": story.status,
         "kind": story.kind,
         "kind_reason": story.kind_reason,

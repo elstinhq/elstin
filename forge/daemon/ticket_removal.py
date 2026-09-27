@@ -109,7 +109,7 @@ def _clean_local_artifacts(footprint: dict[str, Any]) -> dict[str, Any]:
         if story.get("worktree_path") or story.get("branch"):
             targets.append((story.get("repo"), story.get("worktree_path"), story.get("branch")))
 
-    repos = {r for r in (footprint["epic_repo"], *(t[0] for t in targets)) if r}
+    repos = {r for r in (footprint["epic_repo"], *footprint.get("project_repos", ()), *(t[0] for t in targets)) if r}
     done: set[tuple[str | None, str | None, str | None]] = set()
     for repo, worktree, branch in targets:
         if (repo, worktree, branch) in done:
@@ -126,13 +126,16 @@ def _clean_local_artifacts(footprint: dict[str, Any]) -> dict[str, Any]:
             deleted_branches.append(branch)
         warnings.extend(result["errors"])
 
-    # The epic's integration branch exists in each repo the ticket merged
-    # into, each with its own worktree (see integration_worktree_path).
+    # The epic's integration branch exists in each repo on the project, each
+    # with its own worktree (see integration_worktree_path).
+    # discard_worktree tolerates a repo where it was never made.
     integration_branches = {integration_branch_name(epic_key), footprint["integration_branch"]} - {None}
-    integration_worktrees: list[str] = []
-    for repo in sorted(repos):
-        integration_worktree = integration_worktree_path(worktrees_base, epic_key, repo)
-        integration_worktrees.append(integration_worktree)
+    # Every path first: which repo's worktree is the `_integration-<epic>`
+    # one and which a `-<repo>` sibling is read off the disk, so computing a
+    # path after an earlier repo's worktree is gone would name the wrong one.
+    by_repo = {repo: integration_worktree_path(worktrees_base, epic_key, repo) for repo in sorted(repos)}
+    integration_worktrees = list(by_repo.values())
+    for repo, integration_worktree in by_repo.items():
         for branch in sorted(integration_branches):
             result = discard_worktree(repo, integration_worktree, branch)
             if result["worktree_removed"] and integration_worktree not in removed_worktrees:

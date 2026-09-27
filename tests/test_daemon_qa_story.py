@@ -369,7 +369,9 @@ async def test_dispatch_hands_every_repo_to_the_planner(
     git_repo: str, tmp_path, project_id, monkeypatch
 ):
     """End-to-end plumbing: daemon assembles the roots, the graph state
-    carries them, and the role receives them."""
+    carries them, and the role receives them. The story's own repo is read
+    at its worktree; a reference folder the epic branch cannot be made in
+    (this one is not even a git repo) is read where it is."""
     monkeypatch.setenv("DATABASE_URL", os.environ["DATABASE_URL"])
     _configure(str(tmp_path / "worktrees"))
 
@@ -393,5 +395,7 @@ async def test_dispatch_hands_every_repo_to_the_planner(
 
     await poll_once(sm, wait=True)
 
-    assert seen["repo_roots"] == {"web-ui": git_repo, "api": api}
+    worktree = sm.get_story("ENG-2")["worktree_path"]
+    assert seen["repo_roots"] == {"web-ui": worktree, "api": api}
+    assert seen["project_path"] == worktree
     assert seen["default_label"] == "web-ui"

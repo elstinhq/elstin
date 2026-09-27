@@ -86,14 +86,21 @@ def _epic_lock(epic_key: str) -> threading.Lock:
 
 
 def ensure_integration_worktree(
-    project_path: str, epic_key: str, worktrees_base_dir: str, *, branch: str | None = None
+    project_path: str, epic_key: str, worktrees_base_dir: str, *, branch: str | None = None,
+    start_point: str | None = None,
 ) -> dict:
     """Create the epic's integration branch/worktree if it doesn't exist yet,
     or reopen it if it does. Returns {"branch": ..., "worktree_path": ...}.
 
     `branch` is the epic's recorded integration branch, passed by a caller
     that has the epic row: an epic whose merges already live on a branch
-    named under an older scheme must keep using it."""
+    named under an older scheme must keep using it.
+
+    A new branch starts from, in order: this same branch on origin (forge
+    pushed it for the epic's pull request earlier — continuing it keeps that
+    work and keeps the next push a fast-forward); `start_point`, a branch
+    already carrying work for this epic that the prior-work lookup found
+    (forge/services/prior_work.py); the default branch."""
     branch = branch or integration_branch_name(epic_key)
 
     with _epic_lock(epic_key), _repo_lock(project_path):
@@ -102,14 +109,31 @@ def ensure_integration_worktree(
             return {"branch": branch, "worktree_path": worktree_path}
 
         os.makedirs(os.path.dirname(worktree_path), exist_ok=True)
-        local_exists = run_git(project_path, "rev-parse", "--verify", branch, check=False).returncode == 0
+        local_exists = run_git(project_path, "rev-parse", "--verify", "-q", f"refs/heads/{branch}", check=False).returncode == 0
         if local_exists:
             run_git(project_path, "worktree", "add", worktree_path, branch)
         else:
-            base = resolve_base_ref(project_path, None)
-            run_git(project_path, "worktree", "add", "-b", branch, worktree_path, base)
+            run_git(project_path, "worktree", "add", "-b", branch, worktree_path, _epic_start(project_path, branch, start_point))
 
     return {"branch": branch, "worktree_path": worktree_path}
+
+
+def _epic_start(project_path: str, branch: str, start_point: str | None) -> str:
+    pushed = f"origin/{branch}"
+    if run_git(project_path, "rev-parse", "--verify", "-q", pushed, check=False).returncode == 0:
+        return pushed
+    if start_point and run_git(project_path, "rev-parse", "--verify", "-q", start_point, check=False).returncode == 0:
+        return start_point
+    return resolve_base_ref(project_path, None)
+
+
+def existing_epic_worktree(worktrees_base_dir: str, epic_key: str, project_path: str) -> str | None:
+    """`project_path`'s worktree of the epic branch, if it has one — where the
+    epic branch's current code can be READ in that repo (the planner reads
+    a repo the story has no worktree in there, not at the clone's own
+    checkout, which is frozen at clone time and knows nothing of the epic)."""
+    path = integration_worktree_path(worktrees_base_dir, epic_key, project_path)
+    return path if os.path.isdir(path) and _worktree_of(path, project_path) else None
 
 
 def update_story_from_epic(

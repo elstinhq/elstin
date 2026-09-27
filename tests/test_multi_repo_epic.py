@@ -127,30 +127,39 @@ def _owning_repo(worktree_path: str) -> str:
 async def test_every_story_gets_the_whole_project_to_read(split_project, monkeypatch):
     """No repo is bound to a story: the planner sees the whole project and
     works out from the task which repos the change touches. Only the
-    default — the repo an unprefixed path means — differs per story."""
+    default — the repo an unprefixed path means — differs per story.
+
+    It reads its own repo at its worktree, and every other repo at the epic
+    branch's worktree there — never a clone's own checkout, which is frozen
+    at clone time and knows nothing of the epic branch."""
     import forge.orchestration.graph as graph_module
+    from forge.orchestration.integration import integration_branch_name
     from tests.conftest import fake_run_planner
 
     seen: dict[str, dict] = {}
 
     async def capturing_planner(**kwargs):
-        seen[kwargs["project_path"]] = {
-            "repo_roots": kwargs.get("repo_roots") or {},
-            "default_label": kwargs.get("default_label"),
-        }
+        seen[kwargs["default_label"]] = {"project_path": kwargs["project_path"], "repo_roots": kwargs.get("repo_roots") or {}}
         return await fake_run_planner(**kwargs)
 
     monkeypatch.setattr(graph_module, "run_planner", capturing_planner)
+    sm = split_project["sm"]
 
-    await poll_once(split_project["sm"], wait=True)
+    await poll_once(sm, wait=True)
 
     ui, api = split_project["ui"], split_project["api"]
-    whole_project = {"web-ui": ui, "api": api}
-
-    assert seen[ui]["repo_roots"] == whole_project
-    assert seen[api]["repo_roots"] == whole_project
-    assert seen[ui]["default_label"] == "web-ui"
-    assert seen[api]["default_label"] == "api"
+    ui_story, api_story = sm.get_story("ENG-2")["worktree_path"], sm.get_story("ENG-3")["worktree_path"]
+    assert set(seen) == {"web-ui", "api"}
+    assert set(seen["web-ui"]["repo_roots"]) == set(seen["api"]["repo_roots"]) == {"web-ui", "api"}
+    assert seen["web-ui"]["project_path"] == seen["web-ui"]["repo_roots"]["web-ui"] == ui_story
+    assert seen["api"]["project_path"] == seen["api"]["repo_roots"]["api"] == api_story
+    epic_branch = integration_branch_name("ENG-1")
+    for label, other, repo in (("web-ui", "api", api), ("api", "web-ui", ui)):
+        root = seen[label]["repo_roots"][other]
+        assert root not in (ui, api)
+        assert _owning_repo(root) == os.path.realpath(repo)
+        head = subprocess.run(["git", "branch", "--show-current"], cwd=root, capture_output=True, text=True, check=True)
+        assert head.stdout.strip() == epic_branch
 
 
 async def test_the_branch_and_commit_land_in_the_storys_own_repo(split_project, monkeypatch):
@@ -236,8 +245,22 @@ async def test_a_single_story_writes_every_repo_its_plan_names(split_project, mo
     """The model the user asked for: nothing binds a repo to the story.
     The plan names a UI file and an API file, so dev gets a worktree in
     both, writes both, and the story ends with a branch and a commit in
-    each."""
+    each.
+
+    The API worktree dev creates branches from the epic branch in the API
+    repo, not from its main: it has what another story already landed
+    there."""
     import forge.orchestration.graph as graph_module
+    from forge.orchestration.integration import integration_branch_name
+
+    api_repo = split_project["api"]
+    epic_branch = integration_branch_name("ENG-1")
+    _run_git(["git", "checkout", "-q", "-b", epic_branch, "main"], api_repo)
+    with open(os.path.join(api_repo, "landed.py"), "w") as handle:
+        handle.write("landed = True\n")
+    _run_git(["git", "add", "landed.py"], api_repo)
+    _run_git(["git", "commit", "-q", "-m", "ENG-9 landed on the epic branch"], api_repo)
+    _run_git(["git", "checkout", "-q", "main"], api_repo)
 
     plan = {
         "feature_summary": "Show the cart total",
@@ -312,6 +335,7 @@ async def test_a_single_story_writes_every_repo_its_plan_names(split_project, mo
     # And the edit landed in each repo's own worktree.
     assert "total" in open(os.path.join(worktrees["web-ui"]["worktree_path"], "README.md")).read()
     assert "total" in open(os.path.join(worktrees["api"]["worktree_path"], "README.md")).read()
+    assert os.path.exists(os.path.join(worktrees["api"]["worktree_path"], "landed.py"))
 
     # Each repo carries its own commit, because git has no cross-repo one.
     for entry in worktrees.values():

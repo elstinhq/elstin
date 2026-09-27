@@ -10,10 +10,11 @@ import {
   useSetStoryKind,
   useSyncStory,
 } from "../../hooks/useStories";
+import { lookupDue, startCandidate } from "../../lib/priorWork";
 import { useToast } from "../../lib/toast";
 import { displayKey, sourceLabel, ticketUrl } from "../../lib/ticketSource";
 import { useSyncEpicFields } from "../../hooks/useEpics";
-import type { Epic, ExternalChangeAction, Story } from "../../types/api";
+import type { Epic, ExternalChangeAction, PriorWork, Story } from "../../types/api";
 import { Button } from "../ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Label } from "../ui/label";
@@ -193,6 +194,78 @@ function ClarificationPanel({ projectId, story }: { projectId: number; story: St
   );
 }
 
+// What already existed for this ticket before forge made its branch
+// (forge/services/prior_work.py), per repo: the branch its work continues
+// from, the other branches found, and work already in the default branch.
+function PriorWorkRow({ prior }: { prior: PriorWork | null }) {
+  if (!prior) return null;
+  if (lookupDue(prior)) {
+    return (
+      <DetailRow label="Earlier work">
+        <span className="text-muted-foreground">Looking again on the next poll…</span>
+      </DetailRow>
+    );
+  }
+  const repos = Object.entries(prior.repos ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  if (!repos.length) {
+    return (
+      <DetailRow label="Earlier work">
+        <span className="text-muted-foreground">
+          {prior.applicable ? "No branch or commit for this ticket was found" : "Not looked up — only JIRA-style keys appear in branch names"}
+          {prior.looked_at ? ` (looked ${new Date(prior.looked_at).toLocaleString()})` : ""}
+        </span>
+      </DetailRow>
+    );
+  }
+  return (
+    <DetailRow label="Earlier work">
+      <div className="flex flex-col gap-3">
+        {repos.map(([label, finding]) => {
+          const start = startCandidate(prior, label);
+          return (
+            <div key={label} className="flex flex-col gap-1">
+              <div className="text-xs font-medium">
+                {label}:{" "}
+                {start
+                  ? `continues ${start.branch}`
+                  : finding.verdict === "choose"
+                    ? label in (prior.picks ?? {}) ? "starts fresh (picked)" : "several diverged branches — pick one on the row"
+                    : `already in ${finding.default_branch}`}
+              </div>
+              {finding.candidates.map((c) => (
+                <div key={c.branch} className="text-muted-foreground text-xs">
+                  <span className="font-mono">{c.branch}</span>
+                  {c.in_default ? ` — in ${finding.default_branch}` : ` — ${c.ahead} commit(s) ahead, ${c.files_total} file(s)`}
+                  {c.pull_request ? (
+                    <>
+                      {" · "}
+                      <a className="text-primary underline underline-offset-2" href={c.pull_request.url} target="_blank" rel="noopener noreferrer">
+                        PR #{c.pull_request.number} ({c.pull_request.state})
+                      </a>
+                    </>
+                  ) : null}
+                  {start && start.branch === c.branch && c.commits.length ? (
+                    <ul className="mt-1 list-none font-mono text-[11px]">
+                      {c.commits.map((commit) => (
+                        <li key={commit} className="truncate">{commit}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+              ))}
+              {finding.default_commits.length ? (
+                <div className="text-muted-foreground text-xs">
+                  Commits in {finding.default_branch} naming it: {finding.default_commits.slice(0, 3).join("; ")}
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </DetailRow>
+  );
+}
+
 function EpicDetailBody({ epic }: { epic: Epic }) {
   return (
     <>
@@ -211,6 +284,7 @@ function EpicDetailBody({ epic }: { epic: Epic }) {
       <DetailRow label="Plan approved">{epic.plan_approved ? "Yes" : "No"}</DetailRow>
       <DetailRow label="Manually paused">{epic.manual_gate ? "Yes" : "No"}</DetailRow>
       <DetailRow label="Integration branch">{epic.integration_branch}</DetailRow>
+      <PriorWorkRow prior={epic.prior_work} />
       <DetailRow label="Waves">{(epic.levels || []).length ? String(epic.levels.length) : "0"}</DetailRow>
       <DetailRow label="Stories">{String((epic.stories || []).length)}</DetailRow>
       <EpicUsagePanel epicKey={epic.jira_key} />
@@ -270,6 +344,7 @@ function StoryDetailBody({ projectId, story, activityEnabled }: { projectId: num
       <DetailRow label="Wave">{`W${story.wave}`}</DetailRow>
       {story.parked_reason ? <DetailRow label="Parked reason">{story.parked_reason}</DetailRow> : null}
       <DetailRow label="Branch">{story.branch}</DetailRow>
+      <PriorWorkRow prior={story.prior_work} />
       <DetailRow label="Gate approved">{story.gate_approved ? "Yes" : "No"}</DetailRow>
       {story.coverage_gap ? (
         <DetailRow label="Coverage gap">{story.coverage_gap_detail || "Tests passed; coverage threshold not met."}</DetailRow>

@@ -41,6 +41,12 @@ description alone (progress must not be rewritten by a tree walk). This
 endpoint is the explicit escape hatch — pull latest JIRA prose for one
 story without touching kind, status, or wave.
 
+Prior work: before a story's branch is made, the daemon looks for branches
+that already carry its key (forge/services/prior_work.py). Where several
+carry diverged work and none contains the others, forge does not guess which
+to build on: the story waits. POST /{key}/prior-work is the answer — a
+branch the lookup offered for that repo, or `null` to start fresh.
+
 Plan: the planner's structured plan (feature_summary, plan_markdown,
 files_to_create/modify, acceptance_criteria, ...) lives only inside the
 story's LangGraph checkpoint (forge/db/models/gameplan.py's docstring on
@@ -98,6 +104,13 @@ class ClarificationAnswer(BaseModel):
     option_id: str
 
 
+class PriorBranchPickRequest(BaseModel):
+    repo_label: str
+    # A branch the prior-work lookup offered for that repo, or None to start
+    # fresh from the epic branch.
+    branch: str | None = None
+
+
 class ClarificationAnswerRequest(BaseModel):
     answers: list[ClarificationAnswer]
 
@@ -134,6 +147,27 @@ def _maybe_trigger_manual_run(sm: StateManager, story_key: str, background_tasks
     result = check_story_action(sm, epic, story_key)
     if not isinstance(result, Blocked):
         background_tasks.add_task(execute_story_action, sm, epic, result)
+
+
+@router.post("/{story_key}/prior-work")
+def pick_prior_branch(story_key: str, body: PriorBranchPickRequest) -> dict:
+    """Which of the diverged branches found for this ticket its work
+    continues from, in one repo — or none (`branch: null`). Only while the
+    story has not started: once its branch exists, what it started from is
+    history. Nothing is dispatched from here; the story becomes ready like
+    any other (the next poll, or Start in a manual-run project)."""
+    sm = StateManager()
+    story = sm.get_story(story_key)
+    if story is None:
+        raise HTTPException(status_code=404, detail=f"No such story: {story_key}")
+    if story["status"] != "pending" or story.get("branch"):
+        raise HTTPException(status_code=409, detail=f"{story_key} has already started; its branch exists")
+    finding = ((story.get("prior_work") or {}).get("repos") or {}).get(body.repo_label)
+    if not finding:
+        raise HTTPException(status_code=404, detail=f"No prior work was found for {story_key} in {body.repo_label}")
+    if not sm.pick_story_prior_branch(story_key, body.repo_label, body.branch):
+        raise HTTPException(status_code=422, detail=f"{body.branch!r} is not a branch found for {story_key} in {body.repo_label}")
+    return sm.get_story(story_key)
 
 
 @router.post("/{story_key}/start")

@@ -39,8 +39,8 @@ from forge.config.store import get_config, get_int_config, resolve_bool_config
 from forge.db.engine import get_database_url
 from forge.orchestration.graph import checkpointer_from_url, compile_graph
 from forge.orchestration.integration import (
-    ensure_integration_worktree, epic_branch_changes_since, fast_forward_epic, integration_branch_name,
-    update_story_from_epic,
+    ensure_integration_worktree, epic_branch_changes_since, existing_epic_worktree, fast_forward_epic,
+    integration_branch_name, update_story_from_epic,
 )
 from forge.orchestration.reconciler import (
     Blocked,
@@ -60,7 +60,9 @@ from forge.orchestration.reconciler import (
 from forge.agents.roles.qa import format_qa_report_comment
 from forge.agents.roles.verifier import format_gate_feedback, run_deterministic_gate
 from forge.orchestration.state import initial_state
+from forge.daemon.prior_work_lookup import look_up_prior_work, planner_prior_work
 from forge.services.epic_sync import stored_dependencies
+from forge.services.prior_work import lookup_due, needs_choice, start_candidate
 from forge.services.github_service import GitHubService, parse_github_remote, push_branch
 from forge.services.jira_service import issue_key_sort_key
 from forge.services.project_guide import project_guide_for_run
@@ -126,6 +128,7 @@ def build_snapshot(sm: StateManager, epic_key: str) -> EpicSnapshot:
         s["jira_key"]: StorySnapshot(
             jira_key=s["jira_key"], status=s["status"], thread_id=s["thread_id"],
             depends_on=tuple(dependencies.get(s["jira_key"], [])),
+            needs_branch_choice=bool(needs_choice(s.get("prior_work"))),
         )
         for s in stories
     }
@@ -234,6 +237,111 @@ def _workspace_roots(sm: StateManager, epic: dict, default_repo: str | None) -> 
     repos = sm.list_project_repos(epic["project_id"]) if epic.get("project_id") else []
     return build_repo_roots(repos, default_repo)
 
+
+def _ensure_epic_branches(
+    epic: dict, story_repo: str, repo_roots: dict[str, str], epic_branch: str, worktrees_base_dir: str,
+) -> None:
+    """The epic branch, and its worktree, in every repo on the project — the
+    story's own repo first, so a single-repo epic keeps the original
+    `_integration-<epic>` path. Each starts from a branch the prior-work
+    lookup found for the EPIC's key in that repo, if any. Only the story's
+    own repo is required: another repo that cannot get one is read at its
+    clone instead, as before."""
+    labels = {os.path.realpath(path): label for label, path in repo_roots.items()}
+    ordered = [story_repo, *(p for p in repo_roots.values() if os.path.realpath(p) != os.path.realpath(story_repo))]
+    for index, repo_path in enumerate(ordered):
+        label = labels.get(os.path.realpath(repo_path))
+        start = _prior_start_ref(repo_path, start_candidate(epic.get("prior_work"), label)) if label is not None else None
+        try:
+            ensure_integration_worktree(
+                repo_path, epic["jira_key"], worktrees_base_dir, branch=epic_branch, start_point=start,
+            )
+        except Exception:
+            if index == 0:
+                raise
+            logger.warning("epic %s: could not create the epic branch in %s", epic["jira_key"], repo_path, exc_info=True)
+            continue
+        if start:
+            append_activity(
+                epic["jira_key"], type="status", phase="system",
+                title=f"Epic branch {epic_branch} continues from {start}",
+                detail=f"In {label}: a branch named after the epic already carried work for it.",
+            )
+
+
+def _prior_start_ref(repo_path: str, candidate: dict | None) -> str | None:
+    """What to branch from for a branch the prior-work lookup chose: the
+    branch itself (so commits pushed since the lookup come too), else the
+    commit it pointed at when looked up. None when there is nothing to
+    continue, or it no longer exists at all."""
+    if not candidate:
+        return None
+    for ref in (candidate.get("ref"), candidate.get("tip")):
+        if ref and run_git(repo_path, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}", check=False).returncode == 0:
+            return ref
+    logger.warning("prior-work branch %s is gone from %s — starting from the epic branch", candidate.get("branch"), repo_path)
+    return None
+
+
+def _continue_prior_work(
+    story_key: str, repo_path: str, epic: dict, worktree_path: str, candidate: dict, worktrees_base_dir: str,
+) -> None:
+    """A story worktree that starts from earlier work on this ticket gets the
+    epic branch merged in, so it also has what other stories already landed.
+    A conflict is undone here and left to the merge step, which brings the
+    story up to date again before landing it and sends conflicts to dev with
+    a brief — the same path any story takes."""
+    update = update_story_from_epic(
+        repo_path, epic["jira_key"], worktree_path, worktrees_base_dir, branch=epic.get("integration_branch"),
+    )
+    detail = (
+        f"This story's branch starts from {candidate.get('branch')}: {candidate.get('ahead', 0)} commit(s) of earlier "
+        "work on this ticket, which the plan builds on."
+    )
+    if update["conflicts"]:
+        _abort_merge_in_progress(worktree_path)
+        detail += (
+            f" The epic branch conflicts with it in {', '.join(update['conflicts'][:10])} — left for the merge step, "
+            "which resolves it with dev before this story lands."
+        )
+    elif update["error"]:
+        detail += f" Could not merge the epic branch in yet: {update['error']}"
+    append_activity(
+        story_key, type="status", phase="system", title=f"Continuing from {candidate.get('branch')}", detail=detail,
+    )
+
+
+def _read_roots(
+    epic: dict, repo_roots: dict[str, str], story_worktrees: dict[str, dict], worktrees_base_dir: str,
+) -> dict[str, str]:
+    """Where each repo's code is read: the story's worktree where it has one,
+    else the epic branch's worktree in that repo, else — an epic from before
+    the epic branch was made in every repo — the clone. See
+    FeatureRunState.read_roots."""
+    roots = {
+        label: existing_epic_worktree(worktrees_base_dir, epic["jira_key"], path) or path
+        for label, path in repo_roots.items()
+    }
+    for label, entry in story_worktrees.items():
+        if entry.get("worktree_path") and os.path.isdir(entry["worktree_path"]):
+            roots[label] = entry["worktree_path"]
+    return roots
+
+
+def _commits_beyond_epic(sm: StateManager, story_key: str, epic: dict) -> int:
+    """Commits this story's branches carry that the epic branch lacks,
+    across every repo it has a worktree in."""
+    branch = epic.get("integration_branch")
+    if not branch:
+        return 0
+    total = 0
+    for entry in sm.list_story_worktrees(story_key):
+        path = entry.get("worktree_path")
+        if not path or not os.path.isdir(path):
+            continue
+        count = run_git(path, "rev-list", "--count", f"{branch}..HEAD", check=False)
+        total += int(count.stdout.strip() or 0) if count.returncode == 0 else 0
+    return total
 
 def _build_story_brief(
     sm: StateManager,
@@ -562,21 +670,48 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
         for entry in await asyncio.to_thread(sm.list_story_worktrees, story_key)
     }
 
+    worktrees_base_dir = get_config("worktrees_base_dir") or "/data/repos"
     if not resume:
-        worktrees_base_dir = get_config("worktrees_base_dir") or "/data/repos"
+        # Work that already exists for this ticket decides where its branch
+        # starts (forge/daemon/prior_work_lookup.py). The poll has normally
+        # looked already; this covers a Start pressed before it got here.
+        if lookup_due(story.get("prior_work")):
+            await asyncio.to_thread(look_up_prior_work, sm, epic, story_keys=[story_key])
+            story = sm.get_story(story_key) or story
+            epic = sm.get_epic(epic["jira_key"]) or epic
+        undecided = needs_choice(story.get("prior_work"))
+        if undecided:
+            # Several branches carry diverged work for this ticket and nobody
+            # has said which to build on. Back to pending, where the
+            # reconciler holds it until someone picks (or picks a fresh start).
+            sm.set_story_status(story_key, "pending")
+            append_activity(
+                story_key, type="status", phase="system", title="Waiting for someone to pick a branch to continue from",
+                detail=f"Several branches carry diverged work for this ticket in: {', '.join(undecided)}",
+            )
+            return
+
         # Every story branches from the epic branch, created here on the
         # epic's first dispatch: stories that start in parallel then share one
         # base, and a story that waited for another starts with that one's
-        # code already in its worktree.
+        # code already in its worktree. Made in every repo on the project,
+        # because a repo this story has no worktree in is READ at the epic
+        # branch (FeatureRunState.read_roots) and a repo its plan names later
+        # branches from it.
         epic_branch = epic.get("integration_branch") or integration_branch_name(
             epic["jira_key"], external_source=epic.get("external_source"), external_id=epic.get("external_id"),
         )
-        await asyncio.to_thread(
-            ensure_integration_worktree, story_repo, epic["jira_key"], worktrees_base_dir, branch=epic_branch,
-        )
+        await asyncio.to_thread(_ensure_epic_branches, epic, story_repo, repo_roots, epic_branch, worktrees_base_dir)
         if not epic.get("integration_branch"):
             sm.set_integration_branch(epic["jira_key"], epic_branch)
             epic = {**epic, "integration_branch": epic_branch}
+
+        # ...unless this ticket already has work on a branch of its own: then
+        # its branch starts from that work, with the epic branch merged in,
+        # so the planner reads what is done and plans only what is missing.
+        prior = story.get("prior_work")
+        continued = start_candidate(prior, default_label)
+        start_ref = await asyncio.to_thread(_prior_start_ref, story_repo, continued)
         wt = await asyncio.to_thread(
             create_worktree,
             story_repo,
@@ -590,7 +725,7 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
             labels=story.get("labels"),
             external_source=story.get("external_source"),
             external_id=story.get("external_id"),
-            base_ref=epic.get("integration_branch"),
+            base_ref=start_ref or epic_branch,
             repo_label=default_label,
         )
         worktree_path = wt["worktree_path"]
@@ -598,6 +733,43 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
             story_key, repo_label=default_label, repo_path=story_repo,
             worktree_path=worktree_path, branch=wt["branch"], is_default=True,
         )
+        if start_ref:
+            await asyncio.to_thread(
+                _continue_prior_work, story_key, story_repo, epic, worktree_path, continued, worktrees_base_dir,
+            )
+        # Any other repo this ticket already has work in gets its worktree
+        # now, from that work, rather than when the plan names the repo: the
+        # planner has to read that code to plan around it.
+        for label, repo_path in repo_roots.items():
+            if label == default_label:
+                continue
+            candidate = start_candidate(prior, label)
+            ref = await asyncio.to_thread(_prior_start_ref, repo_path, candidate)
+            if not ref:
+                continue
+            other = await asyncio.to_thread(
+                create_worktree, repo_path, story_key=story_key, summary=story["summary"] or story_key,
+                worktrees_base_dir=worktrees_base_dir, repo_label=label, branch=wt["branch"], base_ref=ref,
+            )
+            sm.record_story_worktree(
+                story_key, repo_label=label, repo_path=repo_path,
+                worktree_path=other["worktree_path"], branch=other["branch"], is_default=False,
+            )
+            await asyncio.to_thread(
+                _continue_prior_work, story_key, repo_path, epic, other["worktree_path"], candidate, worktrees_base_dir,
+            )
+        known_worktrees = {
+            entry["repo_label"]: {
+                "repo_path": entry["repo_path"], "worktree_path": entry["worktree_path"], "branch": entry["branch"],
+            }
+            for entry in await asyncio.to_thread(sm.list_story_worktrees, story_key)
+        }
+
+    # Where each repo is read, and what a repo the plan names later branches
+    # from — see FeatureRunState.read_roots / story_base_refs.
+    read_roots = await asyncio.to_thread(_read_roots, epic, repo_roots, known_worktrees, worktrees_base_dir)
+    story_base_refs = {label: epic["integration_branch"] for label in repo_roots} if epic.get("integration_branch") else {}
+    planner_view = await asyncio.to_thread(planner_prior_work, story, epic, repo_roots, default_label)
 
     # thread_id == story_key by construction — one LangGraph run per story,
     # named for exactly the thing it implements.
@@ -614,6 +786,9 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
                 "worktree_path": worktree_path,
                 "story_kind": story_kind,
                 "repo_roots": repo_roots,
+                "read_roots": read_roots,
+                "story_base_refs": story_base_refs,
+                "prior_work": planner_view,
                 "default_repo_label": default_label,
                 "story_worktrees": known_worktrees,
                 # Empty on every resume except the one right after a human
@@ -634,12 +809,17 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
             await graph.aupdate_state(config, patch)
             result = await graph.ainvoke(None, config)
         else:
+            # The codebase map is drawn from what the planner will read (the
+            # worktree and the epic branch), not the clones.
             brief = await asyncio.to_thread(
-                _build_story_brief, sm, story, story_repo, repo_roots, default_label
+                _build_story_brief, sm, story, read_roots.get(default_label) or story_repo, read_roots, default_label
             )
             state = initial_state(story_key, brief, story_repo)
             state["worktree_path"] = worktree_path
             state["repo_roots"] = repo_roots
+            state["read_roots"] = read_roots
+            state["story_base_refs"] = story_base_refs
+            state["prior_work"] = planner_view
             state["default_repo_label"] = default_label
             state["project_guide"] = await project_guide_for_run(sm, epic["project_id"], repo_roots)
             state["story_worktrees"] = known_worktrees
@@ -685,7 +865,19 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
     # waiting to merge an empty branch.
     finished_reason: str | None = None
     declared = result.get("declared_unchanged") or {}
+    carried = 0
     if new_status == "ready_to_merge" and declared and not result.get("file_changes"):
+        # ...unless the branch already carries commits the epic branch lacks —
+        # earlier work this story continued from (forge/services/prior_work.py).
+        # Those still have to land; "done" would leave them on a branch
+        # nothing merges.
+        carried = await asyncio.to_thread(_commits_beyond_epic, sm, story_key, epic)
+    if new_status == "ready_to_merge" and declared and not result.get("file_changes") and carried:
+        append_activity(
+            story_key, type="status", phase="system", title="No new changes: merging the earlier work this story continued",
+            detail=f"The branch carries {carried} commit(s) the epic branch does not have yet.",
+        )
+    elif new_status == "ready_to_merge" and declared and not result.get("file_changes"):
         new_status, finished_reason = "done", "already_satisfied"
         append_activity(
             story_key, type="status", phase="system", title="Finished with no changes: the ticket is already satisfied",
@@ -987,6 +1179,8 @@ def _epic_pr_body(sm: StateManager, epic: dict) -> str:
     lines = [f"Implements {epic['jira_key']}: {epic.get('summary') or ''}".rstrip()]
     if epic.get("description"):
         lines += ["", epic["description"].strip()[:2000]]
+    for label, branch in _continued_branches(epic.get("prior_work")):
+        lines += ["", f"The epic branch continues `{branch}` ({label}), which already carried work for this epic."]
     lines += ["", "## Stories"]
     for story in stories:
         line = f"- **{story['jira_key']}** {story.get('summary') or ''}".rstrip()
@@ -997,6 +1191,8 @@ def _epic_pr_body(sm: StateManager, epic: dict) -> str:
         elif story["status"] == "skipped":
             line += " — skipped"
         lines.append(line)
+        for label, branch in _continued_branches(story.get("prior_work")):
+            lines.append(f"  - continues `{branch}` ({label}): work that already existed for this ticket")
         if story.get("coverage_gap"):
             detail = f" ({story['coverage_gap_detail']})" if story.get("coverage_gap_detail") else ""
             lines.append(f"  - ⚠️ tests pass, but coverage is below the repo's threshold{detail}")
@@ -1012,6 +1208,17 @@ def _epic_pr_body(sm: StateManager, epic: dict) -> str:
     if _commit_author():
         lines += ["", CODE_FORGE_CO_AUTHOR]
     return "\n".join(lines)
+
+
+def _continued_branches(prior_work: dict | None) -> list[tuple[str, str]]:
+    """(repo label, branch) for each existing branch a ticket's work started
+    from (forge/services/prior_work.py)."""
+    out = []
+    for label in sorted(((prior_work or {}).get("repos") or {})):
+        candidate = start_candidate(prior_work, label)
+        if candidate is not None:
+            out.append((label, candidate["branch"]))
+    return out
 
 
 # --- the merge queue: landing a finished story on the epic branch ----------
@@ -1259,6 +1466,15 @@ async def poll_once(sm: StateManager | None = None, *, wait: bool = False) -> No
             else:
                 logger.info("epic %s: project has no repo cloned yet — skipping", epic_key)
                 continue
+        # What already exists for tickets not started yet, looked up before
+        # any of their branches is made — in manual-run projects too, so it
+        # shows as soon as the epic is added (forge/daemon/prior_work_lookup.py).
+        # Returns at once when every ticket has been looked up.
+        try:
+            if await asyncio.to_thread(look_up_prior_work, sm, epic):
+                epic = sm.get_epic(epic_key) or epic
+        except Exception:  # noqa: BLE001 — first dispatch looks up again; one bad pass must not stall the epic
+            logger.exception("epic %s: could not look up prior work", epic_key)
         if not resolve_bool_config("auto_run_enabled", epic["project_id"]):
             # This project runs in manual mode — nothing here autopicks
             # ready work. Progress happens only via the /start route and

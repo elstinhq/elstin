@@ -33,6 +33,15 @@ export function useAnswerStoryQuestions(projectId: number) {
   });
 }
 
+export function usePickPriorBranch(projectId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ storyKey, repoLabel, branch }: { storyKey: string; repoLabel: string; branch: string | null }) =>
+      api.pickPriorBranch(storyKey, repoLabel, branch),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) }),
+  });
+}
+
 export function useRetryStory(projectId: number) {
   const queryClient = useQueryClient();
   return useMutation({

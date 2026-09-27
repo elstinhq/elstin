@@ -135,6 +135,16 @@ the task rather than configured ahead of it.
   keeps `_integration-<epic>`), which is what keeps a cross-repo epic
   reviewable as one unit; epic QA diffs all of them. The epic opens one
   pull request per repo it wrote (`epic_pull_requests`).
+- **Reads never go to a clone's own checkout** — it is frozen at clone time
+  (an attached one is your live checkout) and knows nothing of the epic
+  branch. `FeatureRunState.read_roots` (built by the daemon's `_read_roots`):
+  a repo the story has a worktree in is read there, any other at the epic
+  branch's worktree in that repo; the epic branch is made in **every**
+  project repo at first dispatch for this. The planner, its explorers, the
+  plan gate, the brief's codebase skeleton and dev's reads of repos it does
+  not write all use it. `repo_roots` stays the clones — git operations and
+  `_repo_lock` key on them. A repo the plan names later branches from the
+  epic branch there (`story_base_refs`), not from its main.
 - Plan scope still authorises every write. A writable repo is not a
   free-for-all: the path must be in the plan, prefix included.
 - A single-repo project is byte-identical to before — no prefixes, no note
@@ -209,6 +219,53 @@ then a guide forge generated and stored, then nothing.
 - The guide is read as authoritative, so a wrong line gets followed: the API
   and UI let a person read, edit (`PUT .../guide`), regenerate or discard it.
 
+## Work that already exists for a ticket
+
+Tickets rarely arrive untouched: a story is "In Progress" because someone
+already has `feature/MKT2-848-customer-search-api`, ten commits ahead of main.
+Before any of an epic's branches exist, forge looks (git only, no model —
+`services/prior_work.py`; the daemon's half in `daemon/prior_work_lookup.py`):
+
+- **What:** every local and `origin/` branch whose name carries the ticket's
+  key as a whole token (a story's sub-task keys count for it), in every repo
+  on the project, plus commits on the default branch naming it. Per branch:
+  commits ahead/behind, files, last author, and whether its changes are
+  **already in** the default branch (`git merge-tree --write-tree` yields the
+  default branch's own tree — this catches squash merges). JIRA-style keys
+  only; a GitHub issue's key has no form that appears in branch names.
+- **Verdict per repo:** `continue` (one unmerged branch, or one containing
+  all the others), `choose` (diverged, none contains the rest), `in_default`
+  (only merged work), `none`. Stored on `stories.prior_work` /
+  `epics.prior_work` (migration 0028).
+- **When:** `poll_once`, for every active epic, before anything dispatches —
+  in manual-run projects too, so findings show as soon as the epic is added.
+  A story is looked up once, while pending with no branch; the epic's key
+  until its branch exists. First dispatch looks up inline if still missing.
+  `POST /api/epics/{key}/prior-work/refresh` ("Look again") clears it for
+  stories not started yet.
+- **What it changes** (first dispatch only, `_execute_story_run`): the
+  story's branch starts from the `continue` branch (the ref, so commits
+  pushed since come too), then the epic branch is merged in
+  (`update_story_from_epic`; a conflict is aborted and left to the merge
+  queue). Non-default repos with a `continue` get their worktree eagerly, so
+  the planner reads that code. The epic branch starts from a branch named
+  after the epic, or from forge's own epic branch already on origin
+  (`ensure_integration_worktree`'s `start_point`). The found branch is only
+  ever read: forge never writes to, pushes or checks it out.
+- **`choose`:** forge does not guess which code to build on. The reconciler
+  holds the story (`StorySnapshot.needs_branch_choice` →
+  `choose_prior_branch`); dependents wait as for any dependency, nothing
+  else does. `POST /api/stories/{key}/prior-work {repo_label, branch|null}`
+  records the pick (`null` = start fresh); the UI's "Choose branch".
+- **The planner** gets it in the prompt's prior-work block
+  (`planner_prior_work` → `_format_prior_work_block`): SELECTED (on disk),
+  ALREADY MERGED (on disk via main), or reference only (with a diff sample to
+  port). Work already in main is not skipped — the planner confirms what is
+  missing, and the already-satisfied path finishes a ticket that is done.
+- **Landing:** a story whose branch carries continued commits merges even
+  when dev changes nothing (see below); the epic PR body names each
+  continued branch.
+
 ## Cancelling a run
 
 `POST /api/stories/{key}/cancel` (the **Cancel run** button on a running story)
@@ -255,7 +312,9 @@ edits "so every planned file is actually written". Now it can say so.
   no changes.
 - **Ending:** a run that changed nothing, with declarations, completes as story
   status `done`, `parked_reason="already_satisfied"` (an activity event lists each
-  file and reason) instead of trying to open an empty pull request. A run with
+  file and reason) instead of trying to open an empty pull request — unless its
+  branch carries commits the epic branch lacks (earlier work it continued, see
+  "Work that already exists"): then it is `ready_to_merge`, so those land. A run with
   no declarations and no changes is unchanged. The state field is
   `FeatureRunState.declared_unchanged`, carried into fix rounds.
 
@@ -269,7 +328,7 @@ stories and sub-tasks.
 - **Deleted:** the epic/story rows and everything keyed by them (pull-request
   and worktree records, activity events, usage, run outcomes, watermarks); each
   story's worktree and *local* branch and the epic's integration worktree and
-  branch, in every repo the ticket touched; the story and integration folders
+  branch, in every repo on the project (the epic branch is made in each); the story and integration folders
   under `worktrees_base_dir`, `data_dir/baselines/<key>` and
   `jira_attachments_dir/<key>`; and the LangGraph checkpoints for each story's
   thread. The checkpoints matter beyond tidiness: a ticket added again under
@@ -831,6 +890,7 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | Live activity / streaming | `services/activity_stream.py`, `api/run_routes.py` |
 | Graph routing / gates | `orchestration/graph.py`, `config/store.py` |
 | Dispatch / PR / CI | `daemon/main.py`, `orchestration/integration.py` |
+| Where a branch starts (existing work for a ticket) | `services/prior_work.py` (git), `daemon/prior_work_lookup.py` (when, storage, planner view) |
 | Agent behavior | `agents/roles/*` |
 | Removing a ticket (rows, worktrees, branches, checkpoints — local only) | `daemon/ticket_removal.py`, `state/manager_removal.py`, `tools/worktree.py`'s `discard_worktree` |
 | What the agents are told about a repo (its AGENTS.md, or one forge generates) | `services/project_guide.py`; routes in `api/project_routes.py` |

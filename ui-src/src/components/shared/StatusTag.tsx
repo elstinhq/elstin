@@ -1,3 +1,4 @@
+import { continuedBranches, needsChoice, onlyInDefault } from "../../lib/priorWork";
 import type { EpicPhase, Story, StoryStatus } from "../../types/api";
 import { Badge } from "../ui/badge";
 
@@ -162,6 +163,48 @@ export function WaitingOnTag({ story, statusByKey }: { story: Story; statusByKey
   const waiting = unmetDependencies(story, statusByKey);
   if (!waiting.length) return null;
   return <Tag label={`waits for ${waiting.join(", ")}`} appearance="secondary" title="Starts once these have merged into the epic branch" />;
+}
+
+// Work that already existed for this ticket before forge made its branch
+// (forge/services/prior_work.py): the branch it continues from, or that the
+// work is already in the default branch — so a story that "does nothing new"
+// is never a surprise. A pending story still waiting for a branch pick shows
+// the Choose branch button instead (PriorWorkChoice.tsx).
+export function PriorWorkTag({ story }: { story: Story }) {
+  const continued = continuedBranches(story.prior_work);
+  const only = continued.length === 1 ? continued[0] : undefined;
+  if (only) {
+    const { label, candidate } = only;
+    return (
+      <Tag
+        label={`continues ${candidate.branch}`}
+        appearance="info"
+        title={`${label}: starts from ${candidate.branch} — ${candidate.ahead} commit(s) of earlier work on this ticket`}
+      />
+    );
+  }
+  if (continued.length > 1) {
+    return (
+      <Tag
+        label={`continues ${continued.length} branches`}
+        appearance="info"
+        title={continued.map(({ label, candidate }) => `${label}: ${candidate.branch}`).join("\n")}
+      />
+    );
+  }
+  if (story.status === "pending" && needsChoice(story.prior_work).length) {
+    return <Tag label="pick a branch" appearance="warning" title="Several branches carry diverged work for this ticket" />;
+  }
+  if (onlyInDefault(story.prior_work)) {
+    return (
+      <Tag
+        label="earlier work in main"
+        appearance="secondary"
+        title="Work for this ticket is already in the default branch; the planner checks what, if anything, is still missing"
+      />
+    );
+  }
+  return null;
 }
 
 // Landing it on the epic branch sent it back to dev (a conflict with a story

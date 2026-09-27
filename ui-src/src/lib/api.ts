@@ -116,6 +116,9 @@ export const api = {
     request<RemoveTicketReport>(`/api/epics/${encodeURIComponent(epicKey)}`, { method: "DELETE" }),
   setEpicGate: (epicKey: string, manualGate: boolean) =>
     request<Epic>(`/api/epics/${encodeURIComponent(epicKey)}/gate`, put({ manual_gate: manualGate })),
+  // Forget what was found for tickets not started yet; the next poll looks again.
+  refreshPriorWork: (epicKey: string) =>
+    request<Epic>(`/api/epics/${encodeURIComponent(epicKey)}/prior-work/refresh`, { method: "POST" }),
   getEpicUsage: (epicKey: string) => request<EpicUsage>(`/api/epics/${encodeURIComponent(epicKey)}/usage`),
 
   // -- stories -------------------------------------------------------------
@@ -130,6 +133,9 @@ export const api = {
     }),
   answerStoryQuestions: (storyKey: string, answers: ClarificationAnswerInput[]) =>
     request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/answer`, json({ answers })),
+  // Which diverged branch this ticket continues from in one repo; null = start fresh.
+  pickPriorBranch: (storyKey: string, repoLabel: string, branch: string | null) =>
+    request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/prior-work`, json({ repo_label: repoLabel, branch })),
   retryStory: (storyKey: string) => request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/retry`, { method: "POST" }),
   // Stops a run in flight; the story is left failed ("cancelled") so Retry starts it over.
   cancelStory: (storyKey: string) => request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/cancel`, { method: "POST" }),

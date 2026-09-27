@@ -43,6 +43,11 @@ class StorySnapshot:
     # back to "every story in an earlier level" for a row that predates
     # stored dependencies — epic_sync.stored_dependencies).
     depends_on: tuple[str, ...] = ()
+    # Work already done on this ticket was found on several diverged
+    # branches and a human has not picked which one to continue from
+    # (forge/services/prior_work.py). A pending story waits for that pick —
+    # forge does not guess which code to build on.
+    needs_branch_choice: bool = False
 
 
 @dataclass(frozen=True)
@@ -119,7 +124,7 @@ class Blocked:
 
     story_key: str
     # "unknown_story" | "epic_on_hold" | "no_levels" | "epic_resolved" | "story_finished" | "story_failed"
-    # | "dependency_failed" | "waiting_on_dependencies"
+    # | "dependency_failed" | "waiting_on_dependencies" | "choose_prior_branch"
     reason: str
 
 
@@ -147,6 +152,8 @@ def plan_orchestration(snapshot: EpicSnapshot, ctx: OrchestratorContext) -> list
             intents.append(NoOp(story_key=key, reason="dependency_failed"))
         elif story.status == "pending" and not _dependencies_met(snapshot, story):
             intents.append(NoOp(story_key=key, reason="waiting_on_dependencies"))
+        elif story.status == "pending" and story.needs_branch_choice:
+            intents.append(NoOp(story_key=key, reason="choose_prior_branch"))
         else:
             intents.append(_intent_for(story, ctx))
 
@@ -250,6 +257,8 @@ def describe_story_action(snapshot: EpicSnapshot, ctx: OrchestratorContext, stor
         return Blocked(story_key, "dependency_failed")
     if story.status == "pending" and not _dependencies_met(snapshot, story):
         return Blocked(story_key, "waiting_on_dependencies")
+    if story.status == "pending" and story.needs_branch_choice:
+        return Blocked(story_key, "choose_prior_branch")
     return _intent_for(story, ctx)
 
 
