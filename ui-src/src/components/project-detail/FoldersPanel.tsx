@@ -22,7 +22,7 @@ async function backfillFolderlessEpics(projectId: number, repoId: number) {
   await Promise.all(epics.filter((epic) => !epic.repo).map((epic) => api.setEpicRepo(epic.jira_key, repoId)));
 }
 
-function FolderRow({ projectId, repo }: { projectId: number; repo: ProjectRepo }) {
+function FolderRow({ projectId, repo, others }: { projectId: number; repo: ProjectRepo; others: ProjectRepo[] }) {
   const removeRepo = useRemoveProjectRepo(projectId);
   const { showToast } = useToast();
 
@@ -45,6 +45,14 @@ function FolderRow({ projectId, repo }: { projectId: number; repo: ProjectRepo }
         loading={removeRepo.isPending}
         onClick={() =>
           removeRepo.mutate(repo.id, {
+            onSuccess: ({ epics_moved, moved_to }) => {
+              const next = others.find((r) => r.id === moved_to);
+              if (!epics_moved.length) showToast("Folder removed", "success");
+              else if (next)
+                showToast(`Folder removed — ${epics_moved.join(", ")} now ${epics_moved.length === 1 ? "defaults" : "default"} to ${next.label || next.path}`, "success");
+              else
+                showToast(`Folder removed — ${epics_moved.join(", ")} ${epics_moved.length === 1 ? "waits" : "wait"} until you add a folder`, "warning");
+            },
             onError: (err) => showToast(err.message || "Could not remove folder", "error"),
           })
         }
@@ -99,7 +107,9 @@ export function FoldersPanel({ projectId }: { projectId: number }) {
             {repos.length === 0 ? (
               <p className="text-muted-foreground text-sm">No folders attached yet — use + to add a git repo.</p>
             ) : (
-              repos.map((repo) => <FolderRow key={repo.id} projectId={projectId} repo={repo} />)
+              repos.map((repo) => (
+                <FolderRow key={repo.id} projectId={projectId} repo={repo} others={repos.filter((r) => r.id !== repo.id)} />
+              ))
             )}
           </div>
         </div>

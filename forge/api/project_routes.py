@@ -202,14 +202,27 @@ def add_project_repo(project_id: int, body: ProjectRepoCreateRequest) -> dict:
 
 @router.delete("/{project_id}/repos/{repo_id}")
 def remove_project_repo(project_id: int, repo_id: int) -> dict:
+    """Detach a folder. Epics that defaulted to it move to the project's next
+    folder (a default, not a binding — forge/tools/workspace.py); 409 only
+    while a story has unfinished work in it. The folder on disk is left as
+    it is. See forge/state/manager_project.py's remove_project_repo."""
     sm = StateManager()
     repo = sm.get_project_repo(repo_id)
     if repo is None or repo["project_id"] != project_id:
         raise HTTPException(status_code=404, detail=f"No such folder: {repo_id}")
-    removed = sm.remove_project_repo(repo_id)
-    if not removed:
-        raise HTTPException(status_code=400, detail="Folder is still assigned to an epic — reassign it first")
-    return {"repo_id": repo_id, "removed": True}
+    result = sm.remove_project_repo(repo_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"No such folder: {repo_id}")
+    if not result["removed"]:
+        blocked = result["blocked_by"]
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{', '.join(blocked)} {'has' if len(blocked) == 1 else 'have'} unfinished work in this folder. "
+                "Let it merge, or remove that ticket, before removing the folder."
+            ),
+        )
+    return {"repo_id": repo_id, **result}
 
 
 class RepoGuideRequest(BaseModel):

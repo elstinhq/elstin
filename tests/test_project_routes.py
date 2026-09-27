@@ -197,18 +197,52 @@ def test_a_bad_folder_leaves_no_empty_project_behind(tmp_path):
         assert len(client.get("/api/projects").json()) == before
 
 
-def test_remove_project_repo_blocked_while_referenced_by_epic(tmp_path):
+def test_removing_an_epics_default_folder_moves_the_epic_to_the_next_one(tmp_path):
+    """Every epic is given a default folder automatically and there is no
+    control to reassign it, so refusing here (as it used to) made the folder
+    impossible to remove."""
     from forge.state.manager import StateManager
 
     sm = StateManager()
     project_id = sm.create_project("Widgets")
-    repo_id = sm.add_project_repo(project_id, str(tmp_path))
+    repo_id = sm.add_project_repo(project_id, str(tmp_path / "a"))
+    other_id = sm.add_project_repo(project_id, str(tmp_path / "b"))
     sm.create_epic("ENG-1", project_id=project_id)
     sm.set_epic_project_repo("ENG-1", repo_id)
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0)
+    sm.set_story_project_repo("ENG-2", repo_id)
 
     with _client() as client:
         response = client.delete(f"/api/projects/{project_id}/repos/{repo_id}")
-        assert response.status_code == 400
+
+    assert response.status_code == 200
+    assert response.json() == {"repo_id": repo_id, "removed": True, "epics_moved": ["ENG-1"], "moved_to": other_id}
+    assert sm.get_epic("ENG-1")["project_repo_id"] == other_id
+    assert sm.get_story("ENG-2")["project_repo_id"] is None  # back to the epic's default
+
+
+def test_a_folder_with_unfinished_work_in_it_is_not_removed(tmp_path):
+    from forge.state.manager import StateManager
+
+    sm = StateManager()
+    project_id = sm.create_project("Widgets")
+    path = str(tmp_path / "a")
+    repo_id = sm.add_project_repo(project_id, path)
+    sm.create_epic("ENG-1", project_id=project_id)
+    sm.set_epic_project_repo("ENG-1", repo_id)
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0)
+    sm.record_story_worktree("ENG-2", repo_label="a", repo_path=path, worktree_path=str(tmp_path / "wt"), branch="feat/ENG-2-x", is_default=True)
+    sm.set_story_status("ENG-2", "ready_to_merge")
+
+    with _client() as client:
+        refused = client.delete(f"/api/projects/{project_id}/repos/{repo_id}")
+        assert refused.status_code == 409 and "ENG-2" in refused.json()["detail"]
+        assert sm.get_project_repo(repo_id) is not None and sm.get_epic("ENG-1")["project_repo_id"] == repo_id
+
+        sm.set_story_status("ENG-2", "merged")  # landed: nothing of it left to land from there
+        assert client.delete(f"/api/projects/{project_id}/repos/{repo_id}").status_code == 200
+    assert sm.get_project_repo(repo_id) is None
+    assert sm.get_epic("ENG-1")["project_repo_id"] is None  # no folder left: it waits for one
 
 
 def test_project_config_set_get_clear_with_fallback():

@@ -65,7 +65,8 @@ export const api = {
   addProjectRepo: (projectId: number, body: { url?: string; path?: string; label?: string | null }) =>
     request<ProjectRepo>(`/api/projects/${projectId}/repos`, json(body)),
   removeProjectRepo: (projectId: number, repoId: number) =>
-    request<{ repo_id: number; removed: boolean }>(`/api/projects/${projectId}/repos/${repoId}`, {
+    // Epics that defaulted to it move to the project's next folder (moved_to; null = none left).
+    request<{ repo_id: number; removed: boolean; epics_moved: string[]; moved_to: number | null }>(`/api/projects/${projectId}/repos/${repoId}`, {
       method: "DELETE",
     }),
 

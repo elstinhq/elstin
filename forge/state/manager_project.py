@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select, update
 
 from forge.db.engine import session_scope
-from forge.db.models import Epic, Project, ProjectConfig, ProjectRepo, ProjectTicketFilter
+from forge.db.models import Epic, Project, ProjectConfig, ProjectRepo, ProjectTicketFilter, Story, StoryWorktree
+
+# A story done with its folder: nothing of it is left to land from there.
+_FINISHED_STORY_STATUSES = ("merged", "done", "skipped")
 
 
 class ProjectNotEmpty(RuntimeError):
@@ -97,19 +100,51 @@ class _ProjectMixin:
             repo.generated_guide_at = _utcnow() if guide else None
             return True
 
-    def remove_project_repo(self, repo_id: int) -> bool:
-        """Returns False (does not delete) if any epic still points at this
-        folder — detaching it would silently orphan that epic's dispatch
-        target."""
+    def remove_project_repo(self, repo_id: int) -> dict | None:
+        """Detach a folder from its project. None for an unknown folder.
+
+        No repo is bound to an epic (forge/tools/workspace.py) — an epic's
+        folder is only the default for unprefixed paths, assigned
+        automatically — so a folder being that default is no reason to keep
+        it: each such epic moves to the project's next folder (or to none, if
+        this was the last; it waits until one is added), and a story that
+        pointed at it goes back to its epic's default.
+
+        What does block it is unfinished work IN the folder: a story with a
+        worktree there that has not merged or finished. Those stories' plans
+        and branches live in this repo; detaching it would strand them.
+        Returns {"removed": False, "blocked_by": [story keys]} then, and
+        changes nothing. Otherwise {"removed": True, "epics_moved": [...],
+        "moved_to": repo id or None}.
+
+        The folder on disk is left as it is — a clone included."""
         with session_scope() as session:
             repo = session.get(ProjectRepo, repo_id)
             if repo is None:
-                return False
-            in_use = session.scalar(select(func.count()).where(Epic.project_repo_id == repo_id)) or 0
-            if in_use:
-                return False
+                return None
+            unfinished = session.execute(
+                select(StoryWorktree.story_key)
+                .join(Story, Story.jira_key == StoryWorktree.story_key)
+                .where(
+                    or_(StoryWorktree.project_repo_id == repo_id, StoryWorktree.repo_path == repo.path),
+                    Story.status.notin_(_FINISHED_STORY_STATUSES),
+                )
+            ).scalars().all()
+            if unfinished:
+                return {"removed": False, "blocked_by": sorted(set(unfinished))}
+
+            replacement = session.execute(
+                select(ProjectRepo.id)
+                .where(ProjectRepo.project_id == repo.project_id, ProjectRepo.id != repo_id)
+                .order_by(ProjectRepo.id)
+            ).scalars().first()
+            moved = session.execute(select(Epic.jira_key).where(Epic.project_repo_id == repo_id)).scalars().all()
+            session.execute(update(Epic).where(Epic.project_repo_id == repo_id).values(project_repo_id=replacement))
+            session.execute(update(Story).where(Story.project_repo_id == repo_id).values(project_repo_id=None))
+            # Finished stories' worktree rows are history; they keep the path.
+            session.execute(update(StoryWorktree).where(StoryWorktree.project_repo_id == repo_id).values(project_repo_id=None))
             session.delete(repo)
-            return True
+            return {"removed": True, "epics_moved": sorted(moved), "moved_to": replacement}
 
     def delete_project_records(self, project_id: int) -> dict[str, int] | None:
         """Delete the project's own rows — its settings overrides, ticket

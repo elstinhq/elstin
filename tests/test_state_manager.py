@@ -261,12 +261,16 @@ def test_project_and_project_repo_round_trip():
     sm.create_epic("ENG-1", project_id=project_id)
     assert sm.get_project(project_id)["epic_count"] == 1
 
+    # A folder being an epic's default is no reason to keep it: the epic moves
+    # to the project's next folder, or to none once the last one goes.
+    other_id = sm.add_project_repo(project_id, "/tmp/other")
     sm.set_epic_project_repo("ENG-1", repo_id)
-    assert sm.remove_project_repo(repo_id) is False  # still referenced by ENG-1
-
-    sm.set_epic_project_repo("ENG-1", None)
-    assert sm.remove_project_repo(repo_id) is True
+    assert sm.remove_project_repo(repo_id) == {"removed": True, "epics_moved": ["ENG-1"], "moved_to": other_id}
     assert sm.get_project_repo(repo_id) is None
+    assert sm.get_epic("ENG-1")["project_repo_id"] == other_id
+    assert sm.remove_project_repo(other_id) == {"removed": True, "epics_moved": ["ENG-1"], "moved_to": None}
+    assert sm.get_epic("ENG-1")["project_repo_id"] is None
+    assert sm.remove_project_repo(other_id) is None  # already gone
 
 
 def test_list_projects_orders_newest_first_and_counts():

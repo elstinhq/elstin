@@ -177,6 +177,13 @@ project create (`repo_url` / `repo_path`):
   and the in-container path; the image trusts every repo
   (`safe.directory '*'`) because a mounted one is owned by the host user.
 
+**Removing a folder** (`DELETE /api/projects/{id}/repos/{repo_id}`) detaches
+it; the folder on disk stays. An epic's folder is only a default, so epics
+that defaulted to it move to the project's next folder (none if it was the
+last — `poll_once` assigns one when a folder is added) and stories that
+pointed at it inherit their epic's again. It is refused (409) only while a
+story has unfinished work in it — a worktree there, not merged/done/skipped.
+
 **An attached folder's own checkout is never touched** — forge only adds
 branches and worktrees to its `.git`, exactly as with a clone. An attached
 repo may have no `origin` (never pushed): `tools/worktree.py` then skips
