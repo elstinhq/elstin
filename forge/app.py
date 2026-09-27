@@ -28,6 +28,19 @@ from forge.daemon.ticket_sync import run_ticket_sync_forever
 
 _UI_DIR = Path(__file__).resolve().parent.parent / "settings-ui"
 
+# The UI's pages and bundles keep fixed names (settings-ui/vendor/app-*.js),
+# so without this a browser could run a cached bundle for a while after a
+# rebuild — a button that exists on the server but not on screen. "no-cache"
+# still caches: the browser asks every load and gets a 304 when nothing changed.
+_REVALIDATE = {"Cache-Control": "no-cache"}
+
+
+class _RevalidatedStaticFiles(StaticFiles):
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers.update(_REVALIDATE)
+        return response
+
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
@@ -59,17 +72,17 @@ def create_app() -> FastAPI:
 
     @app.get("/settings")
     def settings_page() -> FileResponse:
-        return FileResponse(_UI_DIR / "index.html")
+        return FileResponse(_UI_DIR / "index.html", headers=_REVALIDATE)
 
     @app.get("/")
     @app.get("/projects")
     def projects_page() -> FileResponse:
-        return FileResponse(_UI_DIR / "dashboard.html")
+        return FileResponse(_UI_DIR / "dashboard.html", headers=_REVALIDATE)
 
     @app.get("/projects/{project_id}")
     def project_detail_page(project_id: int) -> FileResponse:
-        return FileResponse(_UI_DIR / "project.html")
+        return FileResponse(_UI_DIR / "project.html", headers=_REVALIDATE)
 
-    app.mount("/settings-ui", StaticFiles(directory=_UI_DIR), name="settings-ui")
+    app.mount("/settings-ui", _RevalidatedStaticFiles(directory=_UI_DIR), name="settings-ui")
 
     return app
