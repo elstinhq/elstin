@@ -18,6 +18,14 @@ export function useSetTicketSource(id: number) {
   });
 }
 
+// No cache invalidation: every query of this project sits under
+// ["projects"], so invalidating would refetch the deleted project, 404, and
+// unmount the page before the caller's onSuccess could navigate away — which
+// is a full page load that refetches everything anyway.
+export function useDeleteProject(id: number) {
+  return useMutation({ mutationFn: () => api.deleteProject(id) });
+}
+
 export function useCreateProject() {
   const queryClient = useQueryClient();
   return useMutation({

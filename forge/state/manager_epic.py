@@ -17,6 +17,14 @@ class _EpicMixin:
             rows = session.execute(select(Epic.jira_key).where(Epic.phase.notin_(_TERMINAL_EPIC_PHASES))).scalars().all()
             return list(rows)
 
+    def list_project_epic_keys(self, project_id: int) -> list[str]:
+        """Every epic of one project, whatever its phase."""
+        with session_scope() as session:
+            rows = session.execute(
+                select(Epic.jira_key).where(Epic.project_id == project_id).order_by(Epic.created_at)
+            ).scalars().all()
+            return list(rows)
+
     def list_all_epic_keys(self) -> list[str]:
         """Every epic regardless of phase — for the dashboard, which shows
         completed/failed epics too, not just ones the daemon still polls."""

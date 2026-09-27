@@ -51,6 +51,7 @@ these node bodies call run_dev/run_planner directly.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -508,6 +509,16 @@ def build_graph() -> StateGraph:
     return graph
 
 
+# setup() runs one caller at a time. Stories run in parallel
+# (forge/daemon/main.py), and on a fresh database two runs starting together
+# both created LangGraph's tables — Postgres rejects the second CREATE of the
+# same type, failing that run. It still runs on every open rather than once
+# per process: it is a cheap no-op on existing tables, and it recreates them
+# if the schema was reset underneath a running process. Locks are per event
+# loop: an asyncio lock belongs to the loop it was first used on.
+_checkpointer_setup_locks: dict[tuple[int, str], asyncio.Lock] = {}
+
+
 @asynccontextmanager
 async def checkpointer_from_url(database_url: str):
     """Postgres checkpointer — the durable-suspend/wake mechanism (see this
@@ -523,7 +534,8 @@ async def checkpointer_from_url(database_url: str):
 
     conninfo = database_url.replace("postgresql+psycopg://", "postgresql://", 1)
     async with AsyncPostgresSaver.from_conn_string(conninfo) as saver:
-        await saver.setup()
+        async with _checkpointer_setup_locks.setdefault((id(asyncio.get_running_loop()), conninfo), asyncio.Lock()):
+            await saver.setup()
         yield saver
 
 

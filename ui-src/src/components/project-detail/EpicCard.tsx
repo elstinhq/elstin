@@ -185,7 +185,8 @@ function PriorWorkSummary({ projectId, epic, stories }: { projectId: number; epi
   const { showToast } = useToast();
   const unstarted = stories.filter((s) => s.status === "pending" && !s.branch);
   const lookups = [epic.prior_work, ...stories.map((s) => s.prior_work)].filter((p) => p !== null);
-  if (!lookups.length && !unstarted.length) return null;
+  // Nothing is looked up until the project has a folder to look in.
+  if (!epic.repo || (!lookups.length && !unstarted.length)) return null;
 
   const continuing = stories.filter((s) => continuedBranches(s.prior_work).length).map((s) => displayKey(s));
   const choosing = stories.filter((s) => s.status === "pending" && needsChoice(s.prior_work).length).map((s) => displayKey(s));

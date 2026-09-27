@@ -1,5 +1,7 @@
-"""Project CRUD, repo attachment (clones the given git URL into storage
-this process controls — see forge/services/repo_clone.py for why),
+"""Project CRUD (DELETE removes the project and everything it owns — see
+forge/daemon/project_removal.py), repo attachment (clones the given git URL
+into storage this process controls, or attaches a folder already on disk —
+see forge/services/repo_clone.py),
 project-scoped config overrides, and the project's saved JIRA ticket
 filter. Epics live under a project — see forge/api/epic_routes.py for the
 epic-facing endpoints that were adjusted to require a project_id.
@@ -21,6 +23,7 @@ from fastapi import APIRouter, HTTPException
 from jira import JIRAError
 from pydantic import BaseModel
 
+from forge.daemon.project_removal import ProjectBusy, ProjectNotFound, ProjectRemovalError, remove_project
 from forge.config.store import (
     PROJECT_OVERRIDABLE_KEYS,
     clear_project_config,
@@ -161,6 +164,23 @@ def update_project(project_id: int, body: ProjectUpdateRequest) -> dict:
         )
     sm.update_project(project_id, name=body.name, description=body.description, ticket_source=body.ticket_source)
     return sm.get_project(project_id)
+
+
+@router.delete("/{project_id}")
+async def delete_project(project_id: int) -> dict:
+    """Delete the project and everything it owns in forge: its tickets (as
+    Remove ticket does each), the clones forge made for it, its settings,
+    ticket filter and folders. An attached folder stays on disk, and nothing
+    is sent to GitHub or JIRA — see forge/daemon/project_removal.py. Refused
+    (409) while any of its stories has a run in progress."""
+    try:
+        return await remove_project(StateManager(), project_id)
+    except ProjectNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ProjectBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ProjectRemovalError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/{project_id}/repos")

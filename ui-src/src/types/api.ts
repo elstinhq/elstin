@@ -296,6 +296,26 @@ export interface EpicLevel {
 
 // What removing a ticket did, and what it deliberately did not touch
 // (forge/daemon/ticket_removal.py). Removal is local only.
+// What deleting a project did (forge/daemon/project_removal.py). Local only:
+// attached folders stay on disk and nothing on GitHub or JIRA is touched.
+export interface DeleteProjectReport {
+  project_id: number;
+  name: string;
+  removed: {
+    tickets: string[];
+    clones: string[];
+    settings_overrides: number;
+    ticket_filters: number;
+    folders: number;
+  };
+  attached_folders_kept: string[];
+  left_on_remote: {
+    pull_requests: { story_key: string; number: number; url: string | null; state: string }[];
+    branches_that_may_be_pushed: string[];
+  };
+  warnings: string[];
+}
+
 export interface RemoveTicketReport {
   epic: string;
   removed: {

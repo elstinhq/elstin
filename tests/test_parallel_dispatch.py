@@ -135,3 +135,24 @@ async def test_one_story_crashing_does_not_stop_the_others(git_repo, tmp_path, p
 
     assert sm.get_story("ENG-3")["status"] == "ready_to_merge"
     assert daemon._background == {}
+
+
+async def test_runs_starting_together_on_a_fresh_database_set_up_the_checkpointer_once():
+    """The first parallel runs against a new database used to race to create
+    LangGraph's tables; Postgres rejected the loser and its run failed."""
+    import os
+
+    import psycopg
+
+    import forge.orchestration.graph as graph
+
+    url = os.environ["DATABASE_URL"]
+    with psycopg.connect(url.replace("postgresql+psycopg://", "postgresql://", 1), autocommit=True) as conn:
+        for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints", "checkpoint_migrations"):
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
+
+    async def open_one() -> bool:
+        async with graph.checkpointer_from_url(url) as saver:
+            return saver is not None
+
+    assert await asyncio.gather(*(open_one() for _ in range(4))) == [True] * 4

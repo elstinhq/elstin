@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from forge.db.engine import session_scope
-from forge.db.models import Epic, Project, ProjectRepo, ProjectTicketFilter
+from forge.db.models import Epic, Project, ProjectConfig, ProjectRepo, ProjectTicketFilter
+
+
+class ProjectNotEmpty(RuntimeError):
+    """The project still has tickets; its own rows were left alone."""
 
 
 class _ProjectMixin:
@@ -106,6 +110,35 @@ class _ProjectMixin:
                 return False
             session.delete(repo)
             return True
+
+    def delete_project_records(self, project_id: int) -> dict[str, int] | None:
+        """Delete the project's own rows — its settings overrides, ticket
+        filter, folders and the project itself — in one transaction. None for
+        an unknown project.
+
+        Its tickets must already be gone (forge/daemon/project_removal.py
+        removes each one first, with everything it left behind): raises
+        ProjectNotEmpty, deleting nothing, if any epic still belongs to it —
+        e.g. the ticket filter's sweep added one while the others were being
+        removed."""
+        with session_scope() as session:
+            project = session.get(Project, project_id)
+            if project is None:
+                return None
+            remaining = session.execute(select(Epic.jira_key).where(Epic.project_id == project_id)).scalars().all()
+            if remaining:
+                raise ProjectNotEmpty(f"Tickets still belong to this project: {', '.join(sorted(remaining))}")
+
+            def gone(statement) -> int:
+                return session.execute(statement).rowcount or 0
+
+            counts = {
+                "settings_overrides": gone(delete(ProjectConfig).where(ProjectConfig.project_id == project_id)),
+                "ticket_filters": gone(delete(ProjectTicketFilter).where(ProjectTicketFilter.project_id == project_id)),
+                "folders": gone(delete(ProjectRepo).where(ProjectRepo.project_id == project_id)),
+            }
+            session.delete(project)
+            return counts
 
     # -- ticket filters ---------------------------------------------------
     # One saved JIRA query per project (see forge/db/models/project.py's

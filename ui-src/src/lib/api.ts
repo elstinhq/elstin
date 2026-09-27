@@ -5,6 +5,7 @@ import type {
   ExternalChangeAction,
   Project,
   ProjectRepo,
+  DeleteProjectReport,
   RemoveTicketReport,
   RepoGuide,
   Story,
@@ -55,6 +56,8 @@ export const api = {
   getProject: (id: number) => request<Project>(`/api/projects/${id}`),
   updateProject: (id: number, body: { ticket_source?: string; name?: string; description?: string }) =>
     request<Project>(`/api/projects/${id}`, put(body)),
+  // The project and everything forge holds for it; attached folders stay, GitHub/JIRA untouched.
+  deleteProject: (id: number) => request<DeleteProjectReport>(`/api/projects/${id}`, { method: "DELETE" }),
 
   // -- folders (project repos) -----------------------------------------
   listProjectRepos: (projectId: number) => request<ProjectRepo[]>(`/api/projects/${projectId}/repos`),

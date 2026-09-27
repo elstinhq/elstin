@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { SettingsField } from "../settings/SettingsField";
+import { DeleteProjectSection } from "./DeleteProjectSection";
 import { useClearProjectConfig, useProjectConfig, useSetProjectConfig } from "../../hooks/useProjectConfig";
 import { useSetTicketSource } from "../../hooks/useProjects";
 import { TICKET_SOURCES } from "../../lib/ticketSource";
@@ -90,6 +91,7 @@ export function ProjectSettingsDialog({ projectId, ticketSource, open, onClose }
               />
             ))}
           </form>
+          <DeleteProjectSection projectId={projectId} />
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>

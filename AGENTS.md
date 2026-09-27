@@ -350,6 +350,31 @@ stories and sub-tasks.
   never deleted. `handle_intent` skips an intent for a story removed since the
   cycle's snapshot was taken.
 
+## Deleting a project
+
+`DELETE /api/projects/{id}` (`daemon/project_removal.py`; the Delete section
+at the bottom of the project's Settings dialog, confirmed by typing the
+project's name) deletes the project and everything forge holds for it —
+locally, like removing a ticket:
+
+- **Each ticket**, exactly as Remove ticket does (above): rows, worktrees,
+  local branches, the epic branch in every repo, checkpoints, baselines,
+  attachments.
+- **The clones forge made** — a folder added by URL, under
+  `cloned_repos_base_dir/<project id>` — and that folder once empty. A
+  stored path outside it is reported, never deleted.
+- **The project's rows**: settings overrides, ticket filter, folders, the
+  project (`state/manager_project.py`'s `delete_project_records`, one
+  transaction; it refuses while any epic still belongs to the project).
+- **Never**: an attached folder (someone's own checkout — only the branches
+  and worktrees forge added go, with the tickets), and anything on GitHub
+  or JIRA. The report lists open pull requests and possibly-pushed branches.
+- **Order**: a run in flight anywhere in the project refuses it (409) before
+  anything is touched. Then the ticket filter is dropped and every epic put
+  on hold, so no sweep or poll starts new work; tickets go one at a time;
+  clones and rows last. A failure part-way leaves the project listed and
+  deleting it again finishes.
+
 ## Story kinds and hierarchy
 
 ### `dev` vs `qa`
@@ -751,7 +776,7 @@ LangGraph checkpointer creates its own tables on first use
 | Area | Prefix | Examples |
 |------|--------|----------|
 | Config | `/api/config` | Global settings CRUD |
-| Projects | `/api/projects` | Projects, repos (cloned from a URL or attached from a local folder — `forge/services/repo_clone.py`), overrides, ticket filter (+ `/preview`, `/sync`) |
+| Projects | `/api/projects` | Projects (DELETE removes one and everything forge holds for it), repos (cloned from a URL or attached from a local folder — `forge/services/repo_clone.py`), overrides, ticket filter (+ `/preview`, `/sync`) |
 | Epics | `/api/epics` | Sync from JIRA, assign repo, manual gate |
 | Stories | `/api/stories` | Approve gate, set kind, get story, get plan |
 
@@ -893,6 +918,7 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | Where a branch starts (existing work for a ticket) | `services/prior_work.py` (git), `daemon/prior_work_lookup.py` (when, storage, planner view) |
 | Agent behavior | `agents/roles/*` |
 | Removing a ticket (rows, worktrees, branches, checkpoints — local only) | `daemon/ticket_removal.py`, `state/manager_removal.py`, `tools/worktree.py`'s `discard_worktree` |
+| Deleting a project (its tickets, clones, settings — local only) | `daemon/project_removal.py`, `state/manager_project.py`'s `delete_project_records` |
 | What the agents are told about a repo (its AGENTS.md, or one forge generates) | `services/project_guide.py`; routes in `api/project_routes.py` |
 | Persistence API | `state/manager_*.py` + Alembic |
 | UI | `ui-src/src/` (React/TS); rebuild with `cd ui-src && npm run build` |
