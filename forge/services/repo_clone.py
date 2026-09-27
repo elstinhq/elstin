@@ -123,6 +123,51 @@ def scan_folder(path: str, *, forbidden_dirs: list[str] | None = None) -> dict:
     return {"path": folder, "is_repo": False, "repos": repos, "reference": plan_reference(folder).summary()}
 
 
+# Enough to scan a big workspace folder by eye; a listing past this is cut
+# and says so, rather than shipping thousands of rows to a picker.
+MAX_BROWSE_ENTRIES = 1000
+
+
+def browse_folder(path: str | None) -> dict:
+    """The subfolders of `path` (home when empty), for the UI's folder
+    picker. Read-only, names only — no file is opened.
+
+    A browser cannot hand a page the real path of a folder picked in the
+    operating system's dialog, and the path that matters is the one the
+    forge process sees (inside Docker, a mount point, not the host's path).
+    So the picker browses through forge. Hidden folders are skipped; a git
+    repository is marked, since that is usually what is being looked for."""
+    raw = (path or "").strip() or "~"
+    folder = os.path.realpath(os.path.expanduser(raw))
+    if not os.path.isabs(os.path.expanduser(raw)):
+        raise RepoAttachError(f"Give the full path to the folder (e.g. /Users/you/code), not {raw!r}")
+    if not os.path.isdir(folder):
+        raise RepoAttachError(f"No folder at {folder} on the machine forge runs on")
+    try:
+        names = sorted(os.listdir(folder), key=str.lower)
+    except OSError as exc:
+        raise RepoAttachError(f"forge cannot read {folder}: {exc.strerror or exc}") from exc
+    entries: list[dict] = []
+    truncated = False
+    for name in names:
+        child = os.path.join(folder, name)
+        if name.startswith(".") or not os.path.isdir(child):
+            continue
+        if len(entries) >= MAX_BROWSE_ENTRIES:
+            truncated = True
+            break
+        entries.append({"name": name, "path": child, "is_repo": os.path.exists(os.path.join(child, ".git"))})
+    parent = os.path.dirname(folder)
+    return {
+        "path": folder,
+        "parent": parent if parent != folder else None,
+        "home": os.path.expanduser("~"),
+        "is_repo": os.path.exists(os.path.join(folder, ".git")),
+        "entries": entries,
+        "truncated": truncated,
+    }
+
+
 def _resolve_folder(path: str, forbidden_dirs: list[str] | None) -> str:
     raw = (path or "").strip()
     if not raw:

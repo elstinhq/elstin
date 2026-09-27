@@ -2,6 +2,19 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { queryKeys } from "../lib/queryClient";
 
+// A folder's subfolders for the folder picker. Not cached across opens:
+// what is on disk changes, and the picker is opened on purpose.
+export function useBrowseFolder(path: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ["browse-folder", path ?? ""],
+    queryFn: () => api.browseFolder(path),
+    enabled,
+    staleTime: 0,
+    gcTime: 0,
+    retry: false,
+  });
+}
+
 export function useProjectRepos(projectId: number) {
   return useQuery({ queryKey: queryKeys.projectRepos(projectId), queryFn: () => api.listProjectRepos(projectId) });
 }

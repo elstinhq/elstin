@@ -37,7 +37,8 @@ from forge.api.epic_routes import _with_stories
 from forge.services.jira_filter import build_jql, preview_filter, sync_project_filter
 from forge.services.project_guide import MAX_GUIDE_CHARS, GuideError, generate_project_guide, read_repo_guide
 from forge.services.repo_clone import (
-    RepoAttachError, RepoCloneError, attach_local_repository, attach_reference_folder, clone_repository, scan_folder,
+    RepoAttachError, RepoCloneError, attach_local_repository, attach_reference_folder, browse_folder, clone_repository,
+    scan_folder,
 )
 from forge.services.ticket_source import known_sources
 from forge.state.manager import StateManager
@@ -59,6 +60,11 @@ class ProjectCreateRequest(BaseModel):
     # A plain folder to read for context (its CLAUDE.md, docs) — usually the
     # workspace folder the repos above were picked from.
     reference_path: str | None = None
+
+
+class BrowseFolderRequest(BaseModel):
+    # Home when empty.
+    path: str | None = None
 
 
 class ScanFolderRequest(BaseModel):
@@ -191,6 +197,17 @@ def create_project(body: ProjectCreateRequest) -> dict:
     if reference:
         _add_repo(sm, project_id, url=None, path=reference, kind="reference")
     return sm.get_project(project_id)
+
+
+@router.post("/browse-folder")
+def browse_folder_route(body: BrowseFolderRequest) -> dict:
+    """The subfolders of a folder on the machine forge runs on, for the UI's
+    folder picker (a browser cannot give a page a real filesystem path).
+    Read-only, names only; see forge/services/repo_clone.py's browse_folder."""
+    try:
+        return browse_folder(body.path)
+    except RepoAttachError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/scan-folder")

@@ -6,6 +6,7 @@ import type {
   Project,
   ProjectRepo,
   DeleteProjectReport,
+  FolderListing,
   ScanFolderResult,
   RemoveTicketReport,
   RepoGuide,
@@ -65,6 +66,8 @@ export const api = {
   getProject: (id: number) => request<Project>(`/api/projects/${id}`),
   updateProject: (id: number, body: { ticket_source?: string; name?: string; description?: string }) =>
     request<Project>(`/api/projects/${id}`, put(body)),
+  // Read-only: a folder's subfolders, for the folder picker (home when no path).
+  browseFolder: (path?: string | null) => request<FolderListing>("/api/projects/browse-folder", json({ path: path || null })),
   // Read-only: is this folder a git repo, or one holding repos to pick from?
   scanFolder: (path: string, projectId?: number) =>
     request<ScanFolderResult>("/api/projects/scan-folder", json({ path, project_id: projectId ?? null })),

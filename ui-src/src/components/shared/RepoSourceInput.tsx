@@ -1,3 +1,6 @@
+import { useState } from "react";
+import { FolderOpen } from "lucide-react";
+import { FolderBrowser } from "./FolderBrowser";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
@@ -44,6 +47,8 @@ interface RepoSourceInputProps {
 
 export function RepoSourceInput({ source, onChange, suffix }: RepoSourceInputProps) {
   const current = MODES[source.mode];
+  const [browsing, setBrowsing] = useState(false);
+  const attaching = source.mode === "attach";
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex gap-2" role="group" aria-label="How to add the repository">
@@ -54,7 +59,10 @@ export function RepoSourceInput({ source, onChange, suffix }: RepoSourceInputPro
             size="sm"
             variant={mode === source.mode ? "default" : "outline"}
             aria-pressed={mode === source.mode}
-            onClick={() => mode !== source.mode && onChange({ mode, value: "" })}
+            onClick={() => {
+              if (mode !== source.mode) onChange({ mode, value: "" });
+              setBrowsing(false);
+            }}
           >
             {MODES[mode].label}
           </Button>
@@ -64,14 +72,32 @@ export function RepoSourceInput({ source, onChange, suffix }: RepoSourceInputPro
         {current.field}
         {suffix ? <span className="text-muted-foreground font-normal"> {suffix}</span> : null}
       </Label>
-      <Input
-        id="repo-source"
-        placeholder={current.placeholder}
-        value={source.value}
-        spellCheck={false}
-        autoComplete="off"
-        onChange={(e) => onChange({ ...source, value: e.target.value })}
-      />
+      <div className="flex gap-2">
+        <Input
+          id="repo-source"
+          placeholder={current.placeholder}
+          value={source.value}
+          spellCheck={false}
+          autoComplete="off"
+          onChange={(e) => onChange({ ...source, value: e.target.value })}
+        />
+        {attaching ? (
+          <Button type="button" variant="outline" className="shrink-0" aria-expanded={browsing} onClick={() => setBrowsing(!browsing)}>
+            <FolderOpen />
+            Browse…
+          </Button>
+        ) : null}
+      </div>
+      {attaching && browsing ? (
+        <FolderBrowser
+          startPath={source.value.trim() || null}
+          onPick={(path) => {
+            onChange({ ...source, value: path });
+            setBrowsing(false);
+          }}
+          onClose={() => setBrowsing(false)}
+        />
+      ) : null}
       <p className="text-muted-foreground text-xs">{current.hint}</p>
     </div>
   );

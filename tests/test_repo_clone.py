@@ -197,3 +197,30 @@ def test_attaching_a_folder_that_holds_repos_names_them(tmp_path):
     with pytest.raises(RepoAttachError, match="run `git init` there"):
         attach_local_repository(str(root / "empty"))
 
+
+# --- browsing, for the folder picker ------------------------------------------
+
+from forge.services.repo_clone import browse_folder  # noqa: E402
+
+
+def test_browsing_lists_subfolders_and_marks_repos(tmp_path, monkeypatch):
+    root = _workspace(tmp_path)
+    (root / "notes.txt").write_text("x\n")
+
+    listing = browse_folder(str(root))
+
+    assert listing["path"] == str(root.resolve()) and listing["parent"] == str(root.resolve().parent)
+    assert listing["is_repo"] is False and listing["truncated"] is False
+    assert [(e["name"], e["is_repo"]) for e in listing["entries"]] == [
+        ("docs", False), ("fresh", True), ("Mkt-adminportal", True), ("mkt-apiservice", True),
+    ]  # folders only, hidden ones skipped, case-insensitive order
+    inside = browse_folder(listing["entries"][2]["path"])
+    assert inside["is_repo"] is True
+
+    monkeypatch.setenv("HOME", str(root))
+    assert browse_folder(None)["path"] == str(root.resolve())
+    assert browse_folder("/")["parent"] is None
+    with pytest.raises(RepoAttachError, match="No folder at"):
+        browse_folder(str(root / "nope"))
+    with pytest.raises(RepoAttachError, match="full path"):
+        browse_folder("relative/path")

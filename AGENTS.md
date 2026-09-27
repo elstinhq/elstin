@@ -176,6 +176,11 @@ project create (`repo_url` / `repo_path`):
   that means a bind mount (`docker-compose.yml` has the commented example)
   and the in-container path; the image trusts every repo
   (`safe.directory '*'`) because a mounted one is owned by the host user.
+- **Picking the path**: "Browse…" beside the path field walks the machine
+  forge runs on (`POST /api/projects/browse-folder` → `browse_folder`:
+  subfolder names only, hidden ones skipped, git repos marked). A browser
+  cannot give a page a real path from the OS folder dialog, and the path
+  that matters is forge's own — a mount point inside Docker.
 - **A folder holding repos** (a workspace with one checkout per service,
   itself not a repo) is attached repo by repo: every git operation forge
   makes happens inside one repository. `scan_folder` /

@@ -303,6 +303,18 @@ export interface EpicLevel {
 
 // What removing a ticket did, and what it deliberately did not touch
 // (forge/daemon/ticket_removal.py). Removal is local only.
+// One folder's subfolders on the machine forge runs on — the folder picker
+// browses through forge (POST /api/projects/browse-folder), since a browser
+// cannot give a page a real filesystem path.
+export interface FolderListing {
+  path: string;
+  parent: string | null;
+  home: string;
+  is_repo: boolean;
+  entries: { name: string; path: string; is_repo: boolean }[];
+  truncated: boolean;
+}
+
 // What attaching a folder would mean (POST /api/projects/scan-folder): a git
 // repo as is, or a folder holding repos to pick from — forge works inside
 // one repository at a time, so each picked one becomes a folder of its own.

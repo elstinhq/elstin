@@ -162,6 +162,18 @@ def test_scanning_a_folder_that_holds_repos_marks_the_ones_already_attached(tmp_
     assert missing.status_code == 400
 
 
+def test_browsing_a_folder_over_the_api(tmp_path):
+    api = _git_repo_at(tmp_path / "workspace" / "api")
+
+    with _client() as client:
+        listing = client.post("/api/projects/browse-folder", json={"path": str(tmp_path / "workspace")})
+        missing = client.post("/api/projects/browse-folder", json={"path": str(tmp_path / "nope")})
+
+    assert listing.status_code == 200
+    assert listing.json()["entries"] == [{"name": "api", "path": api, "is_repo": True}]
+    assert missing.status_code == 400
+
+
 def test_create_a_project_with_several_repos_picked_from_one_folder(tmp_path):
     api = _git_repo_at(tmp_path / "workspace" / "api")
     web = _git_repo_at(tmp_path / "workspace" / "web")
