@@ -74,6 +74,7 @@ from forge.tools.codebase_skeleton import build_workspace_skeleton
 from forge.tools.git_tools import (
     CODE_FORGE_CO_AUTHOR, GitMergeError, branch_exists, commit_all, get_branch_diff_summary,
 )
+from forge.tools.reference_folder import reference_copy_path, sync_reference_copy
 from forge.tools.workspace import REFERENCE_SIGIL, build_repo_roots
 from forge.tools.worktree import create_worktree, default_branch, resolve_base_ref, run_git
 
@@ -225,17 +226,46 @@ def build_context(sm: StateManager, epic: dict) -> OrchestratorContext:
     )
 
 
-def _workspace_roots(sm: StateManager, epic: dict, default_repo: str | None) -> tuple[str, dict[str, str]]:
-    """(default label, {label: path}) for every repo on this project.
+def _workspace_roots(
+    sm: StateManager, epic: dict, default_repo: str | None,
+) -> tuple[str, dict[str, str], list[str], list[str]]:
+    """(default label, {label: path}, read-only labels, reference labels) for
+    every folder on this project.
 
     No repo is bound to the epic or the story. The planner reads all of
     them and the approved plan decides which ones dev writes, so this is
     simply the whole project. `default_repo` only fixes which repo an
     UNPREFIXED path means — the epic's assigned folder. Assembled here
     because the daemon owns the DB, the same separation the QA context
-    follows."""
+    follows.
+
+    Read-only labels are the folders no plan may write: read-only repos and
+    reference folders (ProjectRepo.kind/read_only). A reference folder's
+    path is its copy, refreshed here (forge/tools/reference_folder.py) —
+    never the folder itself, so no run can reach the original, and the
+    repos inside it are not read a second time under another name."""
     repos = sm.list_project_repos(epic["project_id"]) if epic.get("project_id") else []
-    return build_repo_roots(repos, default_repo)
+    default_label, roots = build_repo_roots(repos, default_repo)
+    by_path = {repo["path"]: repo for repo in repos}
+    base = get_config("worktrees_base_dir") or "/data/repos"
+    read_only: list[str] = []
+    reference: list[str] = []
+    for label, path in list(roots.items()):
+        repo = by_path.get(path)
+        if repo is None:
+            continue
+        if repo.get("kind") == "reference":
+            try:
+                roots[label] = sync_reference_copy(path, reference_copy_path(base, repo["id"]))
+            except Exception:  # noqa: BLE001 — context, never a reason to fail a run
+                logger.warning("could not refresh the reference folder %s — leaving it out", path, exc_info=True)
+                del roots[label]
+                continue
+            reference.append(label)
+        if repo.get("kind") == "reference" or repo.get("read_only"):
+            read_only.append(label)
+    return default_label, roots, read_only, reference
+
 
 
 def _ensure_epic_branches(
@@ -660,7 +690,11 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
 
     # The whole project's repos. Which of them this story writes is
     # decided by its plan, inside the run (forge/tools/workspace.py).
-    default_label, repo_roots = await asyncio.to_thread(_workspace_roots, sm, epic, story_repo)
+    default_label, repo_roots, read_only_labels, reference_labels = await asyncio.to_thread(
+        _workspace_roots, sm, epic, story_repo,
+    )
+    # The folders a story may write — every git repo not marked read-only.
+    writable_roots = {label: path for label, path in repo_roots.items() if label not in read_only_labels}
     known_worktrees = {
         entry["repo_label"]: {
             "repo_path": entry["repo_path"],
@@ -701,7 +735,7 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
         epic_branch = epic.get("integration_branch") or integration_branch_name(
             epic["jira_key"], external_source=epic.get("external_source"), external_id=epic.get("external_id"),
         )
-        await asyncio.to_thread(_ensure_epic_branches, epic, story_repo, repo_roots, epic_branch, worktrees_base_dir)
+        await asyncio.to_thread(_ensure_epic_branches, epic, story_repo, writable_roots, epic_branch, worktrees_base_dir)
         if not epic.get("integration_branch"):
             sm.set_integration_branch(epic["jira_key"], epic_branch)
             epic = {**epic, "integration_branch": epic_branch}
@@ -740,7 +774,7 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
         # Any other repo this ticket already has work in gets its worktree
         # now, from that work, rather than when the plan names the repo: the
         # planner has to read that code to plan around it.
-        for label, repo_path in repo_roots.items():
+        for label, repo_path in writable_roots.items():
             if label == default_label:
                 continue
             candidate = start_candidate(prior, label)
@@ -767,8 +801,11 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
 
     # Where each repo is read, and what a repo the plan names later branches
     # from — see FeatureRunState.read_roots / story_base_refs.
-    read_roots = await asyncio.to_thread(_read_roots, epic, repo_roots, known_worktrees, worktrees_base_dir)
-    story_base_refs = {label: epic["integration_branch"] for label in repo_roots} if epic.get("integration_branch") else {}
+    read_roots = {
+        **repo_roots,  # a read-only folder is read where it is (a reference folder: its copy)
+        **await asyncio.to_thread(_read_roots, epic, writable_roots, known_worktrees, worktrees_base_dir),
+    }
+    story_base_refs = {label: epic["integration_branch"] for label in writable_roots} if epic.get("integration_branch") else {}
     planner_view = await asyncio.to_thread(planner_prior_work, story, epic, repo_roots, default_label)
 
     # thread_id == story_key by construction — one LangGraph run per story,
@@ -788,6 +825,7 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
                 "repo_roots": repo_roots,
                 "read_roots": read_roots,
                 "story_base_refs": story_base_refs,
+                "read_only_labels": read_only_labels,
                 "prior_work": planner_view,
                 "default_repo_label": default_label,
                 "story_worktrees": known_worktrees,
@@ -819,9 +857,15 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
             state["repo_roots"] = repo_roots
             state["read_roots"] = read_roots
             state["story_base_refs"] = story_base_refs
+            state["read_only_labels"] = read_only_labels
             state["prior_work"] = planner_view
             state["default_repo_label"] = default_label
-            state["project_guide"] = await project_guide_for_run(sm, epic["project_id"], repo_roots)
+            # A reference folder's guide (the CLAUDE.md about the repos beside
+            # it) leads: it is the one that says how they relate.
+            state["project_guide"] = await project_guide_for_run(
+                sm, epic["project_id"],
+                {**{label: repo_roots[label] for label in reference_labels}, **repo_roots},
+            )
             state["story_worktrees"] = known_worktrees
             state["story_kind"] = story_kind
             if story_kind == "qa":
@@ -1459,12 +1503,12 @@ async def poll_once(sm: StateManager | None = None, *, wait: bool = False) -> No
             # slips through that — synced before its project had any repo,
             # or before this backfill existed — so dispatch is never stuck
             # on a human picking a folder that no longer has a UI control.
-            repos = sm.list_project_repos(epic["project_id"]) if epic.get("project_id") else []
-            if repos:
-                sm.set_epic_project_repo(epic_key, repos[0]["id"])
+            default_id = sm.writable_project_repo_id(epic["project_id"]) if epic.get("project_id") else None
+            if default_id is not None:
+                sm.set_epic_project_repo(epic_key, default_id)
                 epic = sm.get_epic(epic_key)
             else:
-                logger.info("epic %s: project has no repo cloned yet — skipping", epic_key)
+                logger.info("epic %s: project has no writable repo yet — skipping", epic_key)
                 continue
         # What already exists for tickets not started yet, looked up before
         # any of their branches is made — in manual-run projects too, so it

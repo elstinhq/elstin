@@ -176,6 +176,34 @@ project create (`repo_url` / `repo_path`):
   that means a bind mount (`docker-compose.yml` has the commented example)
   and the in-container path; the image trusts every repo
   (`safe.directory '*'`) because a mounted one is owned by the host user.
+- **A folder holding repos** (a workspace with one checkout per service,
+  itself not a repo) is attached repo by repo: every git operation forge
+  makes happens inside one repository. `scan_folder` /
+  `POST /api/projects/scan-folder` lists the repos directly inside it (one
+  level, hidden folders skipped, each with why it cannot be attached, if
+  so); the UI asks which — none pre-selected, since every folder is read
+  while planning — and attaches each as its own folder. Project create
+  takes several at once (`repo_paths`).
+- **Read-only repos** (`ProjectRepo.read_only`; the picker's per-repo box,
+  or "Make read-only" on the Folders panel — `PUT .../repos/{id}`): read by
+  every run, never changed. `Workspace.read_only` carries them: the tools
+  tell the planner, the plan gate rejects a plan that creates or modifies a
+  file there (`KIND_READ_ONLY_REPO`), and dev never gets a worktree in one.
+  No epic branch is made there, no prior-work lookup runs there, and an
+  epic never defaults to one (`writable_project_repo_id`); marking one
+  moves epics that did, and waits (409) for unfinished work in it.
+- **Reference folders** (`ProjectRepo.kind == "reference"`, always
+  read-only): a plain folder read for context — the workspace folder the
+  repos were picked from, with its CLAUDE.md about how they relate and its
+  docs. Runs read a copy, never the folder (`tools/reference_folder.py`,
+  refreshed at run start, reused for 60s): the repos inside it, hidden and
+  dependency folders, data files (archives, dumps, spreadsheets, media) and
+  anything over 1 MB are left out, up to 25 MB in all. The scan previews
+  what would be read and left out; the picker offers it, ticked when there
+  is anything to read. Its guide leads the project guide. A git repo is
+  refused as a reference folder — attach it read-only instead. The copy
+  lives under `worktrees_base_dir/_reference/<id>` and goes with the folder
+  or the project.
 
 **Removing a folder** (`DELETE /api/projects/{id}/repos/{repo_id}`) detaches
 it; the folder on disk stays. An epic's folder is only a default, so epics
@@ -211,6 +239,9 @@ then a guide forge generated and stored, then nothing.
   any repo that has neither its own nor a stored one. The same is available
   on demand at `POST /api/projects/{id}/repos/{repo_id}/guide/generate`, and
   from the Folders panel in the UI.
+- A reference folder's own CLAUDE.md/AGENTS.md comes first — it is the one
+  that says how the repos relate (e.g. "this contract repo is off limits").
+  forge never generates a guide for a reference folder.
 - The generated guide lives on `ProjectRepo.generated_guide`. **forge never
   writes it into the repo** — it does not edit checkouts it does not own —
   and a repo that ships its own guide is never generated for, and cannot be
@@ -923,6 +954,7 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | Graph routing / gates | `orchestration/graph.py`, `config/store.py` |
 | Dispatch / PR / CI | `daemon/main.py`, `orchestration/integration.py` |
 | Where a branch starts (existing work for a ticket) | `services/prior_work.py` (git), `daemon/prior_work_lookup.py` (when, storage, planner view) |
+| Read-only repos and reference folders (what runs read, what plans may change) | `tools/reference_folder.py`, `tools/workspace.py`'s `Workspace.read_only`, `agents/roles/plan_gate.py`, `daemon/main.py`'s `_workspace_roots` |
 | Agent behavior | `agents/roles/*` |
 | Removing a ticket (rows, worktrees, branches, checkpoints — local only) | `daemon/ticket_removal.py`, `state/manager_removal.py`, `tools/worktree.py`'s `discard_worktree` |
 | Deleting a project (its tickets, clones, settings — local only) | `daemon/project_removal.py`, `state/manager_project.py`'s `delete_project_records` |

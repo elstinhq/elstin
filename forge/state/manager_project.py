@@ -66,12 +66,57 @@ class _ProjectMixin:
             if ticket_source is not None:
                 project.ticket_source = ticket_source
 
-    def add_project_repo(self, project_id: int, path: str, *, label: str | None = None, clone_url: str | None = None) -> int:
+    def add_project_repo(
+        self, project_id: int, path: str, *, label: str | None = None, clone_url: str | None = None,
+        kind: str = "repo", read_only: bool = False,
+    ) -> int:
+        """`kind` "reference" is a plain folder read for context, never
+        written — it is always read-only (see ProjectRepo)."""
         with session_scope() as session:
-            repo = ProjectRepo(project_id=project_id, path=path, label=label, clone_url=clone_url)
+            repo = ProjectRepo(
+                project_id=project_id, path=path, label=label, clone_url=clone_url,
+                kind=kind, read_only=read_only or kind == "reference",
+            )
             session.add(repo)
             session.flush()
             return repo.id
+
+    def writable_project_repo_id(self, project_id: int, *, excluding: int | None = None) -> int | None:
+        """The folder a new epic defaults to: the first-added git repo that
+        can be written. Never a reference folder or a read-only repo — an
+        unprefixed path in a plan means the default repo, and that has to be
+        one a story can change."""
+        with session_scope() as session:
+            query = select(ProjectRepo.id).where(
+                ProjectRepo.project_id == project_id, ProjectRepo.kind == "repo", ProjectRepo.read_only.is_(False),
+            )
+            if excluding is not None:
+                query = query.where(ProjectRepo.id != excluding)
+            return session.execute(query.order_by(ProjectRepo.id)).scalars().first()
+
+    def set_project_repo_read_only(self, repo_id: int, read_only: bool) -> dict | None:
+        """Mark a git repo read-only (or writable again). None for an unknown
+        folder or a reference folder (always read-only).
+
+        Refused, changing nothing, while a story has unfinished work in it —
+        its approved plan writes there: {"changed": False, "blocked_by": [...]}.
+        Otherwise {"changed": True, "epics_moved": [...], "moved_to": id or
+        None}: an epic whose default this repo was moves to the next writable
+        repo, since the default is where an unprefixed path is written."""
+        with session_scope() as session:
+            repo = session.get(ProjectRepo, repo_id)
+            if repo is None or repo.kind != "repo":
+                return None
+            if not read_only:
+                repo.read_only = False
+                return {"changed": True, "epics_moved": [], "moved_to": None}
+            unfinished = _unfinished_work_in(session, repo)
+            if unfinished:
+                return {"changed": False, "blocked_by": unfinished}
+            repo.read_only = True
+            session.flush()
+            moved, replacement = _move_epic_defaults(session, repo)
+            return {"changed": True, "epics_moved": moved, "moved_to": replacement}
 
     def list_project_repos(self, project_id: int) -> list[dict]:
         """Oldest first — this order is what picks the *default* repo for a
@@ -122,24 +167,11 @@ class _ProjectMixin:
             repo = session.get(ProjectRepo, repo_id)
             if repo is None:
                 return None
-            unfinished = session.execute(
-                select(StoryWorktree.story_key)
-                .join(Story, Story.jira_key == StoryWorktree.story_key)
-                .where(
-                    or_(StoryWorktree.project_repo_id == repo_id, StoryWorktree.repo_path == repo.path),
-                    Story.status.notin_(_FINISHED_STORY_STATUSES),
-                )
-            ).scalars().all()
+            unfinished = _unfinished_work_in(session, repo)
             if unfinished:
-                return {"removed": False, "blocked_by": sorted(set(unfinished))}
+                return {"removed": False, "blocked_by": unfinished}
 
-            replacement = session.execute(
-                select(ProjectRepo.id)
-                .where(ProjectRepo.project_id == repo.project_id, ProjectRepo.id != repo_id)
-                .order_by(ProjectRepo.id)
-            ).scalars().first()
-            moved = session.execute(select(Epic.jira_key).where(Epic.project_repo_id == repo_id)).scalars().all()
-            session.execute(update(Epic).where(Epic.project_repo_id == repo_id).values(project_repo_id=replacement))
+            moved, replacement = _move_epic_defaults(session, repo)
             session.execute(update(Story).where(Story.project_repo_id == repo_id).values(project_repo_id=None))
             # Finished stories' worktree rows are history; they keep the path.
             session.execute(update(StoryWorktree).where(StoryWorktree.project_repo_id == repo_id).values(project_repo_id=None))
@@ -267,6 +299,35 @@ def _project_to_dict(project: Project, repo_count: int, epic_count: int) -> dict
     }
 
 
+def _unfinished_work_in(session, repo: ProjectRepo) -> list[str]:
+    """Stories with a worktree in `repo` that have not merged or finished."""
+    rows = session.execute(
+        select(StoryWorktree.story_key)
+        .join(Story, Story.jira_key == StoryWorktree.story_key)
+        .where(
+            or_(StoryWorktree.project_repo_id == repo.id, StoryWorktree.repo_path == repo.path),
+            Story.status.notin_(_FINISHED_STORY_STATUSES),
+        )
+    ).scalars().all()
+    return sorted(set(rows))
+
+
+def _move_epic_defaults(session, repo: ProjectRepo) -> tuple[list[str], int | None]:
+    """Epics defaulting to `repo` move to the project's next writable git
+    repo (None if there is none; poll_once assigns one once there is)."""
+    replacement = session.execute(
+        select(ProjectRepo.id)
+        .where(
+            ProjectRepo.project_id == repo.project_id, ProjectRepo.id != repo.id,
+            ProjectRepo.kind == "repo", ProjectRepo.read_only.is_(False),
+        )
+        .order_by(ProjectRepo.id)
+    ).scalars().first()
+    moved = session.execute(select(Epic.jira_key).where(Epic.project_repo_id == repo.id)).scalars().all()
+    session.execute(update(Epic).where(Epic.project_repo_id == repo.id).values(project_repo_id=replacement))
+    return sorted(moved), replacement
+
+
 def _project_repo_to_dict(repo: ProjectRepo) -> dict:
     return {
         "id": repo.id,
@@ -274,6 +335,8 @@ def _project_repo_to_dict(repo: ProjectRepo) -> dict:
         "path": repo.path,
         "label": repo.label,
         "clone_url": repo.clone_url,
+        "kind": repo.kind or "repo",
+        "read_only": bool(repo.read_only),
         "generated_guide": repo.generated_guide,
         "generated_guide_at": repo.generated_guide_at.isoformat() if repo.generated_guide_at else None,
         "created_at": repo.created_at.isoformat(),

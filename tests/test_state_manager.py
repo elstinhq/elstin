@@ -244,7 +244,7 @@ def test_project_and_project_repo_round_trip():
     assert sm.list_project_repos(project_id) == [
         {
             "id": repo_id, "project_id": project_id, "path": "/repo/widgets", "label": "widgets",
-            "clone_url": None, "generated_guide": None, "generated_guide_at": None,
+            "clone_url": None, "kind": "repo", "read_only": False, "generated_guide": None, "generated_guide_at": None,
             "created_at": sm.get_project_repo(repo_id)["created_at"],
         }
     ]

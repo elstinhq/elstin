@@ -38,6 +38,7 @@ from forge.daemon.main import live_run_keys
 from forge.daemon.ticket_removal import TicketBusy, TicketNotFound, TicketRemovalError, remove_epic
 from forge.state.manager import StateManager
 from forge.state.manager_project import ProjectNotEmpty
+from forge.tools.reference_folder import remove_reference_copy
 
 logger = logging.getLogger("forge.project_removal")
 
@@ -92,6 +93,10 @@ async def remove_project(sm: StateManager, project_id: int) -> dict[str, Any]:
 
     repos = await asyncio.to_thread(sm.list_project_repos, project_id)
     local = await asyncio.to_thread(_remove_clones, project_id, repos)
+    worktrees_base = get_config("worktrees_base_dir") or "/data/repos"
+    for repo in repos:
+        if repo.get("kind") == "reference":
+            await asyncio.to_thread(remove_reference_copy, worktrees_base, repo["id"])
     try:
         rows = await asyncio.to_thread(sm.delete_project_records, project_id)
     except ProjectNotEmpty as exc:
@@ -107,8 +112,8 @@ async def remove_project(sm: StateManager, project_id: int) -> dict[str, Any]:
             # Dropped first, above — or by an earlier attempt that stopped part-way.
             "ticket_filters": int(bool(filter_dropped)) + (rows or {}).get("ticket_filters", 0),
         },
-        # Someone's own checkouts: forge's branches and worktrees in them are
-        # gone (with the tickets), the folders are not.
+        # Someone's own checkouts (and reference folders): forge's branches,
+        # worktrees and copies are gone, the folders are not.
         "attached_folders_kept": [r["path"] for r in repos if not r.get("clone_url")],
         "left_on_remote": {
             "pull_requests": [pr for t in tickets for pr in t["left_on_remote"]["pull_requests"]],

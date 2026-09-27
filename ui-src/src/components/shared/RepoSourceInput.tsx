@@ -29,9 +29,9 @@ const MODES: Record<RepoSourceMode, { label: string; field: string; placeholder:
     field: "Folder path",
     placeholder: "/Users/you/code/app",
     hint:
-      "A git repo already on this machine, used in place. forge never changes its checked-out files — it creates " +
-      "its branches and worktrees from it. Running in Docker? Mount the folder first (see docker-compose.yml) and " +
-      "give the path inside the container.",
+      "A git repo already on this machine, used in place — or a folder holding several, to pick from. forge never " +
+      "changes their checked-out files; it creates its branches and worktrees from them. Running in Docker? Mount " +
+      "the folder first (see docker-compose.yml) and give the path inside the container.",
   },
 };
 

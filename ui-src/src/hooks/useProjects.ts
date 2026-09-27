@@ -29,8 +29,15 @@ export function useDeleteProject(id: number) {
 export function useCreateProject() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (body: { name: string; description: string; repo_url?: string | null; repo_path?: string | null }) =>
-      api.createProject(body),
+    mutationFn: (body: {
+      name: string;
+      description: string;
+      repo_url?: string | null;
+      repo_path?: string | null;
+      repo_paths?: string[];
+      read_only_paths?: string[];
+      reference_path?: string | null;
+    }) => api.createProject(body),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.projects() }),
   });
 }

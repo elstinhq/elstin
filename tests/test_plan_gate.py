@@ -272,3 +272,43 @@ def test_feedback_for_an_empty_plan_explains_why_empty_is_not_an_answer(git_repo
     assert "names no files" in text
     assert "states no acceptance criteria" in text
     assert "empty plan ships the ticket as an empty change" in text
+
+
+def test_a_plan_that_changes_a_read_only_repo_is_rejected(tmp_path):
+    """A read-only repo or reference folder is context, never a target — the
+    plan is sent back to put the change where it belongs."""
+    from forge.agents.roles.plan_gate import KIND_READ_ONLY_REPO
+
+    app = tmp_path / "app"
+    (app / "src").mkdir(parents=True)
+    (app / "src" / "main.ts").write_text("x\n")
+    contracts = tmp_path / "contracts"
+    contracts.mkdir()
+    (contracts / "api.yaml").write_text("openapi: 3.0\n")
+    workspace = Workspace(
+        default_label="app", roots={"app": str(app), "contracts": str(contracts)}, read_only=frozenset({"contracts"}),
+    )
+    plan = {
+        "files_to_create": [{"path": "@contracts/new.yaml"}],
+        "files_to_modify": [{"path": "src/main.ts"}, {"path": "@contracts/api.yaml"}],
+        "context_files": ["@contracts/api.yaml"],
+        "acceptance_criteria": ["the API returns customers"],
+    }
+
+    defects = blocking(check_plan(plan, workspace))
+
+    assert sorted((d["kind"], d["path"]) for d in defects) == [
+        (KIND_READ_ONLY_REPO, "@contracts/api.yaml"), (KIND_READ_ONLY_REPO, "@contracts/new.yaml"),
+    ]
+    feedback = format_plan_feedback(defects, attempt=1, max_attempts=3)
+    assert "read-only repo or reference folder" in feedback and "@contracts/api.yaml" in feedback
+    # Reading it is exactly what it is for.
+    assert blocking(check_plan({**plan, "files_to_create": [], "files_to_modify": [{"path": "src/main.ts"}]}, workspace)) == []
+
+
+def test_the_tools_tell_the_planner_which_repos_are_read_only(tmp_path):
+    workspace = Workspace(
+        default_label="app", roots={"app": str(tmp_path), "contracts": str(tmp_path), "notes": str(tmp_path)},
+        read_only=frozenset({"contracts", "notes"}),
+    )
+    assert "Read-only — read these for context, never plan or make a change in them: @contracts, @notes." in workspace.describe()

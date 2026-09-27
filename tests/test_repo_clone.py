@@ -145,3 +145,55 @@ def test_attach_refuses_forges_own_worktrees(tmp_path):
 
     with pytest.raises(RepoAttachError, match="forge's own working folder"):
         attach_local_repository(str(tmp_path / "worktrees" / "eng-2"), forbidden_dirs=[str(tmp_path / "worktrees")])
+
+
+# --- a folder holding repos, not being one -----------------------------------
+
+from forge.services.repo_clone import scan_folder  # noqa: E402
+
+
+def _workspace(tmp_path):
+    """Like ../mkt: a plain folder with a checkout per service beside other
+    things that are not repos."""
+    root = tmp_path / "workspace"
+    _local_repo(root / "mkt-apiservice")
+    _local_repo(root / "Mkt-adminportal")
+    _local_repo(root / "fresh", commit=False)
+    (root / "docs").mkdir()
+    (root / "notes.txt").write_text("x\n")
+    _local_repo(root / ".hidden-repo")
+    _local_repo(root / "docs" / "nested-repo")  # one level only
+    return root
+
+
+def test_a_folder_holding_repos_lists_them_to_pick_from(tmp_path):
+    root = _workspace(tmp_path)
+
+    result = scan_folder(str(root))
+
+    assert result["path"] == str(root.resolve()) and result["is_repo"] is False
+    assert [(r["name"], r["problem"] is None) for r in result["repos"]] == [
+        ("fresh", False), ("Mkt-adminportal", True), ("mkt-apiservice", True),
+    ]
+    assert result["repos"][0]["problem"].startswith("has no commits yet")  # the row already names the repo
+    assert result["repos"][2]["path"] == str((root / "mkt-apiservice").resolve())
+
+
+def test_a_repo_scans_as_itself(tmp_path):
+    repo = _local_repo(tmp_path / "app")
+
+    assert scan_folder(repo) == {"path": str((tmp_path / "app").resolve()), "is_repo": True, "repos": []}
+    with pytest.raises(RepoAttachError, match="inside the git repository"):
+        (tmp_path / "app" / "src").mkdir()
+        scan_folder(str(tmp_path / "app" / "src"))
+
+
+def test_attaching_a_folder_that_holds_repos_names_them(tmp_path):
+    root = _workspace(tmp_path)
+
+    with pytest.raises(RepoAttachError, match=r"not a git repository, but it holds 3: fresh, Mkt-adminportal, mkt-apiservice"):
+        attach_local_repository(str(root))
+    (root / "empty").mkdir()
+    with pytest.raises(RepoAttachError, match="run `git init` there"):
+        attach_local_repository(str(root / "empty"))
+

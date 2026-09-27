@@ -18,12 +18,14 @@ daemon owns."""
 from __future__ import annotations
 
 import os
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from jira import JIRAError
 from pydantic import BaseModel
 
 from forge.daemon.project_removal import ProjectBusy, ProjectNotFound, ProjectRemovalError, remove_project
+from forge.tools.reference_folder import remove_reference_copy
 from forge.config.store import (
     PROJECT_OVERRIDABLE_KEYS,
     clear_project_config,
@@ -34,7 +36,9 @@ from forge.config.store import (
 from forge.api.epic_routes import _with_stories
 from forge.services.jira_filter import build_jql, preview_filter, sync_project_filter
 from forge.services.project_guide import MAX_GUIDE_CHARS, GuideError, generate_project_guide, read_repo_guide
-from forge.services.repo_clone import RepoAttachError, RepoCloneError, attach_local_repository, clone_repository
+from forge.services.repo_clone import (
+    RepoAttachError, RepoCloneError, attach_local_repository, attach_reference_folder, clone_repository, scan_folder,
+)
 from forge.services.ticket_source import known_sources
 from forge.state.manager import StateManager
 
@@ -44,9 +48,23 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 class ProjectCreateRequest(BaseModel):
     name: str
     description: str = ""
-    # At most one: a repo to clone, or a folder already on disk to attach.
+    # A repo to clone, or folder(s) already on disk to attach — not both.
+    # `repo_paths` is several repos picked from one workspace folder
+    # (POST /scan-folder); `repo_path` the single-repo shorthand.
     repo_url: str | None = None
     repo_path: str | None = None
+    repo_paths: list[str] | None = None
+    # Of the paths above, the ones to attach read-only.
+    read_only_paths: list[str] | None = None
+    # A plain folder to read for context (its CLAUDE.md, docs) — usually the
+    # workspace folder the repos above were picked from.
+    reference_path: str | None = None
+
+
+class ScanFolderRequest(BaseModel):
+    path: str
+    # Marks the repos already attached to this project, when given.
+    project_id: int | None = None
 
 
 class ProjectUpdateRequest(BaseModel):
@@ -57,11 +75,19 @@ class ProjectUpdateRequest(BaseModel):
 
 class ProjectRepoCreateRequest(BaseModel):
     """Exactly one of `url` (clone it) or `path` (attach a repo already on
-    disk) — see forge/services/repo_clone.py for the difference."""
+    disk) — see forge/services/repo_clone.py for the difference. `kind`
+    "reference" attaches a plain folder read for context, never written
+    (path only); `read_only` a git repo no plan may change."""
 
     url: str | None = None
     path: str | None = None
     label: str | None = None
+    kind: Literal["repo", "reference"] = "repo"
+    read_only: bool = False
+
+
+class ProjectRepoUpdateRequest(BaseModel):
+    read_only: bool
 
 
 class ProjectConfigUpdate(BaseModel):
@@ -94,31 +120,43 @@ def _clone_dest_base_dir(project_id: int) -> str:
     return os.path.join(base, str(project_id))
 
 
-def _attach_and_register(sm: StateManager, project_id: int, path: str, *, label: str | None = None) -> int:
-    worktrees_base = get_config("worktrees_base_dir") or "/data/repos"
+def _attach_and_register(
+    sm: StateManager, project_id: int, path: str, *, label: str | None = None, kind: str = "repo", read_only: bool = False,
+) -> int:
+    forbidden = [get_config("worktrees_base_dir") or "/data/repos"]
     try:
-        folder = attach_local_repository(path, forbidden_dirs=[worktrees_base])
+        if kind == "reference":
+            folder = attach_reference_folder(path, forbidden_dirs=forbidden)
+        else:
+            folder = attach_local_repository(path, forbidden_dirs=forbidden)
     except RepoAttachError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if any(os.path.realpath(repo["path"]) == folder for repo in sm.list_project_repos(project_id)):
         raise HTTPException(status_code=409, detail=f"{folder} is already attached to this project")
-    return sm.add_project_repo(project_id, folder, label=label or os.path.basename(folder))
+    return sm.add_project_repo(
+        project_id, folder, label=label or os.path.basename(folder), kind=kind, read_only=read_only,
+    )
 
 
-def _add_repo(sm: StateManager, project_id: int, *, url: str | None, path: str | None, label: str | None = None) -> int:
+def _add_repo(
+    sm: StateManager, project_id: int, *, url: str | None, path: str | None, label: str | None = None,
+    kind: str = "repo", read_only: bool = False,
+) -> int:
     if bool((url or "").strip()) == bool((path or "").strip()):
         raise HTTPException(status_code=400, detail="Give either a repository URL to clone or a folder path to attach")
     if (path or "").strip():
-        return _attach_and_register(sm, project_id, path or "", label=label)
-    return _clone_and_register(sm, project_id, url or "", label=label)
+        return _attach_and_register(sm, project_id, path or "", label=label, kind=kind, read_only=read_only)
+    if kind == "reference":
+        raise HTTPException(status_code=400, detail="A reference folder is attached by path, not cloned")
+    return _clone_and_register(sm, project_id, url or "", label=label, read_only=read_only)
 
 
-def _clone_and_register(sm: StateManager, project_id: int, url: str, *, label: str | None = None) -> int:
+def _clone_and_register(sm: StateManager, project_id: int, url: str, *, label: str | None = None, read_only: bool = False) -> int:
     try:
         path = clone_repository(url, dest_base_dir=_clone_dest_base_dir(project_id))
     except RepoCloneError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return sm.add_project_repo(project_id, path, label=label or os.path.basename(path), clone_url=url)
+    return sm.add_project_repo(project_id, path, label=label or os.path.basename(path), clone_url=url, read_only=read_only)
 
 
 @router.get("")
@@ -129,19 +167,50 @@ def list_projects() -> list[dict]:
 @router.post("")
 def create_project(body: ProjectCreateRequest) -> dict:
     sm = StateManager()
-    if (body.repo_url or "").strip() and (body.repo_path or "").strip():
+    paths = [p for p in [body.repo_path, *(body.repo_paths or [])] if (p or "").strip()]
+    if (body.repo_url or "").strip() and paths:
         raise HTTPException(status_code=400, detail="Give either a repository URL to clone or a folder path to attach")
-    if (body.repo_path or "").strip():
-        # Checked before the project exists, so a mistyped path does not
-        # leave an empty project behind (a clone can only fail by trying).
-        try:
-            attach_local_repository(body.repo_path or "", forbidden_dirs=[get_config("worktrees_base_dir") or "/data/repos"])
-        except RepoAttachError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # Every folder is checked before the project exists, so a mistyped path
+    # does not leave an empty project behind (a clone can only fail by trying).
+    forbidden = [get_config("worktrees_base_dir") or "/data/repos"]
+    folders: list[str] = []
+    try:
+        for path in paths:
+            folder = attach_local_repository(path or "", forbidden_dirs=forbidden)
+            if folder not in folders:
+                folders.append(folder)
+        read_only = {attach_local_repository(p, forbidden_dirs=forbidden) for p in body.read_only_paths or [] if p.strip()}
+        reference = attach_reference_folder(body.reference_path, forbidden_dirs=forbidden) if (body.reference_path or "").strip() else None
+    except RepoAttachError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     project_id = sm.create_project(body.name, description=body.description)
-    if (body.repo_url or "").strip() or (body.repo_path or "").strip():
-        _add_repo(sm, project_id, url=body.repo_url, path=body.repo_path)
+    if (body.repo_url or "").strip():
+        _add_repo(sm, project_id, url=body.repo_url, path=None)
+    for folder in folders:
+        _add_repo(sm, project_id, url=None, path=folder, read_only=folder in read_only)
+    if reference:
+        _add_repo(sm, project_id, url=None, path=reference, kind="reference")
     return sm.get_project(project_id)
+
+
+@router.post("/scan-folder")
+def scan_folder_route(body: ScanFolderRequest) -> dict:
+    """What attaching a folder would mean, before anything is attached: a
+    git repo (attach it as is), or a folder holding repos — listed, so the
+    UI can offer which to attach one by one. Read-only; see
+    forge/services/repo_clone.py's scan_folder."""
+    try:
+        result = scan_folder(body.path, forbidden_dirs=[get_config("worktrees_base_dir") or "/data/repos"])
+    except RepoAttachError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    sm = StateManager()
+    attached = {
+        os.path.realpath(repo["path"]) for repo in (sm.list_project_repos(body.project_id) if body.project_id else [])
+    }
+    result["attached"] = result["path"] in attached
+    for repo in result["repos"]:
+        repo["attached"] = repo["path"] in attached
+    return result
 
 
 @router.get("/{project_id}")
@@ -196,8 +265,37 @@ def add_project_repo(project_id: int, body: ProjectRepoCreateRequest) -> dict:
     sm = StateManager()
     if sm.get_project(project_id) is None:
         raise HTTPException(status_code=404, detail=f"No such project: {project_id}")
-    repo_id = _add_repo(sm, project_id, url=body.url, path=body.path, label=body.label)
+    repo_id = _add_repo(
+        sm, project_id, url=body.url, path=body.path, label=body.label, kind=body.kind, read_only=body.read_only,
+    )
     return sm.get_project_repo(repo_id)
+
+
+@router.put("/{project_id}/repos/{repo_id}")
+def update_project_repo(project_id: int, repo_id: int, body: ProjectRepoUpdateRequest) -> dict:
+    """Mark a git repo read-only, or writable again. A read-only repo is
+    read by every run but no plan may change it (forge/agents/roles/plan_gate.py).
+    409 while a story has unfinished work in it; an epic defaulting to it
+    moves to the next writable repo. A reference folder is always read-only."""
+    sm = StateManager()
+    repo = sm.get_project_repo(repo_id)
+    if repo is None or repo["project_id"] != project_id:
+        raise HTTPException(status_code=404, detail=f"No such folder: {repo_id}")
+    if repo["kind"] == "reference":
+        raise HTTPException(status_code=400, detail="A reference folder is always read-only")
+    result = sm.set_project_repo_read_only(repo_id, body.read_only)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"No such folder: {repo_id}")
+    if not result["changed"]:
+        blocked = result["blocked_by"]
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{', '.join(blocked)} {'has' if len(blocked) == 1 else 'have'} unfinished work in this repo. "
+                "Let it merge, or remove that ticket, before making the repo read-only."
+            ),
+        )
+    return {**sm.get_project_repo(repo_id), "epics_moved": result["epics_moved"], "moved_to": result["moved_to"]}
 
 
 @router.delete("/{project_id}/repos/{repo_id}")
@@ -213,6 +311,8 @@ def remove_project_repo(project_id: int, repo_id: int) -> dict:
     result = sm.remove_project_repo(repo_id)
     if result is None:
         raise HTTPException(status_code=404, detail=f"No such folder: {repo_id}")
+    if result["removed"] and repo.get("kind") == "reference":
+        remove_reference_copy(get_config("worktrees_base_dir") or "/data/repos", repo_id)
     if not result["removed"]:
         blocked = result["blocked_by"]
         raise HTTPException(
@@ -260,6 +360,8 @@ async def generate_repo_guide(project_id: int, repo_id: int) -> dict:
     that setting only decides whether a run does it automatically."""
     sm = StateManager()
     repo = _repo_of(sm, project_id, repo_id)
+    if repo.get("kind") == "reference":
+        raise HTTPException(status_code=400, detail="forge writes guides for repos only — a reference folder is read as it is")
     own = read_repo_guide(repo["path"])
     if own:
         raise HTTPException(

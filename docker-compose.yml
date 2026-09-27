@@ -68,8 +68,9 @@ services:
       # and attach the path INSIDE the container. The container sees nothing
       # of the host filesystem otherwise. For example:
       #   - /Users/you/code/shop-app:/workspace/shop-app
-      # then attach /workspace/shop-app. Running forge directly on the host
-      # (uvicorn) needs none of this — attach the host path as is.
+      # then attach /workspace/shop-app. A folder holding several repos works
+      # too (mount it, attach it, pick which repos). Running forge directly on
+      # the host (uvicorn) needs none of this — attach the host path as is.
     depends_on:
       postgres:
         condition: service_healthy

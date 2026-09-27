@@ -97,6 +97,7 @@ async def planner_node(state: FeatureRunState) -> dict:
             default_label=default_label,
             project_guide=state.get("project_guide") or None,
             prior_work=state.get("prior_work") or None,
+            read_only_labels=state.get("read_only_labels") or None,
             sdk_model=state.get("sdk_model"),
             sdk_effort=state.get("sdk_effort"),
         )
@@ -173,6 +174,7 @@ async def dev_node(state: FeatureRunState) -> dict:
             repo_roots=state.get("repo_roots") or None,
             read_roots=state.get("read_roots") or None,
             story_base_refs=state.get("story_base_refs") or None,
+            read_only_labels=state.get("read_only_labels") or None,
             default_label=state.get("default_repo_label") or "",
             story_worktrees=state.get("story_worktrees") or None,
             sdk_model=state.get("sdk_model"),

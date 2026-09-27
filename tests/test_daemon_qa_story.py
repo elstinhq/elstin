@@ -333,13 +333,45 @@ async def test_workspace_roots_cover_every_repo_on_the_project(
 
     # Every repo is in the workspace; the default only fixes which one an
     # unprefixed path means.
-    default_label, roots = daemon._workspace_roots(sm, epic, git_repo)
+    default_label, roots, read_only, reference = daemon._workspace_roots(sm, epic, git_repo)
     assert default_label == "web-ui"
     assert roots == {"web-ui": git_repo, "api": api}
+    assert read_only == [] and reference == []
 
-    other_default, other_roots = daemon._workspace_roots(sm, epic, api)
+    other_default, other_roots, _, _ = daemon._workspace_roots(sm, epic, api)
     assert other_default == "api"
     assert other_roots == roots
+
+
+async def test_read_only_repos_and_reference_folders_are_in_the_workspace_but_marked(
+    git_repo: str, tmp_path, project_id, monkeypatch
+):
+    """A read-only repo is read where it is; a reference folder through its
+    copy (never the folder itself), without the repos inside it or its data."""
+    monkeypatch.setenv("DATABASE_URL", os.environ["DATABASE_URL"])
+    _configure(str(tmp_path / "worktrees"))
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id, manual_gate=False, levels=[["ENG-2"]])
+    sm.set_epic_project_repo("ENG-1", sm.add_project_repo(project_id, git_repo, label="web-ui"))
+    contracts = _add_reference_repo(sm, project_id, tmp_path, "contracts", "api.yaml", "openapi: 3.0\n")
+    sm.set_project_repo_read_only(sm.list_project_repos(project_id)[-1]["id"], True)
+    workspace = tmp_path / "workspace"
+    (workspace / "docs").mkdir(parents=True)
+    (workspace / "CLAUDE.md").write_text("contracts is off limits\n")
+    (workspace / "docs" / "kb.md").write_text("knowledge\n")
+    (workspace / "dump.sql.gz").write_bytes(b"\x1f\x8b data")
+    (workspace / "web-ui-checkout" / ".git").mkdir(parents=True)
+    ref_id = sm.add_project_repo(project_id, str(workspace), label="workspace", kind="reference")
+
+    _default, roots, read_only, reference = daemon._workspace_roots(sm, sm.get_epic("ENG-1"), git_repo)
+
+    assert read_only == ["contracts", "workspace"] and reference == ["workspace"]
+    assert roots["contracts"] == contracts
+    copy = roots["workspace"]
+    assert copy == os.path.realpath(str(tmp_path / "worktrees" / "_reference" / str(ref_id)))
+    assert sorted(
+        os.path.relpath(os.path.join(d, f), copy) for d, _, fs in os.walk(copy) for f in fs if not f.startswith(".")
+    ) == ["CLAUDE.md", "docs/kb.md"]
 
 
 async def test_story_brief_maps_every_repo_with_its_prefix(

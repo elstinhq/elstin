@@ -65,7 +65,12 @@ def look_up_prior_work(sm: StateManager, epic: dict, *, story_keys: list[str] | 
     if not stories and not look_at_epic:
         return []
 
-    _default_label, roots = build_repo_roots(repos, epic.get("repo"))
+    # Labels from every folder — they must match the run's — but only the
+    # repos a story can write are looked in: work cannot continue in a
+    # read-only repo, and a reference folder is not a repo.
+    _default_label, all_roots = build_repo_roots(repos, epic.get("repo"))
+    writable = {repo["path"] for repo in repos if repo.get("kind", "repo") == "repo" and not repo.get("read_only")}
+    roots = {label: path for label, path in all_roots.items() if path in writable}
     keys: dict[str, list[str]] = {}
     # Forge's own names are not prior work: a story branch forge would make
     # (it could exist from an earlier run of this story), and the epic branch.

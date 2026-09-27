@@ -9,7 +9,20 @@ export function useProjectRepos(projectId: number) {
 export function useAddProjectRepo(projectId: number) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (body: { url: string } | { path: string }) => api.addProjectRepo(projectId, body),
+    mutationFn: (body: { url?: string; path?: string; kind?: "repo" | "reference"; read_only?: boolean }) =>
+      api.addProjectRepo(projectId, body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.projectRepos(projectId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) });
+    },
+  });
+}
+
+export function useSetRepoReadOnly(projectId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ repoId, readOnly }: { repoId: number; readOnly: boolean }) =>
+      api.setProjectRepoReadOnly(projectId, repoId, readOnly),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.projectRepos(projectId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) });

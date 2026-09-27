@@ -32,7 +32,8 @@ def _numbered(text: str, *, start_line: int = 1) -> str:
 
 
 def make_planner_tools(
-    *, project_path: str, repo_roots: dict[str, str] | None = None, default_label: str = ""
+    *, project_path: str, repo_roots: dict[str, str] | None = None, default_label: str = "",
+    read_only_labels: list[str] | None = None,
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
     """Return (functions_dict, tool_schemas) pre-bound to this run's
     project root — same (functions, schemas) shape as
@@ -46,7 +47,7 @@ def make_planner_tools(
     produces is what then decides where dev writes. With none supplied the
     behaviour and the prompts are byte-identical to the single-repo case."""
     roots = dict(repo_roots or {default_label: project_path})
-    workspace = Workspace(default_label=default_label, roots=roots)
+    workspace = Workspace(default_label=default_label, roots=roots, read_only=frozenset(read_only_labels or ()))
     workspace_note = workspace.describe()
 
     def read_file_tool(path: str, offset: int | None = None, limit: int | None = None) -> str:

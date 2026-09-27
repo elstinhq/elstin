@@ -52,6 +52,7 @@ KIND_NO_CRITERIA = "no_criteria"
 KIND_MODIFY_TARGET_MISSING = "modify_target_missing"
 KIND_CREATE_TARGET_EXISTS = "create_target_exists"
 KIND_UNKNOWN_REPO = "unknown_repo"
+KIND_READ_ONLY_REPO = "read_only_repo"
 KIND_EVIDENCE_MISSING = "evidence_path_missing"
 KIND_QUESTION_PLACEHOLDER = "question_placeholder"
 
@@ -234,6 +235,23 @@ def check_plan(plan: dict[str, Any], workspace: Workspace) -> list[dict[str, Any
     def suggestions_for(path: str) -> list[str]:
         return _suggest(path, index_for())
 
+    # A read-only repo or reference folder is context, never a target
+    # (forge/tools/workspace.py's Workspace.read_only). Checked first and
+    # alone: whether such a path exists is beside the point.
+    for path in [*modifies, *creates]:
+        try:
+            label, _relative = workspace.split(path)
+        except Exception:  # noqa: BLE001 — an unknown label is reported below
+            continue
+        if label in workspace.read_only:
+            defects.append({
+                "kind": KIND_READ_ONLY_REPO, "path": path, "suggestions": [],
+                "reason": f"{path} is in @{label}, which is read-only — reference it in context_files, never change it",
+            })
+    read_only_paths = {d["path"] for d in defects if d["kind"] == KIND_READ_ONLY_REPO}
+    modifies = [p for p in modifies if p not in read_only_paths]
+    creates = [p for p in creates if p not in read_only_paths]
+
     seen_missing: set[str] = set()
     for path in modifies:
         abs_path, error = _resolve(workspace, path)
@@ -332,6 +350,7 @@ _KIND_HEADINGS = (
     (KIND_CREATE_TARGET_EXISTS, "These files_to_create entries already exist. Read them and move them to files_to_modify — planning an existing file as new invites an overwrite of working code:"),
     (KIND_EVIDENCE_MISSING, "These discovery_evidence citations do not resolve. Every claim in the plan must come from a file you actually read, so re-read before you re-state:"),
     (KIND_UNKNOWN_REPO, "These paths name a repo this project does not have. Use the exact `@label/` prefixes listed in your prompt:"),
+    (KIND_READ_ONLY_REPO, "These paths are in a read-only repo or reference folder. Read them for context (context_files), but plan the change where it belongs — and if the ticket truly needs one there, say so in reasoning for a person to make:"),
     (KIND_QUESTION_PLACEHOLDER, "These clarification questions are stub placeholders, not real questions. Only ask a question when you have a concrete, project-grounded question and options to offer; otherwise leave `questions` empty and produce the full plan:"),
 )
 

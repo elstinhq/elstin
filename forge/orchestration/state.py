@@ -55,6 +55,11 @@ class FeatureRunState(TypedDict, total=False):
     # {label: ref} a repo the plan names but the story has no worktree in yet
     # branches from — the epic branch in that repo, not its default branch.
     story_base_refs: dict[str, str]
+    # Labels in `repo_roots` no plan may write: read-only repos and
+    # reference folders (forge/db/models/project.py's ProjectRepo). Read like
+    # any repo; the plan gate refuses them as targets and dev never gets a
+    # worktree in one.
+    read_only_labels: list[str]
     # What already existed for this ticket before its branch was made —
     # forge/daemon/prior_work_lookup.py's planner_prior_work, for the
     # planner prompt's prior-work block. Empty when nothing was found.
@@ -147,6 +152,7 @@ def initial_state(run_id: str, user_request: str, project_path: str) -> FeatureR
         repo_roots={},
         read_roots={},
         story_base_refs={},
+        read_only_labels=[],
         prior_work={},
         default_repo_label="",
         project_guide={},

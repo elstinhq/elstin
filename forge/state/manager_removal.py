@@ -62,7 +62,7 @@ class _RemovalMixin:
             # epic's first dispatch (forge/daemon/main.py), not only in the
             # repos its stories wrote.
             project_repos = session.execute(
-                select(ProjectRepo.path).where(ProjectRepo.project_id == epic.project_id)
+                select(ProjectRepo.path).where(ProjectRepo.project_id == epic.project_id, ProjectRepo.kind == "repo")
             ).scalars().all()
 
             return {

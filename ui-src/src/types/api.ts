@@ -24,12 +24,19 @@ export interface RepoGuide {
   generated_at: string | null;
 }
 
+// "repo": a git repo; "reference": a plain folder read for context (its
+// CLAUDE.md, docs), never written — always read_only. A read-only repo is
+// read by every run but no plan may change it.
+export type ProjectRepoKind = "repo" | "reference";
+
 export interface ProjectRepo {
   id: number;
   project_id: number;
   path: string;
   label: string | null;
   clone_url: string | null;
+  kind: ProjectRepoKind;
+  read_only: boolean;
   created_at: string;
 }
 
@@ -296,6 +303,33 @@ export interface EpicLevel {
 
 // What removing a ticket did, and what it deliberately did not touch
 // (forge/daemon/ticket_removal.py). Removal is local only.
+// What attaching a folder would mean (POST /api/projects/scan-folder): a git
+// repo as is, or a folder holding repos to pick from — forge works inside
+// one repository at a time, so each picked one becomes a folder of its own.
+export interface ScannedRepo {
+  path: string;
+  name: string;
+  // Why it cannot be attached (no commits yet, say); null when it can.
+  problem: string | null;
+  attached: boolean;
+}
+
+// What the folder itself would give as a reference folder: the top-level
+// entries that would be read, and those left out (data files, too large).
+export interface ReferencePreview {
+  readable: string[];
+  skipped: { name: string; reason: string }[];
+  bytes: number;
+}
+
+export interface ScanFolderResult {
+  path: string;
+  is_repo: boolean;
+  attached: boolean;
+  repos: ScannedRepo[];
+  reference?: ReferencePreview;
+}
+
 // What deleting a project did (forge/daemon/project_removal.py). Local only:
 // attached folders stay on disk and nothing on GitHub or JIRA is touched.
 export interface DeleteProjectReport {

@@ -270,11 +270,11 @@ def sync_epic_from_jira(jira_key: str, *, project_id: int) -> ReconcileReport:
     if existing is not None and existing["project_id"] != project_id:
         raise ValueError(f"{jira_key} already belongs to a different project (project_id={existing['project_id']})")
 
-    # The project's first-added repo (list_project_repos is oldest-first),
-    # used below as the new default-repo assignment. None when the project
-    # has no repo cloned yet — the epic then stays folder-less until one is.
-    project_repos = sm.list_project_repos(project_id)
-    default_repo_id = project_repos[0]["id"] if project_repos else None
+    # The project's first-added writable git repo, used below as the new
+    # default-repo assignment (never a reference folder or a read-only repo:
+    # an unprefixed path is written to the default). None when the project
+    # has none yet — the epic then stays folder-less until one is added.
+    default_repo_id = sm.writable_project_repo_id(project_id)
 
     source = get_ticket_source(project_id)
     jira_key = source.normalize_key(jira_key)

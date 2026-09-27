@@ -39,12 +39,15 @@ class Project(Base):
 
 
 class ProjectRepo(Base):
-    """One repo checkout attached to a project. `path` is a local
-    filesystem path the API process itself created by cloning `clone_url`
-    (see forge/services/repo_clone.py) — projects never point at a path the
-    process didn't populate itself, so the same flow works whether the app
-    runs directly on a dev machine or inside `docker compose up`, which
-    can't see the host's filesystem."""
+    """One folder of a project. Usually a git repo: cloned from `clone_url`
+    into storage the app owns, or attached in place from a path already on
+    disk (see forge/services/repo_clone.py).
+
+    `kind` "reference" is a plain folder read for context — docs, notes, a
+    CLAUDE.md about the repos beside it — never written and never branched:
+    runs read a filtered copy of it (forge/tools/reference_folder.py).
+    `read_only` marks a git repo the same way: readable by every run, never
+    in a plan's files to change (forge/agents/roles/plan_gate.py)."""
 
     __tablename__ = "project_repos"
 
@@ -53,6 +56,9 @@ class ProjectRepo(Base):
     path: Mapped[str] = mapped_column(String(1024), nullable=False)
     label: Mapped[str | None] = mapped_column(String(256), nullable=True)
     clone_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # "repo" | "reference" — see the class docstring.
+    kind: Mapped[str] = mapped_column(String(16), default="repo", server_default="repo", nullable=False)
+    read_only: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     # An AGENTS.md-style guide forge wrote for a repo that had none of its
     # own (forge/services/project_guide.py). Lives here rather than in the
     # repo so forge never edits a checkout it does not own; a guide the repo

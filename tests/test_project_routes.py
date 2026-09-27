@@ -143,6 +143,50 @@ def _git_repo_at(path) -> str:
     return str(path.resolve())
 
 
+def test_scanning_a_folder_that_holds_repos_marks_the_ones_already_attached(tmp_path):
+    from forge.state.manager import StateManager
+
+    api = _git_repo_at(tmp_path / "workspace" / "api")
+    web = _git_repo_at(tmp_path / "workspace" / "web")
+    project_id = StateManager().create_project("Shop")
+    StateManager().add_project_repo(project_id, api, label="api")
+
+    with _client() as client:
+        response = client.post("/api/projects/scan-folder", json={"path": str(tmp_path / "workspace"), "project_id": project_id})
+        missing = client.post("/api/projects/scan-folder", json={"path": str(tmp_path / "nope")})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["is_repo"] is False
+    assert [(r["name"], r["path"], r["attached"]) for r in body["repos"]] == [("api", api, True), ("web", web, False)]
+    assert missing.status_code == 400
+
+
+def test_create_a_project_with_several_repos_picked_from_one_folder(tmp_path):
+    api = _git_repo_at(tmp_path / "workspace" / "api")
+    web = _git_repo_at(tmp_path / "workspace" / "web")
+
+    with _client() as client:
+        response = client.post("/api/projects", json={"name": "Shop", "repo_paths": [api, web, api]})
+        assert response.status_code == 200
+        repos = client.get(f"/api/projects/{response.json()['id']}/repos").json()
+
+    assert [(r["label"], r["path"]) for r in repos] == [("api", api), ("web", web)]
+
+
+def test_one_bad_folder_among_several_creates_nothing(tmp_path):
+    api = _git_repo_at(tmp_path / "workspace" / "api")
+    (tmp_path / "workspace" / "docs").mkdir()
+
+    with _client() as client:
+        before = len(client.get("/api/projects").json())
+        response = client.post("/api/projects", json={"name": "Shop", "repo_paths": [api, str(tmp_path / "workspace" / "docs")]})
+        assert response.status_code == 400 and "not a git repository" in response.json()["detail"]
+        both = client.post("/api/projects", json={"name": "Shop", "repo_url": "https://x/y.git", "repo_paths": [api]})
+        assert both.status_code == 400
+        assert len(client.get("/api/projects").json()) == before
+
+
 def test_attach_an_existing_folder_and_refuse_it_twice(tmp_path):
     from forge.state.manager import StateManager
 

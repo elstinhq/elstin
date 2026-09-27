@@ -238,6 +238,7 @@ async def run_planner(
     default_label: str = "",
     project_guide: dict[str, Any] | None = None,
     prior_work: dict[str, Any] | None = None,
+    read_only_labels: list[str] | None = None,
     sdk_model: str | None = None,
     sdk_effort: str | None = None,
 ) -> dict[str, Any]:
@@ -368,12 +369,17 @@ async def run_planner(
             if block:
                 content_blocks.append(block)
 
-        tool_fns, tool_schemas = make_planner_tools(project_path=project_path, repo_roots=repo_roots, default_label=default_label)
+        tool_fns, tool_schemas = make_planner_tools(
+            project_path=project_path, repo_roots=repo_roots, default_label=default_label,
+            read_only_labels=read_only_labels,
+        )
         # The same roots make_planner_tools resolves reads through, so the
         # gate judges a path exactly as the planner's own tools would have
-        # — a path the planner could have read is never called missing.
+        # — a path the planner could have read is never called missing. And
+        # the same read-only repos, which the gate refuses as targets.
         gate_workspace = Workspace(
-            default_label=default_label, roots=dict(repo_roots or {default_label: project_path})
+            default_label=default_label, roots=dict(repo_roots or {default_label: project_path}),
+            read_only=frozenset(read_only_labels or ()),
         )
 
         config = LoopConfig(

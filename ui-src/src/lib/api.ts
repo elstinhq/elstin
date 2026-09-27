@@ -6,6 +6,7 @@ import type {
   Project,
   ProjectRepo,
   DeleteProjectReport,
+  ScanFolderResult,
   RemoveTicketReport,
   RepoGuide,
   Story,
@@ -51,19 +52,39 @@ const put = (body: unknown): RequestInit => ({ method: "PUT", body: JSON.stringi
 export const api = {
   // -- projects --------------------------------------------------------
   listProjects: () => request<Project[]>("/api/projects"),
-  createProject: (body: { name: string; description: string; repo_url?: string | null; repo_path?: string | null }) =>
+  createProject: (body: {
+    name: string;
+    description: string;
+    repo_url?: string | null;
+    repo_path?: string | null;
+    repo_paths?: string[];
+    read_only_paths?: string[];
+    reference_path?: string | null;
+  }) =>
     request<Project>("/api/projects", json(body)),
   getProject: (id: number) => request<Project>(`/api/projects/${id}`),
   updateProject: (id: number, body: { ticket_source?: string; name?: string; description?: string }) =>
     request<Project>(`/api/projects/${id}`, put(body)),
+  // Read-only: is this folder a git repo, or one holding repos to pick from?
+  scanFolder: (path: string, projectId?: number) =>
+    request<ScanFolderResult>("/api/projects/scan-folder", json({ path, project_id: projectId ?? null })),
   // The project and everything forge holds for it; attached folders stay, GitHub/JIRA untouched.
   deleteProject: (id: number) => request<DeleteProjectReport>(`/api/projects/${id}`, { method: "DELETE" }),
 
   // -- folders (project repos) -----------------------------------------
   listProjectRepos: (projectId: number) => request<ProjectRepo[]>(`/api/projects/${projectId}/repos`),
   // Exactly one of url (clone it) or path (attach a repo already on disk).
-  addProjectRepo: (projectId: number, body: { url?: string; path?: string; label?: string | null }) =>
+  addProjectRepo: (
+    projectId: number,
+    body: { url?: string; path?: string; label?: string | null; kind?: "repo" | "reference"; read_only?: boolean },
+  ) =>
     request<ProjectRepo>(`/api/projects/${projectId}/repos`, json(body)),
+  // Mark a git repo read-only (or writable again); epics defaulting to it move to the next writable repo.
+  setProjectRepoReadOnly: (projectId: number, repoId: number, readOnly: boolean) =>
+    request<ProjectRepo & { epics_moved: string[]; moved_to: number | null }>(
+      `/api/projects/${projectId}/repos/${repoId}`,
+      put({ read_only: readOnly }),
+    ),
   removeProjectRepo: (projectId: number, repoId: number) =>
     // Epics that defaulted to it move to the project's next folder (moved_to; null = none left).
     request<{ repo_id: number; removed: boolean; epics_moved: string[]; moved_to: number | null }>(`/api/projects/${projectId}/repos/${repoId}`, {

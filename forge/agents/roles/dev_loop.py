@@ -155,6 +155,7 @@ async def run_dev(
     repo_roots: dict[str, str] | None = None,
     read_roots: dict[str, str] | None = None,
     story_base_refs: dict[str, str] | None = None,
+    read_only_labels: list[str] | None = None,
     default_label: str = "",
     story_worktrees: dict[str, dict[str, str]] | None = None,
     gate_feedback: str | None = None,
@@ -295,6 +296,11 @@ async def run_dev(
         write_roots: dict[str, str] = {}
         created: dict[str, dict[str, str]] = {}
         for label in labels_in_plan(plan, default_label):
+            if label in (read_only_labels or ()):
+                # The plan gate refuses these; this is the backstop. No
+                # worktree means no write root, so any write there fails.
+                logger.warning("plan names read-only repo %r — not creating a worktree there", label)
+                continue
             if label in existing:
                 write_roots[label] = existing[label]
                 continue

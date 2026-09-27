@@ -113,6 +113,11 @@ class Workspace:
 
     default_label: str
     roots: dict[str, str] = field(default_factory=dict)
+    # Labels no plan may write — read-only repos and reference folders
+    # (forge/db/models/project.py's ProjectRepo). Read like any other root;
+    # forge/agents/roles/plan_gate.py rejects a plan that changes one, and
+    # dev never gets a worktree in one.
+    read_only: frozenset[str] = frozenset()
 
     @property
     def default_root(self) -> str:
@@ -181,11 +186,17 @@ class Workspace:
             return ""
         others = [label for label in self.labels() if label != self.default_label]
         listed = ", ".join(f"{REFERENCE_SIGIL}{label}" for label in others)
+        read_only = [label for label in self.labels() if label in self.read_only]
         return (
             f" This project spans several repos. Paths with no prefix belong to the default repo "
             f"({self.default_label}); prefix a path to address another: {listed}. "
             f"For example '{REFERENCE_SIGIL}{others[0]}/src/app.ts'. "
-            "You may only create or modify a file that the approved plan lists, in whichever repo the plan lists it."
+            + (
+                f"Read-only — read these for context, never plan or make a change in them: "
+                f"{', '.join(f'{REFERENCE_SIGIL}{label}' for label in read_only)}. "
+                if read_only else ""
+            )
+            + "You may only create or modify a file that the approved plan lists, in whichever repo the plan lists it."
         )
 
 
