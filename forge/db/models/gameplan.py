@@ -213,6 +213,13 @@ class Story(Base):
     coverage_gap: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     coverage_gap_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Changes the ticket needs in a read-only repo or reference folder —
+    # [{path, purpose}] from the latest plan — which forge may not make and a
+    # person has to (forge/agents/roles/plan_gate.py's normalize_plan). A
+    # copy of the checkpoint's plan field, so the board and the epic's pull
+    # request can name them. NULL: none.
+    read_only_changes: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
     # Set when _maybe_open_pull_request (forge/daemon/main.py) attempts a
     # push or GitHub API call and it fails — that function is best-effort
     # and never blocks the story's own gate progress, so without this the

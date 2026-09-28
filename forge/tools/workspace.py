@@ -192,7 +192,8 @@ class Workspace:
             f"({self.default_label}); prefix a path to address another: {listed}. "
             f"For example '{REFERENCE_SIGIL}{others[0]}/src/app.ts'. "
             + (
-                f"Read-only — read these for context, never plan or make a change in them: "
+                f"Read-only — read these for context, never change them (a change the ticket needs there goes "
+                f"in the plan's read_only_changes, for a person): "
                 f"{', '.join(f'{REFERENCE_SIGIL}{label}' for label in read_only)}. "
                 if read_only else ""
             )

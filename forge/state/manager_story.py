@@ -295,6 +295,14 @@ class _StoryMixin:
                 story.coverage_gap = coverage_gap
                 story.coverage_gap_detail = detail
 
+    def set_story_read_only_changes(self, jira_key: str, changes: list[dict] | None) -> None:
+        """From the story's latest plan: changes it needs in a read-only repo,
+        for a person. None clears what an earlier plan listed."""
+        with session_scope() as session:
+            story = session.get(Story, jira_key)
+            if story is not None:
+                story.read_only_changes = list(changes) if changes else None
+
     def set_story_pr_open_error(self, jira_key: str, error: str | None) -> None:
         with session_scope() as session:
             story = session.get(Story, jira_key)
@@ -403,6 +411,7 @@ def _story_to_dict(session, story: Story) -> dict:
         "clarification_answers": list(story.clarification_answers or []),
         "coverage_gap": story.coverage_gap,
         "coverage_gap_detail": story.coverage_gap_detail,
+        "read_only_changes": list(story.read_only_changes or []),
         "pr_open_error": story.pr_open_error,
         "retry_count": story.retry_count,
         "failure_stage": story.failure_stage,

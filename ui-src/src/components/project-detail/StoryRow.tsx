@@ -8,6 +8,7 @@ import {
   MergeAttemptsTag,
   PARKED_REASON_LABEL,
   PriorWorkTag,
+  ReadOnlyChangesTag,
   StatusTagFor,
   WaitingOnTag,
   unmetDependencies,
@@ -87,6 +88,7 @@ export function StoryRow({
         <KindTag story={story} />
         <CoverageGapTag story={story} />
         <StatusTagFor status={story.status} />
+        <ReadOnlyChangesTag story={story} />
         <WaitingOnTag story={story} statusByKey={statusByKey} />
         <PriorWorkTag story={story} />
         <MergeAttemptsTag story={story} />

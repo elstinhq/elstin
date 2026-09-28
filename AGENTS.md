@@ -192,8 +192,19 @@ project create (`repo_url` / `repo_path`):
 - **Read-only repos** (`ProjectRepo.read_only`; the picker's per-repo box,
   or "Make read-only" on the Folders panel — `PUT .../repos/{id}`): read by
   every run, never changed. `Workspace.read_only` carries them: the tools
-  tell the planner, the plan gate rejects a plan that creates or modifies a
-  file there (`KIND_READ_ONLY_REPO`), and dev never gets a worktree in one.
+  tell the planner, and dev never gets a worktree in one. A change the
+  ticket needs there is not a reason to fail the plan: `plan_gate.
+  normalize_plan` moves it to the plan's `read_only_changes` (a
+  `read_only_changes` entry in a writable repo is moved back), and the
+  story plans and runs on the rest. The list is copied to
+  `stories.read_only_changes` on every run that plans, shown on the board
+  and in the story details, left out of dev's plan, and listed in the
+  epic's pull request under "Changes needed in read-only repos" — a
+  person's job. A plan whose only changes are there is sent back
+  (`KIND_NO_FILES`); `check_plan`'s `KIND_READ_ONLY_REPO` is the backstop.
+  `normalize_plan` also gives an unprefixed path whose first folder is
+  another repo's label (`mkt-adminportal/src/…`, and no such folder in the
+  default repo) its `@`, rather than sending the plan back over it.
   No epic branch is made there, no prior-work lookup runs there, and an
   epic never defaults to one (`writable_project_repo_id`); marking one
   moves epics that did, and waits (409) for unfinished work in it.

@@ -148,6 +148,22 @@ export function CoverageGapTag({ story }: { story: Story }) {
   return <Tag label="Coverage gap" appearance="warning" />;
 }
 
+// The plan needs changes in a read-only repo that forge will not make — the
+// rest of the story runs; these are for a person.
+export function ReadOnlyChangesTag({ story }: { story: Story }) {
+  const changes = story.read_only_changes ?? [];
+  if (!changes.length) return null;
+  // Short: repo labels run long (@api-contract-definitions) and the row
+  // does not wrap. The paths are in the title and the story's details.
+  return (
+    <Tag
+      label="read-only change needed"
+      appearance="warning"
+      title={`forge won't make these; someone has to:\n${changes.map((c) => c.path).join("\n")}`}
+    />
+  );
+}
+
 // A pending story whose dependencies have not all merged yet — it starts on
 // its own once they have. Says which, so a waiting row is never mistaken for
 // a stuck one.

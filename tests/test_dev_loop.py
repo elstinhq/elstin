@@ -362,3 +362,22 @@ async def test_dev_run_resumes_a_prior_checklist_instead_of_reseeding(git_repo: 
     assert result["dev_progress"][0]["status"] == "done"
     # The caller's list is not mutated in place across runs.
     assert prior[0]["status"] == "done"
+
+
+def test_changes_left_to_a_person_are_named_but_not_in_dev_s_plan():
+    """A read-only repo's changes (plan_gate.normalize_plan) are a person's:
+    dev codes against them but neither makes them nor copies them elsewhere."""
+    from forge.agents.roles.dev_loop import _build_prompt
+
+    plan = {
+        "files_to_modify": [{"path": "src/Search.java", "purpose": "columns"}],
+        "read_only_changes": [{"path": "@contracts/orders.yaml", "purpose": "add the columns to the contract"}],
+        "plan_markdown": "# Plan",
+    }
+
+    prompt = _build_prompt(continuing=False, plan=plan, context_bundle={}, brief="the brief")
+
+    approved, _, rest = prompt.partition("\n\n")
+    assert "read_only_changes" not in approved and "src/Search.java" in approved
+    assert "Not yours to make" in rest
+    assert "- @contracts/orders.yaml: add the columns to the contract" in rest

@@ -253,6 +253,14 @@ export interface EpicMergeResult {
   at?: string;
 }
 
+// A change the ticket needs in a read-only repo or reference folder: forge may
+// not make it, so a person has to (forge/agents/roles/plan_gate.py's
+// normalize_plan). `path` is `@label/...`.
+export interface ReadOnlyChange {
+  path: string;
+  purpose: string | null;
+}
+
 export interface Story {
   jira_key: string;
   epic_key: string;
@@ -276,6 +284,8 @@ export interface Story {
   clarification_answers: ClarificationAnswer[];
   coverage_gap: boolean;
   coverage_gap_detail: string | null;
+  // From the latest plan; empty when it needs none.
+  read_only_changes: ReadOnlyChange[];
   pr_open_error: string | null;
   retry_count: number;
   failure_stage: string | null;

@@ -242,3 +242,47 @@ async def test_a_run_reads_the_reference_folder_and_never_branches_read_only_rep
         ".claude", "API-Contract-Definitions", "CLAUDE.md", "Inventory report.csv", "big.log", "blob.dat", "db",
         "docs", "ip_white.sh", "mkt-apiservice", "node_modules",
     ])
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("forge_db", "fake_agents")
+async def test_changes_a_plan_needs_in_a_read_only_repo_are_kept_for_a_person(git_repo, tmp_path, project_id, monkeypatch):
+    """MKT2-866: the plan goes ahead without the contract change, which is
+    kept on the story — the board's tag, the details — and listed in the
+    epic's pull request. The next plan replaces the list."""
+    import forge.daemon.main as daemon
+    import forge.orchestration.graph as graph
+    from forge.config.store import set_config
+    from forge.state.manager import StateManager
+    from tests.conftest import fake_run_planner
+
+    set_config("openai_api_key", "sk-openai-dummy")
+    set_config("worktrees_base_dir", str(tmp_path / "worktrees"))
+    set_config("require_plan_approval", "true")
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2"]], manual_gate=False, summary="Customer search")
+    sm.set_epic_project_repo("ENG-1", sm.add_project_repo(project_id, git_repo))
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0, summary="search columns", depends_on=[])
+    needed = [{"path": "@contracts/orders.yaml", "purpose": "add the columns to the contract"}]
+    plans = [needed, []]
+
+    async def planner(**kwargs):
+        result = await fake_run_planner(**kwargs)
+        result["plan"]["read_only_changes"] = plans.pop(0)
+        return result
+
+    monkeypatch.setattr(graph, "run_planner", planner)
+
+    await daemon.poll_once(sm, wait=True)
+
+    story = sm.get_story("ENG-2")
+    assert story["status"] == "awaiting_plan_approval" and story["read_only_changes"] == needed
+    body = daemon._epic_pr_body(sm, sm.get_epic("ENG-1"))
+    assert "## Changes needed in read-only repos" in body
+    assert "- `@contracts/orders.yaml` (ENG-2): add the columns to the contract" in body
+
+    assert sm.send_back_to_planning("ENG-2")  # as a changed ticket or newly merged work does
+    await daemon.poll_once(sm, wait=True)
+
+    assert sm.get_story("ENG-2")["read_only_changes"] == []
+    assert "read-only repos" not in daemon._epic_pr_body(sm, sm.get_epic("ENG-1"))

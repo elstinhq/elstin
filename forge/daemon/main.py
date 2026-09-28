@@ -1110,6 +1110,10 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
     sm.set_story_clarification_questions(
         story_key, result.get("clarification_questions") if result.get("status") == "awaiting_clarification" else None,
     )
+    # Only a run that planned replaces them: one that stopped before its
+    # planner (a QA story, an early failure) has no word on them.
+    if result.get("plan"):
+        sm.set_story_read_only_changes(story_key, result["plan"].get("read_only_changes"))
     if new_status == "failed":
         logger.error("story %s failed: %s", story_key, result.get("error"))
     else:
@@ -1418,6 +1422,16 @@ def _epic_pr_body(sm: StateManager, epic: dict) -> str:
             lines.append(f"  - ⚠️ tests pass, but coverage is below the repo's threshold{detail}")
         for answer in story.get("clarification_answers") or []:
             lines.append(f"  - decided: {answer.get('question')} → {answer.get('option_label')}")
+    needed = [(story["jira_key"], change) for story in stories for change in story.get("read_only_changes") or []]
+    if needed:
+        lines += [
+            "", "## Changes needed in read-only repos",
+            "forge may not change these repos, so this pull request does not include these changes. Someone has to "
+            "make them:",
+        ]
+        for key, change in needed:
+            purpose = f": {change['purpose']}" if change.get("purpose") else ""
+            lines.append(f"- `{change.get('path')}` ({key}){purpose}")
     lines += [
         "",
         "## How this was built",

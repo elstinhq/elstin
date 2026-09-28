@@ -18,6 +18,7 @@ from forge.agents.roles.plan_gate import (
     check_plan,
     check_questions,
     format_plan_feedback,
+    normalize_plan,
 )
 from forge.tools.workspace import Workspace
 
@@ -275,8 +276,9 @@ def test_feedback_for_an_empty_plan_explains_why_empty_is_not_an_answer(git_repo
 
 
 def test_a_plan_that_changes_a_read_only_repo_is_rejected(tmp_path):
-    """A read-only repo or reference folder is context, never a target — the
-    plan is sent back to put the change where it belongs."""
+    """A read-only repo or reference folder is context, never a target. The
+    planner loop moves such entries to read_only_changes first
+    (normalize_plan, below); this is the backstop if one gets through."""
     from forge.agents.roles.plan_gate import KIND_READ_ONLY_REPO
 
     app = tmp_path / "app"
@@ -311,4 +313,108 @@ def test_the_tools_tell_the_planner_which_repos_are_read_only(tmp_path):
         default_label="app", roots={"app": str(tmp_path), "contracts": str(tmp_path), "notes": str(tmp_path)},
         read_only=frozenset({"contracts", "notes"}),
     )
-    assert "Read-only — read these for context, never plan or make a change in them: @contracts, @notes." in workspace.describe()
+    assert "Read-only — read these for context, never change them (a change the ticket needs there goes in the plan's read_only_changes, for a person): @contracts, @notes." in workspace.describe()
+
+
+# --- normalize_plan: fixed rather than sent back ---------------------------------
+
+
+def _mkt(tmp_path) -> Workspace:
+    """MKT2-866's shape: the admin portal, the API, and a contract repo
+    marked read-only."""
+    for rel in ("portal/src/app/search.ts", "api/src/Search.java", "contracts/apis/v1/orders.yaml"):
+        _write(str(tmp_path), rel)
+    return Workspace(
+        default_label="mkt-apiservice",
+        roots={
+            "mkt-apiservice": str(tmp_path / "api"), "mkt-adminportal": str(tmp_path / "portal"),
+            "api-contract-definitions": str(tmp_path / "contracts"),
+        },
+        read_only=frozenset({"api-contract-definitions"}),
+    )
+
+
+def test_a_change_in_a_read_only_repo_is_listed_for_a_person_and_the_plan_goes_ahead(tmp_path):
+    """MKT2-866: the ticket needed the OpenAPI contract changed, the contract
+    repo is read-only, and three rejected plans failed the whole story."""
+    workspace = _mkt(tmp_path)
+    plan = _plan(
+        files_to_modify=[
+            {"path": "src/Search.java", "purpose": "add the columns"},
+            {"path": "@api-contract-definitions/apis/v1/orders.yaml", "purpose": "add the columns to the contract"},
+        ],
+        files_to_create=[{"path": "@api-contract-definitions/apis/v1-bundled/orders.yaml", "purpose": "bundle"}],
+    )
+
+    fixed, notes = normalize_plan(plan, workspace)
+
+    assert fixed["files_to_modify"] == [{"path": "src/Search.java", "purpose": "add the columns"}]
+    assert fixed["files_to_create"] == []
+    assert fixed["read_only_changes"] == [
+        {"path": "@api-contract-definitions/apis/v1-bundled/orders.yaml", "purpose": "bundle"},
+        {"path": "@api-contract-definitions/apis/v1/orders.yaml", "purpose": "add the columns to the contract"},
+    ]
+    assert "@api-contract-definitions/apis/v1/orders.yaml" in fixed["context_files"]  # still read
+    assert len(notes) == 2 and all("read-only repo" in note for note in notes)
+    assert blocking(check_plan(fixed, workspace)) == []
+
+
+def test_a_path_missing_its_at_sign_is_given_one(tmp_path):
+    """MKT2-866's second attempt wrote `mkt-adminportal/src/...` for every
+    portal file and had eight "missing" files."""
+    workspace = _mkt(tmp_path)
+    plan = _plan(
+        files_to_modify=[{"path": "mkt-adminportal/src/app/search.ts", "purpose": "columns"}],
+        context_files=["mkt-adminportal/src/app/search.ts"],
+    )
+
+    fixed, notes = normalize_plan(plan, workspace)
+
+    assert fixed["files_to_modify"] == [{"path": "@mkt-adminportal/src/app/search.ts", "purpose": "columns"}]
+    assert fixed["context_files"] == ["@mkt-adminportal/src/app/search.ts"]
+    assert notes == ["mkt-adminportal/src/app/search.ts is in another repo: read as @mkt-adminportal/src/app/search.ts"] * 2
+    assert blocking(check_plan(fixed, workspace)) == []
+
+
+def test_a_folder_of_the_default_repo_named_like_another_repo_is_left_alone(tmp_path):
+    workspace = _mkt(tmp_path)
+    _write(workspace.default_root, "mkt-adminportal/config.json")
+
+    fixed, notes = normalize_plan(_plan(files_to_modify=[{"path": "mkt-adminportal/config.json"}]), workspace)
+
+    assert fixed["files_to_modify"] == [{"path": "mkt-adminportal/config.json"}] and notes == []
+
+
+def test_read_only_changes_in_a_repo_forge_can_write_are_planned_after_all(tmp_path):
+    """Not a way to leave work undone."""
+    workspace = _mkt(tmp_path)
+    plan = _plan(
+        files_to_modify=[],
+        read_only_changes=[
+            {"path": "@mkt-adminportal/src/app/search.ts", "purpose": "columns"},
+            {"path": "@mkt-adminportal/src/app/new.ts", "purpose": "new"},
+        ],
+    )
+
+    fixed, notes = normalize_plan(plan, workspace)
+
+    assert fixed["read_only_changes"] == []
+    assert fixed["files_to_modify"] == [{"path": "@mkt-adminportal/src/app/search.ts", "purpose": "columns"}]
+    assert fixed["files_to_create"] == [{"path": "@mkt-adminportal/src/app/new.ts", "purpose": "new"}]
+    assert len(notes) == 2
+
+
+def test_a_plan_whose_only_changes_are_read_only_is_sent_back_saying_so(tmp_path):
+    workspace = _mkt(tmp_path)
+    plan = _plan(files_to_modify=[{"path": "@api-contract-definitions/apis/v1/orders.yaml", "purpose": "contract"}])
+
+    fixed, _ = normalize_plan(plan, workspace)
+    defects = blocking(check_plan(fixed, workspace))
+
+    assert _kinds(defects) == {KIND_NO_FILES}
+    assert "every change this plan makes is in a read-only repo" in defects[0]["reason"]
+
+
+def test_a_single_repo_plan_is_untouched(git_repo):
+    plan = _plan()
+    assert normalize_plan(plan, _ws(git_repo)) == ({**plan, "context_files": [], "read_only_changes": []}, [])

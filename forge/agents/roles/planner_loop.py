@@ -50,7 +50,7 @@ from typing import Any
 from forge.agents.loop import LoopConfig, run_agent_loop, tool_defs_from_schemas
 from forge.agents.roles import explorer as explorer_defaults
 from forge.agents.roles.explorer import gather_exploration
-from forge.agents.roles.plan_gate import blocking, check_plan, check_questions, format_plan_feedback
+from forge.agents.roles.plan_gate import blocking, check_plan, check_questions, format_plan_feedback, normalize_plan
 from forge.agents.roles.planner import _format_prior_work_block, build_planner_system
 from forge.config.store import get_bool_config, get_config, get_float_config, get_int_config
 from forge.llm.errors import LlmError
@@ -119,6 +119,7 @@ _PLAN_JSON_SCHEMA: dict[str, Any] = {
         },
         "files_to_create": {"type": "array", "items": _FILE_ITEM_SCHEMA},
         "files_to_modify": {"type": "array", "items": _FILE_ITEM_SCHEMA},
+        "read_only_changes": {"type": "array", "items": _FILE_ITEM_SCHEMA},
         "context_files": {"type": "array", "items": {"type": "string"}},
         "architecture": {
             "type": "object",
@@ -131,7 +132,7 @@ _PLAN_JSON_SCHEMA: dict[str, Any] = {
         "plan_markdown": {"type": "string"},
     },
     "required": [
-        "feature_summary", "reasoning", "questions", "files_to_create", "files_to_modify",
+        "feature_summary", "reasoning", "questions", "files_to_create", "files_to_modify", "read_only_changes",
         "context_files", "architecture", "acceptance_criteria", "discovery_evidence", "plan_markdown",
     ],
     "additionalProperties": False,
@@ -431,6 +432,15 @@ async def run_planner(
             if not result.is_error and isinstance(result.structured_output, dict):
                 candidate = result.structured_output
                 questions_field = candidate.get("questions") or []
+                if not questions_field:
+                    # A missing `@`, or a change in a read-only repo, is fixed
+                    # here rather than spent a retry on (plan_gate.normalize_plan).
+                    candidate, fixes = normalize_plan(candidate, gate_workspace)
+                    if fixes and run_id:
+                        append_activity(
+                            run_id, type="status", phase="planner", title=f"Plan adjusted: {len(fixes)} path(s)",
+                            detail="\n".join(f"- {fix}" for fix in fixes)[:4000],
+                        )
                 # A clarification round-trip's plan fields (files, criteria)
                 # are allowed to be thin: the plan is a placeholder until the
                 # human answers, and planner_node parks the run at

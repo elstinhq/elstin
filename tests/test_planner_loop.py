@@ -22,6 +22,7 @@ _MINIMAL_PLAN = {
     "questions": [],
     "files_to_create": [{"path": "widget.py", "purpose": "the widget"}],
     "files_to_modify": [],
+    "read_only_changes": [],
     "context_files": [],
     "architecture": None,
     "acceptance_criteria": ["it works"],
@@ -227,6 +228,45 @@ async def test_a_plan_naming_a_file_that_does_not_exist_is_rejected_with_the_rea
     retry_prompt = provider.calls[1].messages[0].content[-1].text
     assert "openapi.json is listed under files_to_modify" in retry_prompt
     assert "a file of that name exists at: pricing-web/openapi.json" in retry_prompt
+
+
+async def test_a_change_in_a_read_only_repo_is_set_aside_not_rejected(monkeypatch, git_repo, tmp_path):
+    """MKT2-866: the plan needed a contract change in a read-only repo, and
+    another repo's paths without their `@`. Both are fixed in place — one
+    attempt, no retry — and the fixes are in the activity feed."""
+    import os
+
+    from forge.services.run_activity import list_activity
+
+    portal, contracts = tmp_path / "portal", tmp_path / "contracts"
+    (portal / "src").mkdir(parents=True)
+    (portal / "src" / "search.ts").write_text("x\n")
+    contracts.mkdir()
+    (contracts / "orders.yaml").write_text("openapi: 3.0\n")
+    with open(os.path.join(git_repo, "widget.py"), "w", encoding="utf-8") as handle:
+        handle.write("x\n")
+    plan = {
+        **_MINIMAL_PLAN,
+        "files_to_create": [],
+        "files_to_modify": [
+            {"path": "widget.py", "purpose": "the API"},
+            {"path": "portal/src/search.ts", "purpose": "the columns"},
+            {"path": "@contracts/orders.yaml", "purpose": "the contract"},
+        ],
+    }
+    provider = FakeProvider(script=[_plan_response(plan)])
+    _configure(monkeypatch, provider)
+
+    result = await run_planner(
+        user_request="Customer search columns", project_path=git_repo, run_id="ENG-9", default_label="app",
+        repo_roots={"app": git_repo, "portal": str(portal), "contracts": str(contracts)}, read_only_labels=["contracts"],
+    )
+
+    assert len(provider.calls) == 1
+    assert [e["path"] for e in result["plan"]["files_to_modify"]] == ["widget.py", "@portal/src/search.ts"]
+    assert result["plan"]["read_only_changes"] == [{"path": "@contracts/orders.yaml", "purpose": "the contract"}]
+    adjusted = [e for e in list_activity("ENG-9") if e["title"].startswith("Plan adjusted")]
+    assert len(adjusted) == 1 and "@contracts/orders.yaml is in a read-only repo" in adjusted[0]["detail"]
 
 
 async def test_a_plan_asking_clarification_questions_may_be_empty(monkeypatch, git_repo):

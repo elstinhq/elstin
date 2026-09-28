@@ -318,6 +318,28 @@ function RunOutcomeRow({ story }: { story: Story }) {
   );
 }
 
+// Beside the plan, since approving it means accepting that these are left to
+// a person: the epic's pull request lists them too.
+function ReadOnlyChangesRow({ story }: { story: Story }) {
+  const changes = story.read_only_changes ?? [];
+  if (!changes.length) return null;
+  return (
+    <DetailRow label="Needs a person">
+      <div className="text-muted-foreground text-xs">
+        Changes this ticket needs in read-only repos. forge won't make them — the rest of the plan runs without them.
+      </div>
+      <ul className="mt-1 flex flex-col gap-1">
+        {changes.map((change) => (
+          <li key={change.path} className="min-w-0 text-xs">
+            <span className="font-mono break-all">{change.path}</span>
+            {change.purpose ? <span className="text-muted-foreground"> — {change.purpose}</span> : null}
+          </li>
+        ))}
+      </ul>
+    </DetailRow>
+  );
+}
+
 function StoryDetailBody({ projectId, story, activityEnabled }: { projectId: number; story: Story; activityEnabled: boolean }) {
   return (
     <>
@@ -327,6 +349,7 @@ function StoryDetailBody({ projectId, story, activityEnabled }: { projectId: num
       <DetailRow label="Summary">{story.summary || "—"}</DetailRow>
       {story.description ? <DescriptionRow text={story.description} /> : null}
       <StoryPlanPanel storyKey={story.jira_key} open={activityEnabled} />
+      <ReadOnlyChangesRow story={story} />
       <DetailRow label="Status">
         <StatusTagFor status={story.status} />
       </DetailRow>

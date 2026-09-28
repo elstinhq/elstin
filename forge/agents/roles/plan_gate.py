@@ -34,6 +34,12 @@ good plans and teaches the planner to pad its file list.
 Multi-repo: every path is resolved through the story's Workspace, so an
 `@api/`-prefixed path is checked against the API repo's root and an
 unknown label is itself a defect (see forge/tools/workspace.py).
+
+Two things are fixed rather than sent back (`normalize_plan`), because a
+retry spends a whole planner run on what the gate can settle itself: a
+path naming another repo without its `@`, and a change in a read-only repo
+— moved to `read_only_changes`, for a person to make, so the rest of the
+ticket goes ahead instead of the run failing on it.
 """
 from __future__ import annotations
 
@@ -43,7 +49,7 @@ import re
 from typing import Any
 
 from forge.tools.grep import DEFAULT_EXCLUDES
-from forge.tools.workspace import Workspace
+from forge.tools.workspace import REFERENCE_SIGIL, Workspace, slug_label
 
 logger = logging.getLogger("forge.plan_gate")
 
@@ -202,6 +208,86 @@ def check_questions(questions: list[Any]) -> list[dict[str, Any]]:
     return defects
 
 
+def normalize_plan(plan: dict[str, Any], workspace: Workspace) -> tuple[dict[str, Any], list[str]]:
+    """The plan with two fixes made instead of sent back. Returns (plan,
+    notes), one note per fix, for the activity feed.
+
+    - A path naming another repo without its `@` — `mkt-adminportal/src/x.ts`
+      where `mkt-adminportal` is one of the project's repos, not a folder of
+      the default one — becomes `@mkt-adminportal/src/x.ts`. Sent back, a
+      planner fixing one path tends to break another (MKT2-866's retry
+      dropped every `@` and then had eight "missing" files).
+    - A file to create or modify in a read-only repo or reference folder is
+      moved to `read_only_changes`: a change the ticket needs that forge may
+      not make and a person has to. A modified one is added to
+      context_files, since it still matters to the plan. Rejecting it
+      instead failed a ticket that genuinely needed an OpenAPI contract
+      change in a contract repo marked read-only — three rejected plans,
+      and the rest of the work never started.
+
+    And the reverse: a `read_only_changes` entry in a repo forge CAN write is
+    moved back into the files to change — not a way to leave work undone."""
+    plan = dict(plan)
+    notes: list[str] = []
+
+    def with_prefix(path: str) -> str:
+        text = str(path or "").strip()
+        if not text or text.startswith(REFERENCE_SIGIL) or not workspace.is_multi_repo:
+            return text
+        head, sep, rest = text.partition("/")
+        label = slug_label(head)
+        if not sep or not rest or label == workspace.default_label or label not in workspace.roots:
+            return text
+        if os.path.exists(os.path.join(workspace.default_root, head)):
+            return text  # a real folder of the default repo, which happens to share the name
+        fixed = f"{REFERENCE_SIGIL}{label}/{rest}"
+        notes.append(f"{text} is in another repo: read as {fixed}")
+        return fixed
+
+    for key in ("files_to_create", "files_to_modify", "read_only_changes"):
+        entries = []
+        for entry in plan.get(key) or []:
+            if isinstance(entry, dict):
+                entries.append({**entry, "path": with_prefix(entry.get("path") or "")})
+            else:
+                entries.append(with_prefix(entry))
+        plan[key] = entries
+    plan["context_files"] = [with_prefix(p) for p in plan.get("context_files") or []]
+
+    def label_of(path: str) -> str | None:
+        try:
+            return workspace.split(path)[0]
+        except Exception:  # noqa: BLE001 — an unknown label is check_plan's to report
+            return None
+
+    read_only = [dict(e) if isinstance(e, dict) else {"path": e, "purpose": None} for e in plan.get("read_only_changes") or []]
+    kept_read_only = []
+    for entry in read_only:
+        if label_of(entry["path"]) in workspace.read_only:
+            kept_read_only.append(entry)
+            continue
+        resolved = _resolve(workspace, entry["path"])[0]
+        key = "files_to_modify" if resolved and os.path.isfile(resolved) else "files_to_create"
+        plan[key] = [*plan.get(key, []), {"path": entry["path"], "purpose": entry.get("purpose")}]
+        notes.append(f"{entry['path']} is in a repo forge can change: planned as a file to {key.split('_')[-1]}")
+    for key, action in (("files_to_create", "create"), ("files_to_modify", "modify")):
+        kept = []
+        for entry in plan.get(key) or []:
+            path = entry.get("path") if isinstance(entry, dict) else entry
+            if label_of(path) in workspace.read_only:
+                purpose = entry.get("purpose") if isinstance(entry, dict) else None
+                if all(e["path"] != path for e in kept_read_only):
+                    kept_read_only.append({"path": path, "purpose": purpose})
+                if action == "modify" and path not in plan["context_files"]:
+                    plan["context_files"].append(path)
+                notes.append(f"{path} is in a read-only repo: listed for a person to change, not planned")
+            else:
+                kept.append(entry)
+        plan[key] = kept
+    plan["read_only_changes"] = kept_read_only
+    return plan, notes
+
+
 def check_plan(plan: dict[str, Any], workspace: Workspace) -> list[dict[str, Any]]:
     """Every defect in `plan`, as `{kind, path, reason, suggestions,
     blocking}`. An empty list means the plan is usable — not that it is
@@ -214,7 +300,11 @@ def check_plan(plan: dict[str, Any], workspace: Workspace) -> list[dict[str, Any
     if not creates and not modifies:
         defects.append({
             "kind": KIND_NO_FILES, "path": None, "suggestions": [],
-            "reason": "the plan names no files to create and none to modify",
+            "reason": (
+                "every change this plan makes is in a read-only repo (read_only_changes) — plan what forge can "
+                "change for this ticket, or, if nothing, ask a question saying so"
+                if plan.get("read_only_changes") else "the plan names no files to create and none to modify"
+            ),
         })
     if not criteria_list(plan):
         defects.append({
