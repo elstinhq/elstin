@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useSyncEpic } from "../../hooks/useEpics";
 import { useToast } from "../../lib/toast";
+import { keyLabel, keyPlaceholder, sourceLabel } from "../../lib/ticketSource";
 import { Button } from "../ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Input } from "../ui/input";
@@ -8,11 +9,12 @@ import { Label } from "../ui/label";
 
 interface SyncTicketDialogProps {
   projectId: number;
+  ticketSource: string;
   open: boolean;
   onClose: () => void;
 }
 
-export function SyncTicketDialog({ projectId, open, onClose }: SyncTicketDialogProps) {
+export function SyncTicketDialog({ projectId, ticketSource, open, onClose }: SyncTicketDialogProps) {
   const [jiraKey, setJiraKey] = useState("");
   const syncEpic = useSyncEpic(projectId);
   const { showToast } = useToast();
@@ -24,7 +26,7 @@ export function SyncTicketDialog({ projectId, open, onClose }: SyncTicketDialogP
   function handleSubmit() {
     const trimmed = jiraKey.trim();
     if (!trimmed) {
-      showToast("JIRA key is required", "error");
+      showToast(`${keyLabel(ticketSource)} is required`, "error");
       return;
     }
     syncEpic.mutate(trimmed, {
@@ -44,7 +46,10 @@ export function SyncTicketDialog({ projectId, open, onClose }: SyncTicketDialogP
         </DialogHeader>
         <div className="flex flex-col gap-4">
           <p className="text-muted-foreground text-xs">
-            Sync a JIRA task with child stories, or a lone Story/Task ticket. New tickets start paused — resume when you're ready to run.
+            {ticketSource === "github"
+              ? "Sync a GitHub issue with its sub-issues as stories, or a lone issue. "
+              : "Sync a JIRA task with child stories, or a lone Story/Task ticket. "}
+            New tickets start paused — resume when you're ready to run.
           </p>
           <form
             className="flex flex-col gap-4"
@@ -54,8 +59,8 @@ export function SyncTicketDialog({ projectId, open, onClose }: SyncTicketDialogP
             }}
           >
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="jira-key">JIRA key</Label>
-              <Input id="jira-key" placeholder="ENG-1" value={jiraKey} onChange={(e) => setJiraKey(e.target.value)} />
+              <Label htmlFor="jira-key">{keyLabel(ticketSource)}</Label>
+              <Input id="jira-key" placeholder={keyPlaceholder(ticketSource)} value={jiraKey} onChange={(e) => setJiraKey(e.target.value)} />
             </div>
           </form>
         </div>
@@ -64,7 +69,7 @@ export function SyncTicketDialog({ projectId, open, onClose }: SyncTicketDialogP
             Cancel
           </Button>
           <Button loading={syncEpic.isPending} onClick={handleSubmit}>
-            Sync from JIRA
+            Sync from {sourceLabel(ticketSource)}
           </Button>
         </DialogFooter>
       </DialogContent>

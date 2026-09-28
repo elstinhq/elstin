@@ -21,6 +21,7 @@ Return JSON only with keys:
 - questions (list, default []) — clarification questions when a design decision is genuinely ambiguous (see rules below)
 - files_to_create (list of {path, purpose}) — new files the dev agent must write
 - files_to_modify (list of {path, purpose}) — existing files the dev agent must edit
+- read_only_changes (list of {path, purpose}, default []) — changes the ticket needs that forge must not make: in a READ-ONLY repo or reference folder (your prompt lists them), or a file the project guide says agents must not create or change (a generated or local-only artifact). Nothing else: work forge can do goes under files_to_create/files_to_modify. A person makes these, and the plan's reader is told; the purpose says what the person does. Never also list such a file under files_to_create/files_to_modify. acceptance_criteria are what the other files deliver: none may require a read_only_changes file to change
 - context_files (list of relative paths to read for reference; do not list these under files_to_modify unless they must change)
 - architecture (object with layers, state_management, routing notes)
 - acceptance_criteria (list of testable strings)
@@ -79,13 +80,21 @@ CRITICAL — files_to_modify completeness (the dev agent is BLOCKED from editing
 - Integration and wiring files are NOT context_files — if an existing file needs even one line changed (routing tables, DI registration, barrel exports, app entry points, navigation guards), it belongs in files_to_modify.
 - Every acceptance criterion must be traceable to at least one file in files_to_create or files_to_modify. If you cannot point to a file that implements a criterion, either add the file or drop the criterion.
 - After drafting the list, re-read each criterion and each action described in the plan and verify the responsible file is present. If it is missing, add it.
+- Unless questions is non-empty, a plan naming NO files at all, or stating NO acceptance criteria, is not a valid answer and will be rejected. Nothing downstream can act on it: the dev agent has nothing to write and the checks that follow have nothing to check, so the ticket silently ships as an empty change.
+- If the feature looks already implemented, that is not an empty plan either. Say so in reasoning, and plan the files that still need changing to satisfy the ticket — the tests that prove it, most often. If it is genuinely complete to the last test, ask a question instead of returning an empty plan.
+
+CRITICAL — multi-repo projects:
+- When the user message lists more than one repo, the project spans several. Paths with no prefix belong to the default repo; a path in another repo carries its `@label/` prefix, e.g. `@api/src/models/cart.py`.
+- Use the SAME prefix in files_to_create/files_to_modify. That is how you say a change reaches another repo, and it is the only thing that gets the dev agent a worktree there — a file named without its prefix will be created in the wrong repo.
+- Do not split one coherent change across repos unnecessarily, but do not avoid it either: if the UI change requires an API field that does not exist, plan both, each with its own prefix.
+- Every repo is readable while planning, whether or not you plan to change it.
 
 Put read-only reference files in context_files only.
 The PROJECT ARCHITECTURE GUIDE (AGENTS.md) in the user message is the single source of truth for folder layout, naming, DI patterns, state management, routing, and which services to use. Follow it exactly. Do not invent paths, patterns, or dependencies not described there.
 
 CRITICAL — prior implementation attempts:
 - If a "PRIOR IMPLEMENTATION ATTEMPTS" block is present in the user message, existing branches already carry work related to this ticket. Each candidate's `worktree_status` tells you whether its code will actually be on disk for this run — read that field before deciding what to plan.
-- For the candidate marked SELECTED: its changes are genuinely already implemented in your worktree. files_to_create/files_to_modify must reflect only the remaining gap between it and the current request/acceptance criteria — do not re-plan work its diff already shows as done, unless it is fundamentally wrong for this request (in which case say why in reasoning).
+- For the candidate marked SELECTED, and any marked ALREADY MERGED: its changes are genuinely already implemented in your worktree. files_to_create/files_to_modify must reflect only the remaining gap between it and the current request/acceptance criteria — do not re-plan work its diff already shows as done, unless it is fundamentally wrong for this request (in which case say why in reasoning).
 - For every OTHER candidate (marked "reference only"): its changes are NOT present in your worktree. If its implementation is worth reusing, the corresponding files still belong in files_to_create/files_to_modify — port the proven code from its diff_sample rather than skipping those files or re-deriving the implementation from scratch.
 - discovery_evidence and the plan_markdown "Current State" section must call out what each relevant branch covers and whether it's SELECTED (already in your worktree) or reference-only (still needs porting), referencing the branch name.
 """
@@ -106,47 +115,65 @@ def build_planner_system(project_path: str) -> str:
 
 
 def _format_prior_work_block(prior_work: dict[str, Any]) -> str:
-    """Prose block describing prior implementation attempts. Empty string
-    when nothing was found — in forge Phase 2, that's always today, since
-    discover_prior_work (a git-history-based branch scanner) is not yet
-    built (see forge/agents/roles/planner_loop.py's module docstring); the
-    function stays real/callable so it activates the instant that lands,
-    without another code change here."""
+    """Prose block describing work that already exists for this ticket.
+    Empty string when nothing was found.
+
+    Filled from the daemon's lookup before the story's branch was made
+    (forge/services/prior_work.py, shaped by forge/daemon/prior_work_lookup.py's
+    planner_prior_work): per repo, the branches carrying the ticket's key,
+    which one this worktree starts from (SELECTED — on disk), which are only
+    reference, which are already in the default branch, and commits on the
+    default branch that name the ticket."""
     if not prior_work.get("found"):
         return ""
     selected_branch = prior_work.get("selected_branch")
     trimmed = []
-    for c in prior_work["candidates"]:
+    for c in prior_work.get("candidates") or []:
         files = c.get("changed_files") or []
-        trimmed.append({
+        selected = bool(c.get("selected")) or bool(selected_branch and c.get("branch") == selected_branch)
+        in_default = str(c.get("status") or "").startswith("already in")
+        entry = {
+            "repo": c.get("repo"),
             "branch": c.get("branch"),
             "worktree_status": (
-                "SELECTED — this worktree will be created from this branch's tip"
-                if c.get("branch") == selected_branch and selected_branch
+                "SELECTED — this worktree was created from this branch's tip" if selected
+                else "ALREADY MERGED — its changes are in the default branch, so they are on disk too" if in_default
                 else "reference only — NOT present in your worktree"
             ),
             "match_reason": c.get("match_reason"),
             "status": c.get("status"),
+            "commits": (c.get("commits") or [])[:15],
             "changed_files": files[:50],
-            "changed_files_total": len(files),
-            "diff_sample": (c.get("diff") or "")[:2500],
-            "diff_truncated": c.get("diff_truncated") or len(c.get("diff") or "") > 2500,
-        })
+            "changed_files_total": c.get("changed_files_total") or len(files),
+        }
+        for key in ("also_carries", "pull_request"):
+            if c.get(key):
+                entry[key] = c[key]
+        if not selected and not in_default and c.get("diff"):
+            entry["diff_sample"] = c["diff"][:2500]
+            entry["diff_truncated"] = bool(c.get("diff_truncated")) or len(c["diff"]) > 2500
+        trimmed.append(entry)
+    merged = prior_work.get("merged_commits") or {}
     return (
-        "=== PRIOR IMPLEMENTATION ATTEMPTS (existing branches for this ticket) ===\n"
-        "Existing branches already carry work related to this ticket. Each candidate has a "
-        "`match_reason`: `ticket_id`/`title` = a previous agent run on this ticket; "
-        "`branch_name` = a branch named after this ticket's key (likely human-authored); "
-        "`epic_branch` = a branch for this ticket's parent epic (may already contain this "
-        "story's work). `changed_files` is capped (see `changed_files_total`) and `diff_sample` "
-        "is a prefix.\n"
-        "`worktree_status` tells you whether this candidate's code will actually be on disk: "
-        "only the candidate marked SELECTED will be — its worktree is branched from that "
-        "branch's tip, so its changes are genuinely already implemented and must NOT be "
-        "re-planned. Every other candidate is reference only: its changes are NOT present in "
-        "the worktree you're planning for, so if you want to reuse them, the corresponding "
-        "files still belong in files_to_create/files_to_modify (port the proven implementation "
-        "from diff_sample rather than re-deriving it from scratch).\n"
+        "=== PRIOR IMPLEMENTATION ATTEMPTS (work that already exists for this ticket) ===\n"
+        "Before this run, the repos were searched for branches carrying this ticket's key. "
+        "`match_reason`: `branch_name` = a branch named after this ticket (or one of its "
+        "sub-tasks), most likely a person's work in progress; `epic_branch` = a branch named "
+        "after the parent epic (may already contain this story's work). `commits` and "
+        "`changed_files` are capped (see `changed_files_total`); `diff_sample` is a prefix. "
+        "`also_carries` names other tickets the same branch was named after — do not implement "
+        "their scope here.\n"
+        "`worktree_status` tells you whether a candidate's code is actually on disk: the SELECTED "
+        "one is (the worktree starts from its tip), and so is an ALREADY MERGED one (its changes "
+        "are in the default branch) — do not re-plan either's work; plan only what is still "
+        "missing for this ticket. A reference-only candidate is NOT on disk: if it is worth "
+        "reusing, its files still belong in files_to_create/files_to_modify — port the proven "
+        "implementation from diff_sample rather than re-deriving it.\n"
         + json.dumps(trimmed, indent=2)[:15000]
+        + (
+            "\nCommits on the default branch that name this ticket (already merged, so on disk):\n"
+            + json.dumps(merged, indent=2)[:3000]
+            if merged else ""
+        )
         + "\n=== END PRIOR IMPLEMENTATION ATTEMPTS ===\n\n"
     )

@@ -39,9 +39,44 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         "How often to re-run each project's ticket filter, in seconds (minimum 30)",
         False, "300", "string",
     ),
+    # A ticket in one of these is set aside until it leaves it — not started,
+    # not re-planned (forge/services/external_sync.py). Matched on the
+    # status name, since JIRA files "On Hold" under To Do.
+    ConfigField(
+        "ticket_hold_statuses",
+        "Source statuses that mean \"on hold\": forge leaves such a ticket alone until it moves out of them "
+        "(comma-separated, any case)",
+        False, "On Hold, Blocked, Paused, Parked, Deferred", "string",
+    ),
     ConfigField("github_org", "GitHub organization", False, None, "string"),
     ConfigField("github_token", "GitHub token", True, None, "string"),
+    ConfigField(
+        "github_issues_write_enabled",
+        "Allow forge to comment on and close GitHub issues (for projects whose tickets come from GitHub Issues)",
+        False, "false", "bool",
+    ),
+    ConfigField(
+        "git_author_name",
+        "Commit author name (blank = commits are authored by code_forge itself)",
+        False, None, "string",
+    ),
+    ConfigField(
+        "git_author_email",
+        "Commit author email (use the address on your GitHub account so commits are credited to you; code_forge is added as co-author)",
+        False, None, "string",
+    ),
+    ConfigField(
+        "manage_gitignore",
+        "Add a repo's missing build-output entries (target/, node_modules/, …) to its .gitignore, committed on the epic branch",
+        False, "true", "bool",
+    ),
     ConfigField("llm_provider", "LLM provider (only 'openai' is wired today)", False, "openai", "string"),
+    ConfigField(
+        "llm_request_timeout_seconds",
+        "Give up on a single model call after this many seconds (0 = never). A timed-out call is retried once. "
+        "The slowest legitimate dev step seen took about 7.5 minutes",
+        False, "900", "string",
+    ),
     ConfigField("openai_api_key", "OpenAI API key", True, None, "string"),
     ConfigField(
         "llm_base_url",
@@ -57,22 +92,71 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         False, "true", "bool",
     ),
     ConfigField("require_plan_approval", "Require plan approval before dev starts", False, "true", "bool"),
-    ConfigField("require_pr_open_approval", "Require human approval before opening a PR", False, "true", "bool"),
-    ConfigField("require_pr_review", "Require human PR review before merge", False, "true", "bool"),
+    # Stories an epic's dependencies allow to run at once do run at once, up to
+    # this many across every epic (runs and merges both count — each one runs
+    # a build). The rest start on a later poll as slots free up.
+    ConfigField("max_parallel_stories", "Stories run in parallel at most (runs and merges, across all epics)", False, "3", "string"),
+    ConfigField(
+        "generate_project_guide",
+        "Write an AGENTS.md-style guide (kept in forge, the repo is not touched) for a repo that has none, before its first plan",
+        False, "false", "bool",
+    ),
     ConfigField("dev_sdk_model", "Dev agent model", False, "gpt-5.1", "string"),
+    ConfigField(
+        "dev_web_access_enabled",
+        "Let the dev agent search the web and fetch public pages (docs, package READMEs); internal/private addresses are always refused",
+        False, "true", "bool",
+    ),
+    ConfigField(
+        "brave_search_api_key",
+        "Brave Search API key for the dev agent's web search (blank = fall back to DuckDuckGo, which is unofficial and can rate-limit)",
+        True, None, "string",
+    ),
     ConfigField("dev_sdk_effort", "Dev agent reasoning effort (low/medium/high/xhigh/max)", False, "medium", "string"),
     ConfigField("dev_sdk_max_turns", "Dev agent max turns per run (0 = unbounded)", False, "80", "string"),
     ConfigField("dev_sdk_max_budget_usd", "Dev agent max spend per run in USD (0 = unbounded)", False, "0", "string"),
+    ConfigField(
+        "dev_sdk_max_idle_turns",
+        "Dev agent: stop early after this many consecutive turns with no file edit (0 = off; anti-looping guard for weaker models). "
+        "This is the base for a small plan; a plan touching many files gets more (+1 per 2 extra files, up to 4x)",
+        False, "4", "string",
+    ),
     ConfigField("planner_sdk_model", "Planner agent model", False, "gpt-5.1", "string"),
     ConfigField("planner_sdk_effort", "Planner agent reasoning effort (low/medium/high/xhigh/max)", False, "medium", "string"),
     ConfigField("planner_sdk_max_turns", "Planner agent max turns per run (0 = unbounded)", False, "40", "string"),
     ConfigField("planner_sdk_max_retries", "Planner agent retries on a transient SDK error", False, "2", "string"),
     ConfigField("planner_sdk_max_budget_usd", "Planner agent max spend per run in USD (0 = unbounded)", False, "0", "string"),
     ConfigField(
+        "planner_explorers_enabled",
+        "Before planning, run parallel read-only agents to investigate the codebase "
+        "(keeps their large file reads out of the planner's own context)",
+        False, "true", "bool",
+    ),
+    ConfigField(
+        "planner_explorer_max_agents",
+        "Maximum parallel investigation agents per plan (0 = off; the scoping step often chooses fewer)",
+        False, "3", "string",
+    ),
+    ConfigField("planner_explorer_max_turns", "Turn cap per investigation agent", False, "8", "string"),
+    ConfigField(
+        "planner_explorer_model",
+        "Model for investigation agents (blank = use the planner model; a cheaper model usually suffices for reading code)",
+        False, None, "string",
+    ),
+    ConfigField(
         "agent_compaction_token_threshold",
         "Compact an agent run's history once it exceeds this estimated token count "
-        "(dev + planner; lower it for a small-context model)",
-        False, "120000", "string",
+        "(dev + planner). Sized for a ~1M-token context model; lower it to about "
+        "100000 for a 200k-token model. Compaction tombstones old tool output, so a "
+        "threshold set too low costs the agent detail it could have afforded to keep",
+        False, "400000", "string",
+    ),
+    ConfigField(
+        "story_max_budget_usd",
+        "Maximum total spend per story in USD across planning, investigation, development "
+        "and review (0 = unbounded). The outer bound the per-phase caps sit inside; "
+        "counts what the provider reports it billed, else the forge/llm/pricing.py estimate",
+        False, "0", "string",
     ),
     ConfigField("verifier_qa_model", "Verifier/QA review model", False, "gpt-5.1-mini", "string"),
     ConfigField("verifier_skip_llm_trivial_chars", "Skip LLM review below this diff size in chars (0 = never skip)", False, "0", "string"),
@@ -90,8 +174,9 @@ PROJECT_OVERRIDABLE_KEYS = frozenset({
     "jira_write_enabled",
     "auto_run_enabled",
     "require_plan_approval",
-    "require_pr_open_approval",
-    "require_pr_review",
+    "generate_project_guide",
+    "ticket_hold_statuses",
+    "manage_gitignore",
 })
 
 _cache_lock = threading.Lock()

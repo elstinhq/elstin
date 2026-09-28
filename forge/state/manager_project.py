@@ -2,10 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, or_, select, update
 
 from forge.db.engine import session_scope
-from forge.db.models import Epic, Project, ProjectRepo, ProjectTicketFilter
+from forge.db.models import Epic, Project, ProjectConfig, ProjectRepo, ProjectTicketFilter, Story, StoryWorktree
+
+# A story done with its folder: nothing of it is left to land from there.
+_FINISHED_STORY_STATUSES = ("merged", "done", "skipped")
+
+
+class ProjectNotEmpty(RuntimeError):
+    """The project still has tickets; its own rows were left alone."""
 
 
 class _ProjectMixin:
@@ -39,7 +46,15 @@ class _ProjectMixin:
             ]
             return result
 
-    def update_project(self, project_id: int, *, name: str | None = None, description: str | None = None) -> None:
+    def get_project_ticket_source(self, project_id: int) -> str | None:
+        with session_scope() as session:
+            project = session.get(Project, project_id)
+            return project.ticket_source if project is not None else None
+
+    def update_project(
+        self, project_id: int, *, name: str | None = None, description: str | None = None,
+        ticket_source: str | None = None,
+    ) -> None:
         with session_scope() as session:
             project = session.get(Project, project_id)
             if project is None:
@@ -48,17 +63,70 @@ class _ProjectMixin:
                 project.name = name
             if description is not None:
                 project.description = description or None
+            if ticket_source is not None:
+                project.ticket_source = ticket_source
 
-    def add_project_repo(self, project_id: int, path: str, *, label: str | None = None, clone_url: str | None = None) -> int:
+    def add_project_repo(
+        self, project_id: int, path: str, *, label: str | None = None, clone_url: str | None = None,
+        kind: str = "repo", read_only: bool = False,
+    ) -> int:
+        """`kind` "reference" is a plain folder read for context, never
+        written — it is always read-only (see ProjectRepo)."""
         with session_scope() as session:
-            repo = ProjectRepo(project_id=project_id, path=path, label=label, clone_url=clone_url)
+            repo = ProjectRepo(
+                project_id=project_id, path=path, label=label, clone_url=clone_url,
+                kind=kind, read_only=read_only or kind == "reference",
+            )
             session.add(repo)
             session.flush()
             return repo.id
 
-    def list_project_repos(self, project_id: int) -> list[dict]:
+    def writable_project_repo_id(self, project_id: int, *, excluding: int | None = None) -> int | None:
+        """The folder a new epic defaults to: the first-added git repo that
+        can be written. Never a reference folder or a read-only repo — an
+        unprefixed path in a plan means the default repo, and that has to be
+        one a story can change."""
         with session_scope() as session:
-            rows = session.execute(select(ProjectRepo).where(ProjectRepo.project_id == project_id)).scalars().all()
+            query = select(ProjectRepo.id).where(
+                ProjectRepo.project_id == project_id, ProjectRepo.kind == "repo", ProjectRepo.read_only.is_(False),
+            )
+            if excluding is not None:
+                query = query.where(ProjectRepo.id != excluding)
+            return session.execute(query.order_by(ProjectRepo.id)).scalars().first()
+
+    def set_project_repo_read_only(self, repo_id: int, read_only: bool) -> dict | None:
+        """Mark a git repo read-only (or writable again). None for an unknown
+        folder or a reference folder (always read-only).
+
+        Refused, changing nothing, while a story has unfinished work in it —
+        its approved plan writes there: {"changed": False, "blocked_by": [...]}.
+        Otherwise {"changed": True, "epics_moved": [...], "moved_to": id or
+        None}: an epic whose default this repo was moves to the next writable
+        repo, since the default is where an unprefixed path is written."""
+        with session_scope() as session:
+            repo = session.get(ProjectRepo, repo_id)
+            if repo is None or repo.kind != "repo":
+                return None
+            if not read_only:
+                repo.read_only = False
+                return {"changed": True, "epics_moved": [], "moved_to": None}
+            unfinished = _unfinished_work_in(session, repo)
+            if unfinished:
+                return {"changed": False, "blocked_by": unfinished}
+            repo.read_only = True
+            session.flush()
+            moved, replacement = _move_epic_defaults(session, repo)
+            return {"changed": True, "epics_moved": moved, "moved_to": replacement}
+
+    def list_project_repos(self, project_id: int) -> list[dict]:
+        """Oldest first — this order is what picks the *default* repo for a
+        new epic (the first-added one, see epic_sync.py) and what a
+        multi-repo tool description lists as "the default", so it needs to
+        be deterministic rather than whatever order Postgres feels like."""
+        with session_scope() as session:
+            rows = session.execute(
+                select(ProjectRepo).where(ProjectRepo.project_id == project_id).order_by(ProjectRepo.id)
+            ).scalars().all()
             return [_project_repo_to_dict(r) for r in rows]
 
     def get_project_repo(self, repo_id: int) -> dict | None:
@@ -66,19 +134,78 @@ class _ProjectMixin:
             repo = session.get(ProjectRepo, repo_id)
             return _project_repo_to_dict(repo) if repo is not None else None
 
-    def remove_project_repo(self, repo_id: int) -> bool:
-        """Returns False (does not delete) if any epic still points at this
-        folder — detaching it would silently orphan that epic's dispatch
-        target."""
+    def set_project_repo_guide(self, repo_id: int, guide: str | None) -> bool:
+        """Stores (or, with None/empty, discards) the guide forge generated
+        for this repo. False if the repo does not exist."""
         with session_scope() as session:
             repo = session.get(ProjectRepo, repo_id)
             if repo is None:
                 return False
-            in_use = session.scalar(select(func.count()).where(Epic.project_repo_id == repo_id)) or 0
-            if in_use:
-                return False
-            session.delete(repo)
+            repo.generated_guide = guide or None
+            repo.generated_guide_at = _utcnow() if guide else None
             return True
+
+    def remove_project_repo(self, repo_id: int) -> dict | None:
+        """Detach a folder from its project. None for an unknown folder.
+
+        No repo is bound to an epic (forge/tools/workspace.py) — an epic's
+        folder is only the default for unprefixed paths, assigned
+        automatically — so a folder being that default is no reason to keep
+        it: each such epic moves to the project's next folder (or to none, if
+        this was the last; it waits until one is added), and a story that
+        pointed at it goes back to its epic's default.
+
+        What does block it is unfinished work IN the folder: a story with a
+        worktree there that has not merged or finished. Those stories' plans
+        and branches live in this repo; detaching it would strand them.
+        Returns {"removed": False, "blocked_by": [story keys]} then, and
+        changes nothing. Otherwise {"removed": True, "epics_moved": [...],
+        "moved_to": repo id or None}.
+
+        The folder on disk is left as it is — a clone included."""
+        with session_scope() as session:
+            repo = session.get(ProjectRepo, repo_id)
+            if repo is None:
+                return None
+            unfinished = _unfinished_work_in(session, repo)
+            if unfinished:
+                return {"removed": False, "blocked_by": unfinished}
+
+            moved, replacement = _move_epic_defaults(session, repo)
+            session.execute(update(Story).where(Story.project_repo_id == repo_id).values(project_repo_id=None))
+            # Finished stories' worktree rows are history; they keep the path.
+            session.execute(update(StoryWorktree).where(StoryWorktree.project_repo_id == repo_id).values(project_repo_id=None))
+            session.delete(repo)
+            return {"removed": True, "epics_moved": sorted(moved), "moved_to": replacement}
+
+    def delete_project_records(self, project_id: int) -> dict[str, int] | None:
+        """Delete the project's own rows — its settings overrides, ticket
+        filter, folders and the project itself — in one transaction. None for
+        an unknown project.
+
+        Its tickets must already be gone (forge/daemon/project_removal.py
+        removes each one first, with everything it left behind): raises
+        ProjectNotEmpty, deleting nothing, if any epic still belongs to it —
+        e.g. the ticket filter's sweep added one while the others were being
+        removed."""
+        with session_scope() as session:
+            project = session.get(Project, project_id)
+            if project is None:
+                return None
+            remaining = session.execute(select(Epic.jira_key).where(Epic.project_id == project_id)).scalars().all()
+            if remaining:
+                raise ProjectNotEmpty(f"Tickets still belong to this project: {', '.join(sorted(remaining))}")
+
+            def gone(statement) -> int:
+                return session.execute(statement).rowcount or 0
+
+            counts = {
+                "settings_overrides": gone(delete(ProjectConfig).where(ProjectConfig.project_id == project_id)),
+                "ticket_filters": gone(delete(ProjectTicketFilter).where(ProjectTicketFilter.project_id == project_id)),
+                "folders": gone(delete(ProjectRepo).where(ProjectRepo.project_id == project_id)),
+            }
+            session.delete(project)
+            return counts
 
     # -- ticket filters ---------------------------------------------------
     # One saved JIRA query per project (see forge/db/models/project.py's
@@ -165,10 +292,40 @@ def _project_to_dict(project: Project, repo_count: int, epic_count: int) -> dict
         "id": project.id,
         "name": project.name,
         "description": project.description,
+        "ticket_source": project.ticket_source,
         "repo_count": repo_count,
         "epic_count": epic_count,
         "created_at": project.created_at.isoformat(),
     }
+
+
+def _unfinished_work_in(session, repo: ProjectRepo) -> list[str]:
+    """Stories with a worktree in `repo` that have not merged or finished."""
+    rows = session.execute(
+        select(StoryWorktree.story_key)
+        .join(Story, Story.jira_key == StoryWorktree.story_key)
+        .where(
+            or_(StoryWorktree.project_repo_id == repo.id, StoryWorktree.repo_path == repo.path),
+            Story.status.notin_(_FINISHED_STORY_STATUSES),
+        )
+    ).scalars().all()
+    return sorted(set(rows))
+
+
+def _move_epic_defaults(session, repo: ProjectRepo) -> tuple[list[str], int | None]:
+    """Epics defaulting to `repo` move to the project's next writable git
+    repo (None if there is none; poll_once assigns one once there is)."""
+    replacement = session.execute(
+        select(ProjectRepo.id)
+        .where(
+            ProjectRepo.project_id == repo.project_id, ProjectRepo.id != repo.id,
+            ProjectRepo.kind == "repo", ProjectRepo.read_only.is_(False),
+        )
+        .order_by(ProjectRepo.id)
+    ).scalars().first()
+    moved = session.execute(select(Epic.jira_key).where(Epic.project_repo_id == repo.id)).scalars().all()
+    session.execute(update(Epic).where(Epic.project_repo_id == repo.id).values(project_repo_id=replacement))
+    return sorted(moved), replacement
 
 
 def _project_repo_to_dict(repo: ProjectRepo) -> dict:
@@ -178,6 +335,10 @@ def _project_repo_to_dict(repo: ProjectRepo) -> dict:
         "path": repo.path,
         "label": repo.label,
         "clone_url": repo.clone_url,
+        "kind": repo.kind or "repo",
+        "read_only": bool(repo.read_only),
+        "generated_guide": repo.generated_guide,
+        "generated_guide_at": repo.generated_guide_at.isoformat() if repo.generated_guide_at else None,
         "created_at": repo.created_at.isoformat(),
     }
 

@@ -1,14 +1,17 @@
-import { Pause, Play } from "lucide-react";
+import { Pause, Play, RefreshCw } from "lucide-react";
 import { PhaseTagFor, Tag } from "../shared/StatusTag";
 import { Twisty } from "../shared/Twisty";
+import { RemoveEpicButton } from "./RemoveEpicButton";
 import { StoryRow } from "./StoryRow";
-import { useSetEpicGate, useSetEpicRepo } from "../../hooks/useEpics";
+import { useRefreshPriorWork, useSetEpicGate } from "../../hooks/useEpics";
+import { continuedBranches, doneWorkOutcome, lookupDue, needsChoice, onlyInDefault } from "../../lib/priorWork";
+import { useToast } from "../../lib/toast";
 import type { Epic, ProjectRepo, Story } from "../../types/api";
 import { Button } from "../ui/button";
 import { Card } from "../ui/card";
 import { Progress } from "../ui/progress";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { cn } from "../../lib/utils";
+import { displayKey } from "../../lib/ticketSource";
 
 // Wave first, then issue key — the order the epic actually executes in. The
 // API returns rows in arbitrary DB order, which put the QA ticket at the
@@ -41,7 +44,6 @@ export function EpicCard({
   onOpenEpic,
   onOpenStory,
 }: EpicCardProps) {
-  const setEpicRepo = useSetEpicRepo(projectId);
   const setEpicGate = useSetEpicGate(projectId);
 
   // Progress counts top-level stories only. Sub-tasks are never dispatched
@@ -57,7 +59,11 @@ export function EpicCard({
     subtasksByParent.get(row.parent_key)!.push(row);
   }
 
+  const statusByKey = new Map(stories.map((s) => [s.jira_key, s.status as string]));
   const doneCount = stories.filter((s) => s.status === "merged" || s.status === "done").length;
+  // The epic's one pull request (per repo it wrote), opened once every story
+  // has merged into the epic branch.
+  const pullRequests = (epic.pull_requests || []).filter((pr) => pr.number || pr.error);
   const total = stories.length;
   const pct = total ? Math.round((doneCount / total) * 100) : 0;
 
@@ -73,34 +79,54 @@ export function EpicCard({
               onOpenEpic(epic.jira_key);
             }}
           >
-            {epic.jira_key}
+            {displayKey(epic)}
           </span>
           <PhaseTagFor phase={epic.phase} />
 
           {epic.repo ? (
-            <span className="text-muted-foreground min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-xs">
+            <span
+              className="text-muted-foreground min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-xs"
+              title={
+                repos.length > 1
+                  ? `Default repo for unprefixed paths. Every repo in this project (${repos
+                      .map((r) => r.label || r.path)
+                      .join(", ")}) is already readable and writable by the plan — assigned automatically, nothing to pick per ticket.`
+                  : undefined
+              }
+            >
               {epic.repo}
+              {repos.length > 1 ? " (default)" : ""}
             </span>
-          ) : repos.length ? (
-            <span onClick={(event) => event.stopPropagation()}>
-              <Select onValueChange={(value) => setEpicRepo.mutate({ epicKey: epic.jira_key, projectRepoId: Number(value) })}>
-                <SelectTrigger size="sm" aria-label="Folder">
-                  <SelectValue placeholder="Choose a folder" />
-                </SelectTrigger>
-                <SelectContent>
-                  {repos.map((r) => (
-                    <SelectItem key={r.id} value={String(r.id)}>
-                      {r.label || r.path}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </span>
-          ) : (
-            <Tag label="No folder attached" appearance="warning" />
+          ) : repos.length === 0 ? (
+            <Tag
+              label="No folder attached"
+              appearance="warning"
+              title="Add a git repo in Folders before this epic can run."
+            />
+          ) : null}
+
+          {pullRequests.map((pr) =>
+            pr.number ? (
+              <Button key={pr.repo_label || "default"} variant="outline" size="sm" className="shrink-0" asChild>
+                <a
+                  href={pr.url || "#"}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={pr.ci_status ? `CI: ${pr.ci_status}` : "The epic's pull request"}
+                >
+                  {pr.repo_label ? `${pr.repo_label} ` : ""}#{pr.number} ({pr.state}
+                  {pr.state === "open" && pr.ci_status ? `, CI ${pr.ci_status}` : ""})
+                </a>
+              </Button>
+            ) : (
+              <Tag key={pr.repo_label || "default"} label="PR not opened" appearance="destructive" title={pr.error || undefined} />
+            ),
           )}
 
           {epic.manual_gate ? <Tag label="Paused" appearance="warning" /> : null}
+          {epic.external_closed ? (
+            <Tag label="closed in source" appearance="secondary" title="The source reports this epic closed, so forge put it on hold. Resume it to keep going." />
+          ) : null}
 
           <div className="flex-1" />
 
@@ -116,6 +142,7 @@ export function EpicCard({
             {epic.manual_gate ? <Play /> : <Pause />}
             {epic.manual_gate ? "Resume" : "Pause"}
           </Button>
+          <RemoveEpicButton projectId={projectId} epic={epic} />
         </div>
 
         <div className={cn("flex flex-col gap-4", isCollapsed && "hidden")}>
@@ -126,6 +153,8 @@ export function EpicCard({
             </span>
           </div>
 
+          <PriorWorkSummary projectId={projectId} epic={epic} stories={stories} />
+
           <div className="flex flex-col">
             {stories.map((story) => (
               <StoryRow
@@ -133,6 +162,7 @@ export function EpicCard({
                 projectId={projectId}
                 story={story}
                 subtasks={(subtasksByParent.get(story.jira_key) || []).sort(byWaveThenKey)}
+                statusByKey={statusByKey}
                 autoRunEnabled={autoRunEnabled}
                 expandedStories={expandedStories}
                 onToggleExpand={onToggleExpandStory}
@@ -143,5 +173,69 @@ export function EpicCard({
         </div>
       </div>
     </Card>
+  );
+}
+
+// What the look-up of earlier work found (forge/services/prior_work.py), in
+// one line: which tickets continue an existing branch, which wait for a pick,
+// which are already in main — and "Look again" while any ticket has not
+// started, for a branch pushed after the epic was added.
+function PriorWorkSummary({ projectId, epic, stories }: { projectId: number; epic: Epic; stories: Story[] }) {
+  const refresh = useRefreshPriorWork(projectId);
+  const { showToast } = useToast();
+  const unstarted = stories.filter((s) => s.status === "pending" && !s.branch);
+  const lookups = [epic.prior_work, ...stories.map((s) => s.prior_work)].filter((p) => p !== null);
+  // Nothing is looked up until the project has a folder to look in.
+  if (!epic.repo || (!lookups.length && !unstarted.length)) return null;
+
+  const continuing = stories
+    .filter((s) => s.status !== "skipped" && continuedBranches(s.prior_work).length)
+    .map((s) => displayKey(s));
+  const doneMerged = stories.filter((s) => s.status === "skipped" && doneWorkOutcome(s.prior_work) === "merged").map((s) => displayKey(s));
+  const doneConflicts = stories.filter((s) => s.status === "skipped" && doneWorkOutcome(s.prior_work) === "conflict").map((s) => displayKey(s));
+  const choosing = stories
+    .filter((s) => (s.status === "pending" || s.status === "skipped") && !s.branch && needsChoice(s.prior_work).length)
+    .map((s) => displayKey(s));
+  const inMain = stories.filter((s) => onlyInDefault(s.prior_work)).map((s) => displayKey(s));
+  const epicBranch = continuedBranches(epic.prior_work)[0]?.candidate.branch;
+  const pendingLookup = unstarted.some((s) => lookupDue(s.prior_work));
+
+  const parts = [
+    epicBranch ? `epic branch continues ${epicBranch}` : null,
+    continuing.length ? `continuing existing work: ${continuing.join(", ")}` : null,
+    doneMerged.length ? `done tickets' work merged in: ${doneMerged.join(", ")}` : null,
+    doneConflicts.length ? `done work that conflicts: ${doneConflicts.join(", ")}` : null,
+    choosing.length ? `pick a branch: ${choosing.join(", ")}` : null,
+    inMain.length ? `already in main: ${inMain.join(", ")}` : null,
+  ].filter(Boolean);
+  const text = pendingLookup
+    ? "Looking for earlier work on these tickets…"
+    : parts.length
+      ? `Earlier work — ${parts.join(" · ")}`
+      : "No earlier work found for these tickets";
+
+  return (
+    <div className="text-muted-foreground flex min-w-0 items-center gap-2 text-xs">
+      <span className="min-w-0 truncate" title={text}>{text}</span>
+      {unstarted.length && !pendingLookup ? (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-6 shrink-0 px-2 text-xs"
+          loading={refresh.isPending}
+          title="Look for branches again — e.g. one pushed after this epic was added. Tickets already started keep the branch they started from."
+          onClick={(e) => {
+            e.stopPropagation();
+            refresh.mutate(epic.jira_key, {
+              onSuccess: () => showToast("Looking again on the next poll", "success"),
+              onError: (err) => showToast(err.message || "Could not look again", "error"),
+            });
+          }}
+        >
+          <RefreshCw className="size-3" />
+          Look again
+        </Button>
+      ) : null}
+    </div>
   );
 }

@@ -49,11 +49,17 @@ doesn't. Status, kind, gates, worktrees, and PRs on stories forge already
 knows about are never touched — a story mid-run stays mid-run while a
 sibling appears next to it.
 
-Nothing is ever unsynced, paused, or deleted when a ticket stops matching.
-A ticket that was in the filter yesterday and isn't today has usually just
-moved status mid-run, and tearing down an epic underneath a running story
-to chase a query result is not a trade this platform makes. Removing an
-epic stays a deliberate human action.
+Nothing is ever unsynced, paused, or deleted *because a ticket stops
+matching*. A ticket that was in the filter yesterday and isn't today has
+usually just moved status mid-run, and tearing down an epic underneath a
+running story to chase a query result is not a trade this platform makes.
+Removing an epic stays a deliberate human action.
+
+What a sweep does do to an epic it already has is re-read it — including
+epics the filter no longer matches, since the filter selects on status and a
+finished epic is exactly what drops out — and reconcile it with the source
+(forge/services/external_sync.py): changed text, and tickets closed or
+deleted there. That is driven by the ticket itself, not by the query.
 
 Newly ingested epics land exactly where "Add ticket" leaves them: paused
 (`manual_gate=True`, see StateManager.create_epic) and with no folder
@@ -68,7 +74,9 @@ import re
 from dataclasses import dataclass
 
 from forge.services.epic_sync import is_jira_subtask, sync_epic_from_jira
-from forge.services.jira_service import JiraService, JiraTicket, issue_key_sort_key
+from forge.services.external_sync import ReconcileReport
+from forge.services.jira_service import JiraTicket, issue_key_sort_key
+from forge.services.ticket_source import get_ticket_source
 from forge.state.manager import StateManager
 
 logger = logging.getLogger("forge.jira_filter")
@@ -252,8 +260,9 @@ def _resolve_filter(project_id: int, ticket_filter: dict | None, sm: StateManage
 
 
 def search_matching_tickets(project_id: int, ticket_filter: dict) -> tuple[str, list[JiraTicket]]:
-    jql = build_jql(ticket_filter)
-    tickets = JiraService(project_id=project_id).search_tickets(jql, max_results=MAX_FILTER_RESULTS)
+    source = get_ticket_source(project_id)
+    jql = source.compile_filter(ticket_filter)
+    tickets = source.search_tickets(jql, max_results=MAX_FILTER_RESULTS)
     logger.info("project %s filter matched %d ticket(s): %s", project_id, len(tickets), jql)
     return jql, tickets
 
@@ -302,6 +311,8 @@ def sync_project_filter(project_id: int, ticket_filter: dict | None = None) -> d
     synced: list[str] = []
     refreshed: list[str] = []
     errors: list[dict] = []
+    changes = ReconcileReport()
+    rechecked: list[str] = []
 
     # Both actions run the same call — sync_epic_from_jira only ever inserts
     # what is missing (see this module's docstring) — and are tracked apart
@@ -312,7 +323,7 @@ def sync_project_filter(project_id: int, ticket_filter: dict | None = None) -> d
             continue
         try:
             before = _story_keys(sm, match.key) if match.action == ACTION_REFRESH else set()
-            sync_epic_from_jira(match.key, project_id=project_id)
+            changes.merge(sync_epic_from_jira(match.key, project_id=project_id))
             if match.action == ACTION_SYNC:
                 synced.append(match.key)
                 continue
@@ -323,6 +334,21 @@ def sync_project_filter(project_id: int, ticket_filter: dict | None = None) -> d
         except Exception as exc:  # noqa: BLE001 — one bad ticket must not end the sweep
             logger.warning("project %s filter: %s failed to sync: %s", project_id, match.key, exc)
             errors.append({"key": match.key, "error": str(exc)})
+
+    # An epic that stops matching the filter is usually one that finished —
+    # the filter selects on status — so a sweep of only the matches can
+    # never see it close, be edited, or be deleted. Every epic forge is
+    # still working on is re-read too, whether or not the filter matches it.
+    matched_keys = {m.key for m in matches}
+    for epic_key in sm.list_active_epic_keys_for_project(project_id):
+        if epic_key in matched_keys:
+            continue
+        try:
+            changes.merge(sync_epic_from_jira(epic_key, project_id=project_id))
+            rechecked.append(epic_key)
+        except Exception as exc:  # noqa: BLE001 — same rule as above: one bad epic must not end the sweep
+            logger.warning("project %s filter: %s failed to re-check: %s", project_id, epic_key, exc)
+            errors.append({"key": epic_key, "error": str(exc)})
 
     sm.record_ticket_filter_sync(
         project_id,
@@ -342,6 +368,8 @@ def sync_project_filter(project_id: int, ticket_filter: dict | None = None) -> d
         "refreshed": refreshed,
         "skipped": [m.to_dict() for m in matches if m.action == ACTION_SKIP],
         "errors": errors,
+        "rechecked": rechecked,
+        "changes": changes.to_dict(),
     }
 
 

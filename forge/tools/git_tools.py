@@ -61,11 +61,37 @@ def abort_merge_if_in_progress(repo_path: str) -> None:
 # commit failure otherwise) — passed as per-invocation `-c` overrides
 # rather than written into the repo's config, so this never depends on or
 # mutates ambient git setup.
-_COMMIT_AUTHOR_ARGS = ("-c", "user.name=code_forge", "-c", "user.email=forge@localhost")
+CODE_FORGE_NAME = "code_forge"
+CODE_FORGE_EMAIL = "forge@localhost"
+CODE_FORGE_CO_AUTHOR = f"Co-authored-by: {CODE_FORGE_NAME} <{CODE_FORGE_EMAIL}>"
 
 
-def commit_all(repo_path: str, message: str) -> str | None:
-    """Stage and commit all changes. Returns commit SHA or None if nothing to commit."""
+def commit_paths(repo_path: str, paths: list[str], message: str, *, author: tuple[str, str] | None = None) -> str:
+    """Commit exactly `paths` — nothing else staged or changed in the
+    worktree goes with them — authored like commit_all. Returns the SHA."""
+    add = _run_git(["add", "--", *paths], cwd=repo_path)
+    if add.returncode != 0:
+        raise GitMergeError(add.stderr.strip() or "git add failed", code="commit_failed", stderr=add.stderr)
+    name, email = author or (CODE_FORGE_NAME, CODE_FORGE_EMAIL)
+    if author:
+        message = f"{message}\n\n{CODE_FORGE_CO_AUTHOR}"
+    commit = _run_git(
+        ["-c", f"user.name={name}", "-c", f"user.email={email}", "commit", "-m", message, "--only", "--", *paths],
+        cwd=repo_path,
+    )
+    if commit.returncode != 0:
+        raise GitMergeError(commit.stderr.strip() or "git commit failed", code="commit_failed", stderr=commit.stderr)
+    return _run_git(["rev-parse", "HEAD"], cwd=repo_path).stdout.strip()
+
+
+def commit_all(repo_path: str, message: str, *, author: tuple[str, str] | None = None) -> str | None:
+    """Stage and commit all changes. Returns commit SHA or None if nothing to commit.
+
+    `author` is the (name, email) the commit is credited to — a person's
+    identity, so GitHub attributes the work to them. code_forge is then
+    named as a co-author in the message trailer. With no `author`, the
+    commit is authored by code_forge itself and carries no trailer, since
+    that would only repeat the author."""
     status = _run_git(["status", "--porcelain"], cwd=repo_path)
     if status.returncode != 0:
         raise GitMergeError(status.stderr.strip() or "Could not read git status", code="status_failed", stderr=status.stderr)
@@ -77,7 +103,10 @@ def commit_all(repo_path: str, message: str) -> str | None:
     if add.returncode != 0:
         raise GitMergeError(add.stderr.strip() or "git add failed", code="commit_failed", stderr=add.stderr)
 
-    commit = _run_git([*_COMMIT_AUTHOR_ARGS, "commit", "-m", message], cwd=repo_path)
+    name, email = author or (CODE_FORGE_NAME, CODE_FORGE_EMAIL)
+    if author:
+        message = f"{message}\n\n{CODE_FORGE_CO_AUTHOR}"
+    commit = _run_git(["-c", f"user.name={name}", "-c", f"user.email={email}", "commit", "-m", message], cwd=repo_path)
     if commit.returncode != 0:
         raise GitMergeError(commit.stderr.strip() or "git commit failed", code="commit_failed", stderr=commit.stderr)
 
@@ -153,7 +182,13 @@ def get_file_diff(worktree_path: str, relative_path: str) -> str:
 
     abs_path = os.path.join(worktree_path, relative_path)
     if os.path.isfile(abs_path):
-        return "[new or modified file]"
+        # A new file nothing has staged yet: its whole content, as a diff
+        # against nothing, so a reviewer sees what was written.
+        untracked = subprocess.run(
+            ["git", "-C", worktree_path, "diff", "--no-index", "--", os.devnull, relative_path],
+            capture_output=True, text=True, check=False,
+        )
+        return untracked.stdout or "[new or modified file]"
     return proc.stdout
 
 

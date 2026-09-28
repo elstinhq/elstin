@@ -49,6 +49,36 @@ def test_read_file_tool_windowed_read_keeps_lines_header_unnumbered(tmp_path):
     assert result.startswith("[lines 5-6 of 19]")
 
 
+def test_read_file_tool_caps_an_unwindowed_read_and_numbers_from_the_real_line(tmp_path):
+    from forge.tools.grep import MAX_READ_LINES
+
+    _write(str(tmp_path), "a.py", "\n".join(f"line{i}" for i in range(1, 601)) + "\n")
+    functions, _ = make_planner_tools(project_path=str(tmp_path))
+
+    result = functions["read_file_tool"]("a.py")
+
+    header, _, body = result.partition("\n")
+    assert header.startswith(f"[lines 1-{MAX_READ_LINES} of 600]")
+    assert f"offset={MAX_READ_LINES + 1}" in header
+    assert body.count("\n") == MAX_READ_LINES
+
+
+def test_read_file_tool_rejects_a_limit_over_the_cap(tmp_path):
+    _write(str(tmp_path), "a.py", "x\n" * 10)
+    functions, _ = make_planner_tools(project_path=str(tmp_path))
+
+    result = functions["read_file_tool"]("a.py", offset=1, limit=1000)
+
+    assert result.startswith("BLOCKED")
+
+
+def test_read_only_tools_set_matches_the_schemas():
+    from forge.tools.planner_tools import READ_ONLY_TOOLS
+
+    _functions, schemas = make_planner_tools(project_path="/tmp")
+    assert READ_ONLY_TOOLS == {s["function"]["name"] for s in schemas}
+
+
 def test_grep_tool_finds_matches(tmp_path):
     _write(str(tmp_path), "a.py", "def foo():\n    pass\n")
     _write(str(tmp_path), "b.py", "def bar():\n    foo()\n")
@@ -95,4 +125,4 @@ def test_find_files_tool_excludes_default_dirs(tmp_path):
 def test_schemas_match_function_names():
     _functions, schemas = make_planner_tools(project_path="/tmp")
     names = {s["function"]["name"] for s in schemas}
-    assert names == {"read_file_tool", "grep_tool", "find_files_tool"}
+    assert names == {"read_file_tool", "outline_file_tool", "grep_tool", "find_files_tool"}

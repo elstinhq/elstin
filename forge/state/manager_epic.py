@@ -3,9 +3,11 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from forge.db.engine import session_scope
-from forge.db.models import Epic, ProjectRepo
+from forge.db.models import Epic, EpicPullRequest, ProjectRepo
 
-_TERMINAL_EPIC_PHASES = frozenset({"complete", "failed"})
+# Epics the daemon no longer polls. "pr_open" is NOT terminal: the epic's
+# pull request is still refreshed (CI status, merged or closed) every poll.
+_TERMINAL_EPIC_PHASES = frozenset({"complete", "merged", "failed"})
 
 
 class _EpicMixin:
@@ -13,6 +15,14 @@ class _EpicMixin:
         """Epics the daemon should still poll — everything not yet complete/failed."""
         with session_scope() as session:
             rows = session.execute(select(Epic.jira_key).where(Epic.phase.notin_(_TERMINAL_EPIC_PHASES))).scalars().all()
+            return list(rows)
+
+    def list_project_epic_keys(self, project_id: int) -> list[str]:
+        """Every epic of one project, whatever its phase."""
+        with session_scope() as session:
+            rows = session.execute(
+                select(Epic.jira_key).where(Epic.project_id == project_id).order_by(Epic.created_at)
+            ).scalars().all()
             return list(rows)
 
     def list_all_epic_keys(self) -> list[str]:
@@ -31,16 +41,28 @@ class _EpicMixin:
         summary: str = "",
         description: str | None = None,
         manual_gate: bool = True,
+        external_source: str | None = None,
+        external_id: str | None = None,
+        project_repo_id: int | None = None,
     ) -> None:
         """Insert a new epic row on first sync. Starts paused (`manual_gate=True`)
         so the daemon does not auto-run until a human resumes. Re-sync calls
-        are idempotent — they must not reset phase, levels, or manual_gate."""
+        are idempotent — they must not reset phase, levels, or manual_gate.
+
+        `project_repo_id` is the caller's choice of default repo (typically
+        the project's first-added one — see epic_sync.py); it is only a
+        default for unprefixed paths (forge/tools/workspace.py), never a
+        binding, but dispatch still needs *some* real repo path to create
+        the story's first worktree from, so a project with repos always
+        gets one assigned rather than waiting on a human to pick."""
         with session_scope() as session:
             if session.get(Epic, jira_key) is not None:
                 return
             session.add(Epic(
                 jira_key=jira_key, project_id=project_id, levels=levels, phase="planning",
                 summary=summary, description=description, manual_gate=manual_gate,
+                external_source=external_source, external_id=external_id,
+                project_repo_id=project_repo_id,
             ))
 
     def set_epic_project_repo(self, jira_key: str, project_repo_id: int | None) -> None:
@@ -74,6 +96,32 @@ class _EpicMixin:
             if epic is not None:
                 epic.levels = levels
 
+    def list_epic_pull_requests(self, epic_key: str) -> list[dict]:
+        with session_scope() as session:
+            rows = session.execute(
+                select(EpicPullRequest).where(EpicPullRequest.epic_key == epic_key).order_by(EpicPullRequest.repo_label)
+            ).scalars().all()
+            return [_epic_pull_request_to_dict(row) for row in rows]
+
+    def upsert_epic_pull_request(self, epic_key: str, repo_label: str, **fields) -> None:
+        """Create or update the epic's pull request row for one repo. Only the
+        fields passed are written — `error=None` clears a recorded error."""
+        allowed = {"repo_path", "branch", "number", "url", "state", "ci_status", "error"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"unknown epic pull request field(s): {sorted(unknown)}")
+        with session_scope() as session:
+            row = session.execute(
+                select(EpicPullRequest).where(
+                    EpicPullRequest.epic_key == epic_key, EpicPullRequest.repo_label == repo_label,
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                row = EpicPullRequest(epic_key=epic_key, repo_label=repo_label)
+                session.add(row)
+            for name, value in fields.items():
+                setattr(row, name, value)
+
     def set_epic_phase(self, jira_key: str, phase: str) -> None:
         with session_scope() as session:
             epic = session.get(Epic, jira_key)
@@ -92,11 +140,32 @@ class _EpicMixin:
             if epic is not None:
                 epic.manual_gate = manual_gate
 
+    def set_epic_prior_work(self, jira_key: str, prior_work: dict | None) -> None:
+        """The lookup for the epic's own key (forge/services/prior_work.py),
+        or None to look again."""
+        with session_scope() as session:
+            epic = session.get(Epic, jira_key)
+            if epic is not None:
+                epic.prior_work = dict(prior_work) if prior_work is not None else None
+
     def set_integration_branch(self, jira_key: str, branch: str) -> None:
         with session_scope() as session:
             epic = session.get(Epic, jira_key)
             if epic is not None:
                 epic.integration_branch = branch
+
+
+def _epic_pull_request_to_dict(row: EpicPullRequest) -> dict:
+    return {
+        "repo_label": row.repo_label,
+        "repo_path": row.repo_path,
+        "branch": row.branch,
+        "number": row.number,
+        "url": row.url,
+        "state": row.state,
+        "ci_status": row.ci_status,
+        "error": row.error,
+    }
 
 
 def _epic_to_dict(session, epic: Epic) -> dict:
@@ -120,6 +189,13 @@ def _epic_to_dict(session, epic: Epic) -> dict:
         "phase": epic.phase,
         "levels": epic.levels or [],
         "integration_branch": epic.integration_branch,
+        "prior_work": epic.prior_work,
         "plan_approved": epic.plan_approved,
         "manual_gate": epic.manual_gate,
+        "external_source": epic.external_source,
+        "external_id": epic.external_id,
+        "external_synced_at": epic.external_synced_at.isoformat() if epic.external_synced_at else None,
+        "external_hash": epic.external_hash,
+        "external_status": epic.external_status,
+        "external_closed": epic.external_closed,
     }

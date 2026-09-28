@@ -56,6 +56,10 @@ async def fake_run_dev(**kwargs) -> dict:
     }
 
 
+async def fake_run_deterministic_gate(**kwargs) -> dict:
+    return {"passed": True, "issues": [], "required_fixes": [], "fake": True}
+
+
 async def fake_run_verifier(**kwargs) -> dict:
     return {"verifier_report": {"passed": True, "fake": True}, "diffs": [], "messages": [{"role": "verifier", "content": "fake verifier: passed"}]}
 
@@ -75,18 +79,25 @@ async def fake_run_epic_qa(**kwargs) -> dict:
 
 @pytest.fixture()
 def fake_agents(monkeypatch: pytest.MonkeyPatch):
-    """Monkeypatches forge.orchestration.graph's four agent entry points
-    (run_planner/run_dev/run_verifier/run_epic_qa) with deterministic,
-    no-network fakes — these are real LLM-provider callers in production
-    (see forge/agents/roles/*_loop.py, which route through
-    forge/agents/loop.py and forge/llm/registry.py), so tests must never
-    invoke them for real. graph.py imported these names at module load
-    time, so the patch target is the graph module's own attribute, not the
-    origin module's."""
+    """Monkeypatches forge.orchestration.graph's five entry points
+    (run_planner/run_dev/run_deterministic_gate/run_verifier/run_epic_qa)
+    with deterministic, no-network fakes — four are real LLM-provider
+    callers in production (see forge/agents/roles/*_loop.py, which route
+    through forge/agents/loop.py and forge/llm/registry.py), and the
+    Tier 1 gate runs the repo's real toolchain against a worktree these
+    tests don't have, so tests must never invoke any of them for real.
+    graph.py imported these names at module load time, so the patch
+    target is the graph module's own attribute, not the origin module's."""
     import forge.orchestration.graph as graph_module
 
     monkeypatch.setattr(graph_module, "run_planner", fake_run_planner)
     monkeypatch.setattr(graph_module, "run_dev", fake_run_dev)
+    monkeypatch.setattr(graph_module, "run_deterministic_gate", fake_run_deterministic_gate)
+    # The merge queue re-runs the gate on a story brought up to date with the
+    # epic branch (forge/daemon/main.py) — the same fake, imported there.
+    import forge.daemon.main as daemon_module
+
+    monkeypatch.setattr(daemon_module, "run_deterministic_gate", fake_run_deterministic_gate)
     monkeypatch.setattr(graph_module, "run_verifier", fake_run_verifier)
     monkeypatch.setattr(graph_module, "run_epic_qa", fake_run_epic_qa)
 

@@ -14,3 +14,6 @@ repos/
 # rebuild.
 ui-src/node_modules/
 settings-ui/vendor/
+
+# Usage exports downloaded from OpenRouter's activity page.
+openrouter_activity_*.csv

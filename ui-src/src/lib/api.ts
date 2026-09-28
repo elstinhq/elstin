@@ -2,15 +2,29 @@ import type {
   ConfigField,
   Epic,
   EpicUsage,
+  ExternalChangeAction,
   Project,
   ProjectRepo,
+  DeleteProjectReport,
+  FolderListing,
+  ScanFolderResult,
+  RemoveTicketReport,
+  RepoGuide,
   Story,
+  StoryPlan,
   StoryUsage,
   TicketFilter,
   TicketFilterInput,
   TicketFilterPreview,
   TicketFilterSyncResult,
 } from "../types/api";
+
+// One selection per pending ClarificationQuestion, submitted to
+// POST /api/stories/{key}/answer.
+export interface ClarificationAnswerInput {
+  question_id: string;
+  option_id: string;
+}
 
 export class ApiError extends Error {
   status: number;
@@ -39,18 +53,54 @@ const put = (body: unknown): RequestInit => ({ method: "PUT", body: JSON.stringi
 export const api = {
   // -- projects --------------------------------------------------------
   listProjects: () => request<Project[]>("/api/projects"),
-  createProject: (body: { name: string; description: string; repo_url: string | null }) =>
+  createProject: (body: {
+    name: string;
+    description: string;
+    repo_url?: string | null;
+    repo_path?: string | null;
+    repo_paths?: string[];
+    read_only_paths?: string[];
+    reference_path?: string | null;
+  }) =>
     request<Project>("/api/projects", json(body)),
   getProject: (id: number) => request<Project>(`/api/projects/${id}`),
+  updateProject: (id: number, body: { ticket_source?: string; name?: string; description?: string }) =>
+    request<Project>(`/api/projects/${id}`, put(body)),
+  // Read-only: a folder's subfolders, for the folder picker (home when no path).
+  browseFolder: (path?: string | null) => request<FolderListing>("/api/projects/browse-folder", json({ path: path || null })),
+  // Read-only: is this folder a git repo, or one holding repos to pick from?
+  scanFolder: (path: string, projectId?: number) =>
+    request<ScanFolderResult>("/api/projects/scan-folder", json({ path, project_id: projectId ?? null })),
+  // The project and everything forge holds for it; attached folders stay, GitHub/JIRA untouched.
+  deleteProject: (id: number) => request<DeleteProjectReport>(`/api/projects/${id}`, { method: "DELETE" }),
 
   // -- folders (project repos) -----------------------------------------
   listProjectRepos: (projectId: number) => request<ProjectRepo[]>(`/api/projects/${projectId}/repos`),
-  cloneProjectRepo: (projectId: number, body: { url: string; label?: string | null }) =>
+  // Exactly one of url (clone it) or path (attach a repo already on disk).
+  addProjectRepo: (
+    projectId: number,
+    body: { url?: string; path?: string; label?: string | null; kind?: "repo" | "reference"; read_only?: boolean },
+  ) =>
     request<ProjectRepo>(`/api/projects/${projectId}/repos`, json(body)),
+  // Mark a git repo read-only (or writable again); epics defaulting to it move to the next writable repo.
+  setProjectRepoReadOnly: (projectId: number, repoId: number, readOnly: boolean) =>
+    request<ProjectRepo & { epics_moved: string[]; moved_to: number | null }>(
+      `/api/projects/${projectId}/repos/${repoId}`,
+      put({ read_only: readOnly }),
+    ),
   removeProjectRepo: (projectId: number, repoId: number) =>
-    request<{ repo_id: number; removed: boolean }>(`/api/projects/${projectId}/repos/${repoId}`, {
+    // Epics that defaulted to it move to the project's next folder (moved_to; null = none left).
+    request<{ repo_id: number; removed: boolean; epics_moved: string[]; moved_to: number | null }>(`/api/projects/${projectId}/repos/${repoId}`, {
       method: "DELETE",
     }),
+
+  getRepoGuide: (projectId: number, repoId: number) =>
+    request<RepoGuide>(`/api/projects/${projectId}/repos/${repoId}/guide`),
+  generateRepoGuide: (projectId: number, repoId: number) =>
+    request<RepoGuide>(`/api/projects/${projectId}/repos/${repoId}/guide/generate`, { method: "POST" }),
+  // Empty content discards the generated guide.
+  saveRepoGuide: (projectId: number, repoId: number, content: string) =>
+    request<RepoGuide>(`/api/projects/${projectId}/repos/${repoId}/guide`, put({ content })),
 
   // -- project-scoped config --------------------------------------------
   getProjectConfig: (projectId: number) => request<ConfigField[]>(`/api/projects/${projectId}/config`),
@@ -89,8 +139,14 @@ export const api = {
   syncEpicFields: (epicKey: string) => request<Epic>(`/api/epics/${encodeURIComponent(epicKey)}/sync`, { method: "POST" }),
   setEpicRepo: (epicKey: string, projectRepoId: number) =>
     request<Epic>(`/api/epics/${encodeURIComponent(epicKey)}/repo`, put({ project_repo_id: projectRepoId })),
+  // Local only: nothing is changed in GitHub or JIRA. Answers with what went and what was left.
+  removeEpic: (epicKey: string) =>
+    request<RemoveTicketReport>(`/api/epics/${encodeURIComponent(epicKey)}`, { method: "DELETE" }),
   setEpicGate: (epicKey: string, manualGate: boolean) =>
     request<Epic>(`/api/epics/${encodeURIComponent(epicKey)}/gate`, put({ manual_gate: manualGate })),
+  // Forget what was found for tickets not started yet; the next poll looks again.
+  refreshPriorWork: (epicKey: string) =>
+    request<Epic>(`/api/epics/${encodeURIComponent(epicKey)}/prior-work/refresh`, { method: "POST" }),
   getEpicUsage: (epicKey: string) => request<EpicUsage>(`/api/epics/${encodeURIComponent(epicKey)}/usage`),
 
   // -- stories -------------------------------------------------------------
@@ -103,12 +159,23 @@ export const api = {
     request<{ story_key: string; gate_approved: boolean }>(`/api/stories/${encodeURIComponent(storyKey)}/approve`, {
       method: "POST",
     }),
+  answerStoryQuestions: (storyKey: string, answers: ClarificationAnswerInput[]) =>
+    request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/answer`, json({ answers })),
+  // Which diverged branch this ticket continues from in one repo; null = start fresh.
+  pickPriorBranch: (storyKey: string, repoLabel: string, branch: string | null) =>
+    request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/prior-work`, json({ repo_label: repoLabel, branch })),
   retryStory: (storyKey: string) => request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/retry`, { method: "POST" }),
+  // Plans a story waiting for approval again; its answers are kept.
+  replanStory: (storyKey: string) => request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/replan`, { method: "POST" }),
+  // Stops a run in flight; the story is left failed ("cancelled") so Retry starts it over.
+  cancelStory: (storyKey: string) => request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/cancel`, { method: "POST" }),
   setStoryKind: (storyKey: string, kind: string) =>
     request<{ story_key: string; kind: string; epic_key: string }>(
       `/api/stories/${encodeURIComponent(storyKey)}/kind`,
       put({ kind }),
     ),
+  resolveExternalChange: (storyKey: string, action: ExternalChangeAction) =>
+    request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/external-change`, json({ action })),
   syncStory: (storyKey: string) => request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/sync`, { method: "POST" }),
   // Not a fetch: EventSource opens this itself. It lives here anyway so
   // every server URL the UI knows about is still in one file. (The plain
@@ -116,4 +183,5 @@ export const api = {
   // ask for one when the stream opens with the same history.)
   storyActivityStreamUrl: (storyKey: string) => `/api/stories/${encodeURIComponent(storyKey)}/stream`,
   getStoryUsage: (storyKey: string) => request<StoryUsage>(`/api/stories/${encodeURIComponent(storyKey)}/usage`),
+  getStoryPlan: (storyKey: string) => request<StoryPlan>(`/api/stories/${encodeURIComponent(storyKey)}/plan`),
 };

@@ -18,12 +18,30 @@ default (configurable).
 ## Run locally
 
 ```bash
-docker compose up
+scripts/forge.sh
 ```
+
+That is `docker compose up` with the rough edges taken off: it finds your
+container engine (Docker or Podman), rebuilds the image so the running
+code is the code you have, waits until the app actually answers, and
+prints where to go. `docker compose up` still works if you prefer it.
+
+To stop:
+
+```bash
+scripts/stop.sh          # stop and remove the containers
+scripts/stop.sh --keep   # stop them in place, for a faster restart
+```
+
+Neither deletes anything: the Postgres, worktree, cloned-repo and `/data`
+volumes survive, and `scripts/forge.sh up` picks up where you left off.
+Other commands: `stop`, `down`, `logs`, `status`, `rebuild`, `psql`,
+`reset` (the one that does delete data, and asks first), and `--help` for
+the rest. Ports follow `FORGE_APP_PORT` / `FORGE_PG_PORT`.
 
 Then open **http://localhost:8000/** to watch epics/stories and
 approve gated steps, or **http://localhost:8000/settings** to fill in your
-JIRA URL/credentials, GitHub org/token, and OpenAI API key (or an
+JIRA URL/credentials (or, for a project that pulls from GitHub Issues, just the GitHub token), GitHub org/token, and OpenAI API key (or an
 OpenAI-compatible endpoint's key + base URL — Azure, OpenRouter, vLLM,
 Ollama, etc.). Nothing is read from a `.env` file — `DATABASE_URL` (wired
 automatically by `docker-compose.yml`) is the only process environment

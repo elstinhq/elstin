@@ -9,6 +9,12 @@ from typing import NamedTuple
 from forge.tools import language_hooks
 
 
+# run_safe_command's returncode for a command the allowlist refused (nothing
+# ran). Distinct from -2 (timeout) and -3 (internal error) so a caller can tell
+# "not permitted" from "ran and failed".
+BLOCKED_RETURN_CODE = -1
+
+
 class SafeShellResult(NamedTuple):
     returncode: int
     stdout: str
@@ -34,9 +40,55 @@ def allowed_command_prefixes() -> list[tuple[str, ...]]:
 ALLOWED_COMMAND_PREFIXES = allowed_command_prefixes()
 
 
+# Git long options that reach outside the worktree even though the command
+# prefix is allowed: --output writes the diff to an arbitrary path (past the
+# plan-scope path guard), --no-index diffs arbitrary files on disk, and
+# --pathspec-from-file reads one, echoing its first line in the error. Git
+# accepts unambiguous abbreviations of long options, so a token is refused
+# when it is a prefix of one of these.
+#
+# --ext-diff / --textconv are deliberately not here: the program they run
+# comes from repo config (diff.external, diff.<driver>.textconv), never from
+# argv, and textconv is already on by default for `git diff`. The agent can
+# reach neither `git config` nor `git -c` through the allowlist.
+_GIT_BLOCKED_LONG_OPTIONS = ("--output", "--no-index", "--pathspec-from-file")
+
+
+def _escapes_worktree(arg: str) -> bool:
+    """`git diff <a> <b>` silently becomes a --no-index diff when the paths
+    lie outside the worktree, so any such path is as good as --no-index."""
+    return arg.startswith(("/", "~")) or ".." in arg.split("/")
+
+
+def _git_args_are_safe(tokens: list[str]) -> bool:
+    subcommand = tokens[1] if len(tokens) > 1 else ""
+    options_done = False
+    for arg in tokens[2:]:
+        if not options_done:
+            if arg == "--":
+                options_done = True
+                continue
+            if arg.startswith("--"):
+                name = arg.split("=", 1)[0]
+                if any(blocked.startswith(name) for blocked in _GIT_BLOCKED_LONG_OPTIONS):
+                    return False
+                continue
+            if arg.startswith("-"):
+                # -O<orderfile> reads an arbitrary path and may sit in a
+                # cluster (-pOfile). -S/-G swallow the rest of the token as
+                # their value, so a capital O there is just pickaxe text.
+                if subcommand == "diff" and not arg.startswith(("-S", "-G")) and "O" in arg:
+                    return False
+                continue
+        if subcommand == "diff" and _escapes_worktree(arg):
+            return False
+    return True
+
+
 def is_safe_command(cmd_str: str) -> bool:
-    """Check if a command matches the allowed prefixes and does not contain
-    dangerous characters."""
+    """Check if a command matches the allowed prefixes, does not contain
+    dangerous characters, and (for git) carries no flag that reads or writes
+    outside the worktree."""
     cmd_str = cmd_str.strip()
     if not cmd_str:
         return False
@@ -57,7 +109,7 @@ def is_safe_command(cmd_str: str) -> bool:
     for prefix in ALLOWED_COMMAND_PREFIXES:
         length = len(prefix)
         if len(tokens) >= length and tuple(tokens[:length]) == prefix:
-            return True
+            return tokens[0] != "git" or _git_args_are_safe(tokens)
 
     return False
 
@@ -66,12 +118,15 @@ def run_safe_command(worktree_path: str, command: str, timeout_seconds: int = 18
     """Execute a whitelisted shell command within the specified worktree path."""
     if not is_safe_command(command):
         return SafeShellResult(
-            returncode=-1, stdout="", stderr=f"Command execution blocked by safety policy: '{command}'"
+            returncode=BLOCKED_RETURN_CODE, stdout="", stderr=f"Command execution blocked by safety policy: '{command}'"
         )
 
     try:
+        # The same environment as the build check's (language_hooks.run): the
+        # JDK a Java project states, say.
         proc = subprocess.run(
-            shlex.split(command), cwd=worktree_path, capture_output=True, text=True, timeout=timeout_seconds
+            shlex.split(command), cwd=worktree_path, capture_output=True, text=True, timeout=timeout_seconds,
+            env=language_hooks.profile_command_env(worktree_path),
         )
         return SafeShellResult(returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
     except subprocess.TimeoutExpired:

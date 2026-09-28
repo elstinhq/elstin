@@ -37,6 +37,40 @@ class FeatureRunState(TypedDict, total=False):
     project_path: str
     ticket_id: int | None
     worktree_path: str | None
+    # The workspace (forge/tools/workspace.py): every repo on the project
+    # at its checkout, and the label an UNPREFIXED path belongs to. No repo
+    # is bound to the epic or the story — the approved plan names which
+    # repos it writes, and dev creates a worktree for each. Assembled by
+    # the daemon, which owns the DB, and carried as plain dicts because
+    # this state is JSON in a LangGraph checkpoint.
+    repo_roots: dict[str, str]
+    default_repo_label: str
+    # Where each repo's code is READ while planning and by dev's reads of a
+    # repo it does not write: the story's own worktree where it has one,
+    # else the epic branch's worktree in that repo. Never the clone's own
+    # checkout, which is frozen at clone time and knows nothing of the epic
+    # branch, the stories merged into it, or prior work the story continues.
+    # `repo_roots` stays the clones: git operations and repo locks key on it.
+    read_roots: dict[str, str]
+    # {label: ref} a repo the plan names but the story has no worktree in yet
+    # branches from — the epic branch in that repo, not its default branch.
+    story_base_refs: dict[str, str]
+    # Labels in `repo_roots` no plan may write: read-only repos and
+    # reference folders (forge/db/models/project.py's ProjectRepo). Read like
+    # any repo; the plan gate refuses them as targets and dev never gets a
+    # worktree in one.
+    read_only_labels: list[str]
+    # What already existed for this ticket before its branch was made —
+    # forge/daemon/prior_work_lookup.py's planner_prior_work, for the
+    # planner prompt's prior-work block. Empty when nothing was found.
+    prior_work: dict[str, Any]
+    # The AGENTS.md-style guide the planner (and, through context_bundle, dev)
+    # reads first: {"found", "path", "content", "generated"}. Resolved by the
+    # daemon, which owns the DB; see forge/services/project_guide.py.
+    project_guide: dict[str, Any]
+    # {label: {repo_path, worktree_path, branch}} — the worktrees this
+    # story has so far. Grows as the plan turns out to touch more repos.
+    story_worktrees: dict[str, dict[str, str]]
     workspace_mode: WorkspaceMode
     iteration: int
     max_iterations: int
@@ -68,6 +102,29 @@ class FeatureRunState(TypedDict, total=False):
     # so forge owns this instead.
     dev_history: list[dict[str, Any]]
     dev_build_runner: dict[str, Any]
+    # Tier 1 deterministic gate (forge/orchestration/graph.py's gate_node):
+    # the compare_to_plan report from the most recent gate run, the count
+    # of consecutive gate failures (reset to 0 on a pass; the run fails
+    # once it reaches max_gate_attempts), and — when the gate just failed
+    # — the targeted fix message dev_node hands run_dev as this
+    # iteration's brief instead of a verifier report. Cleared by dev_node
+    # once consumed.
+    # The dev agent's live progress checklist (forge/tools/progress.py),
+    # seeded from the plan on the first pass and carried across gate/
+    # verifier fix rounds so a second pass resumes the same bookkeeping
+    # instead of starting from "nothing done".
+    dev_progress: list[dict[str, str]]
+    # {planned path: reason} — files dev declared already satisfy the ticket.
+    declared_unchanged: dict[str, str]
+    tier1_gate: dict[str, Any]
+    gate_attempts: int
+    max_gate_attempts: int
+    gate_feedback: str | None
+    # Paths dev may write beyond the plan's, set when the merge queue sends a
+    # finished story back to land it on the epic branch (forge/daemon/main.py's
+    # _send_back_to_dev): the files a conflict or the combined-code check
+    # involve, which the story's own plan may not name.
+    integration_paths: list[str]
     error: str | None
     approved: bool
     rejected: bool
@@ -92,6 +149,14 @@ def initial_state(run_id: str, user_request: str, project_path: str) -> FeatureR
         user_request=user_request,
         project_path=project_path,
         worktree_path=None,
+        repo_roots={},
+        read_roots={},
+        story_base_refs={},
+        read_only_labels=[],
+        prior_work={},
+        default_repo_label="",
+        project_guide={},
+        story_worktrees={},
         workspace_mode="worktree",
         iteration=0,
         max_iterations=3,
@@ -106,6 +171,12 @@ def initial_state(run_id: str, user_request: str, project_path: str) -> FeatureR
         qa_context={},
         messages=[],
         dev_history=[],
+        dev_progress=[],
+        declared_unchanged={},
+        tier1_gate={},
+        gate_attempts=0,
+        max_gate_attempts=3,
+        gate_feedback=None,
         error=None,
         approved=False,
         rejected=False,

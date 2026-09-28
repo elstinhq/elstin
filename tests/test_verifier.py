@@ -185,3 +185,304 @@ def test_compare_to_plan_no_recognized_language_is_a_noop_pass(git_repo, registe
 
     assert result["passed"] is True
     assert result["profiles"] == {}
+
+
+# --- Tier 1 fast-fail feedback -------------------------------------------
+
+
+def test_format_gate_feedback_leads_with_a_count_and_the_files_then_verbatim_errors():
+    gate = {
+        "passed": False,
+        "issues": [
+            {"severity": "blocker", "file": None, "reason": "dart_flutter: analyze failed",
+             "details": "lib/auth/auth_service.dart:12:5: error: Undefined name 'foo'.\nlib/auth/auth_service.dart:30:1: error: Expected ';'."},
+            {"severity": "blocker", "file": "lib/auth/login_page.dart", "reason": "Missing planned new file: lib/auth/login_page.dart"},
+        ],
+        "required_fixes": ["dart_flutter: analyze failed", "Missing planned new file: lib/auth/login_page.dart"],
+    }
+
+    text = verifier.format_gate_feedback(gate, attempt=1, max_attempts=3)
+
+    first_line = text.splitlines()[0]
+    assert first_line.startswith("Deterministic checks FAILED with 2 problem(s) in lib/auth/auth_service.dart, lib/auth/login_page.dart")
+    assert "(fix attempt 1/3)" in first_line
+    assert "1. dart_flutter: analyze failed" in text
+    assert "   lib/auth/auth_service.dart:12:5: error: Undefined name 'foo'." in text
+    assert "2. Missing planned new file: lib/auth/login_page.dart" in text
+    assert "analyze_changed_files_tool" in text
+    assert "do not rewrite files from scratch" in text
+
+
+def test_format_gate_feedback_falls_back_to_the_profile_analyze_error_lines():
+    gate = {
+        "passed": False,
+        "issues": [{"severity": "blocker", "file": None, "reason": "alpha: analyze failed"}],
+        "required_fixes": ["alpha: analyze failed"],
+        "profiles": {"alpha": {"analyze": {"passed": False, "error_lines": ["foo.alpha:1:1: boom"]}}},
+    }
+
+    text = verifier.format_gate_feedback(gate, attempt=2, max_attempts=3)
+
+    assert "in foo.alpha" in text.splitlines()[0]
+    assert "   foo.alpha:1:1: boom" in text
+
+
+def test_format_gate_feedback_truncates_long_test_output_to_its_tail():
+    gate = {"passed": False, "issues": [{"reason": "beta: tests failed", "details": "noise\n" * 2000 + "FAILED test_x — assertion"}]}
+
+    text = verifier.format_gate_feedback(gate, attempt=1, max_attempts=3)
+
+    assert "FAILED test_x — assertion" in text
+    assert len(text) < 3_000
+
+
+async def test_run_verifier_reuses_a_precomputed_gate_instead_of_rerunning_the_toolchain(git_repo, registered_fake_profiles, monkeypatch):
+    """gate_node already ran compare_to_plan on this exact worktree —
+    run_verifier must not run the (slow) toolchain a second time."""
+    calls = registered_fake_profiles["alpha"]
+    _write(git_repo, "alpha.marker")
+    _write(git_repo, "foo.alpha", "content\n")
+    monkeypatch.setattr(verifier, "compare_to_plan", lambda *a, **k: (_ for _ in ()).throw(AssertionError("toolchain re-run")))
+    # Skip the LLM review entirely via the trivial-diff threshold — no
+    # provider, and no DB either (this file stays DB-free).
+    monkeypatch.setattr(verifier, "get_int_config", lambda key, default=0: 10**9)
+
+    gate = {"passed": True, "issues": [], "required_fixes": [], "profiles": {}, "changed_files": ["foo.alpha"], "dev_targets": ["foo.alpha"], "coverage_gap": False}
+    result = await verifier.run_verifier(
+        plan={"files_to_modify": [{"path": "foo.alpha"}]}, acceptance_criteria=[], worktree_path=git_repo,
+        file_changes=[{"path": "foo.alpha"}], precomputed_gate=gate,
+    )
+
+    assert result["verifier_report"]["passed"] is True
+    assert result["verifier_report"]["deterministic_gate"] is gate
+    assert not [c for c in calls if c[0] == "analyze"]
+
+
+async def test_run_verifier_refuses_to_pass_a_run_with_nothing_to_verify(git_repo, registered_fake_profiles, monkeypatch):
+    """The vacuous pass, end to end. An empty plan makes compare_to_plan
+    check nothing and report passed, and the review is then asked to reject
+    only a "planned acceptance criterion clearly unmet" — of which an empty
+    plan has none. Both halves agree on a story that produced no work. The
+    reviewer is never asked: the LLM call here would raise, and the test
+    passes only because the guard returns before it."""
+    monkeypatch.setattr(verifier, "get_int_config", lambda key, default=0: 0)  # no trivial-diff skip
+    gate = {"passed": True, "issues": [], "required_fixes": [], "profiles": {}, "changed_files": [], "dev_targets": []}
+
+    result = await verifier.run_verifier(
+        plan={"feature_summary": "Show the currency", "files_to_create": [], "files_to_modify": []},
+        acceptance_criteria=[], worktree_path=git_repo, file_changes=[], precomputed_gate=gate,
+    )
+
+    report = result["verifier_report"]
+    assert report["passed"] is False
+    assert report["nothing_to_verify"] is True
+    assert "Nothing to verify" in report["required_fixes"][0]
+
+
+async def test_a_declared_already_satisfied_file_still_reaches_the_reviewer(git_repo, registered_fake_profiles, monkeypatch):
+    """A run whose only outcome is "this file already does the job" has an
+    empty diff too, but that claim is exactly what the review exists to
+    judge — the guard must not swallow it."""
+    reviewed = {}
+
+    async def fake_review(**kwargs):
+        reviewed["called"] = True
+        return {"passed": True, "issues": [], "required_fixes": []}, {"model": "fake"}
+
+    monkeypatch.setattr(verifier, "get_int_config", lambda key, default=0: 0)
+    monkeypatch.setattr(verifier, "chat_completion_json", fake_review)
+    gate = {
+        "passed": True, "issues": [], "required_fixes": [], "profiles": {}, "changed_files": [], "dev_targets": [],
+        "assumed_satisfied": [{"path": "foo.alpha", "reason": "already formats the currency"}],
+    }
+
+    result = await verifier.run_verifier(
+        plan={"files_to_create": [], "files_to_modify": []}, acceptance_criteria=[],
+        worktree_path=git_repo, file_changes=[], precomputed_gate=gate,
+    )
+
+    assert reviewed.get("called") is True
+    assert result["verifier_report"]["passed"] is True
+    assert "nothing_to_verify" not in result["verifier_report"]
+
+
+# --- plan-coverage feedback: tell dev to WRITE, not to investigate -------
+
+
+def _coverage_issue(kind: str, path: str) -> dict:
+    reasons = {
+        verifier.KIND_MISSING_NEW_FILE: f"Missing planned new file: {path}",
+        verifier.KIND_UNMODIFIED_TARGET: f"Dev did not modify target file: {path}",
+        verifier.KIND_MISSING_TARGET: f"Dev target missing in worktree: {path}",
+    }
+    return {"severity": "blocker", "file": path, "reason": reasons[kind], "kind": kind}
+
+
+def _gate_of(*issues: dict) -> dict:
+    return {"passed": False, "issues": list(issues), "required_fixes": [i["reason"] for i in issues]}
+
+
+def test_compare_to_plan_tags_each_plan_coverage_blocker_with_what_it_is(git_repo):
+    plan = {"files_to_create": [{"path": "new_file.py"}], "files_to_modify": [{"path": "README.md"}, {"path": "nowhere.py"}]}
+
+    issues = {i["file"]: i["kind"] for i in verifier.compare_to_plan(plan, git_repo)["issues"]}
+
+    assert issues == {
+        "new_file.py": verifier.KIND_MISSING_NEW_FILE,
+        "README.md": verifier.KIND_UNMODIFIED_TARGET,
+        "nowhere.py": verifier.KIND_MISSING_TARGET,
+    }
+
+
+def test_the_kind_survives_the_per_repo_merge_with_the_repo_prefix_dev_needs():
+    from forge.tools.workspace import Workspace
+
+    workspace = Workspace(default_label="ui", roots={"ui": "/w/ui", "api": "/w/api"})
+    reports = {
+        "ui": {"issues": [_coverage_issue(verifier.KIND_MISSING_NEW_FILE, "src/A.tsx")], "required_fixes": ["x"]},
+        "api": {"issues": [_coverage_issue(verifier.KIND_UNMODIFIED_TARGET, "src/B.java")], "required_fixes": ["y"]},
+    }
+
+    merged = {i["kind"]: i["file"] for i in verifier._merge_gate_reports(reports, workspace)["issues"]}
+
+    assert merged == {verifier.KIND_MISSING_NEW_FILE: "src/A.tsx", verifier.KIND_UNMODIFIED_TARGET: "@api/src/B.java"}
+
+
+def test_feedback_for_a_run_that_wrote_nothing_lists_the_files_by_the_tool_to_use_and_says_write_now():
+    """The shape of the run that failed three rounds: one planned new file
+    and 25 planned modifications, none touched."""
+    gate = _gate_of(
+        _coverage_issue(verifier.KIND_MISSING_NEW_FILE, "pricing-web/scripts/generate.js"),
+        *(_coverage_issue(verifier.KIND_UNMODIFIED_TARGET, f"pricing-api/src/File{i}.java") for i in range(25)),
+    )
+
+    text = verifier.format_gate_feedback(gate, attempt=1, max_attempts=3, wrote_nothing=True)
+
+    assert text.splitlines()[0].startswith("Deterministic checks FAILED with 26 problem(s)")
+    assert "Your last attempt wrote NO files" in text
+    assert "This is your last attempt" not in text  # attempt 1 of 3
+    assert "PLANNED FILES STILL NOT WRITTEN (26):" in text
+    assert "Create these with write_file_tool:\n    - pricing-web/scripts/generate.js" in text
+    assert "Change these with edit_file_tool / apply_edits_tool:\n    - pricing-api/src/File0.java" in text
+    assert "pricing-api/src/File19.java" in text and "pricing-api/src/File20.java" not in text
+    assert "... and 5 more" in text
+    # the 26 near-identical lines are not also repeated as a numbered list
+    assert "1. Dev did not modify target file" not in text
+    assert "Your next turn must be write_file_tool / edit_file_tool / apply_edits_tool" in text
+    assert "ONE turn" in text and "Do not explore or re-read first" in text
+    # the advice that fits an analyzer error is wrong for a file that does not exist
+    assert "do not rewrite files from scratch" not in text
+
+
+def test_the_last_attempt_says_the_story_fails_if_it_ends_the_same_way():
+    gate = _gate_of(_coverage_issue(verifier.KIND_UNMODIFIED_TARGET, "a.py"))
+
+    assert "This is your last attempt" in verifier.format_gate_feedback(gate, attempt=2, max_attempts=3, wrote_nothing=True)
+    assert "This is your last attempt" not in verifier.format_gate_feedback(gate, attempt=1, max_attempts=3, wrote_nothing=True)
+
+
+def test_feedback_does_not_claim_nothing_was_written_when_something_was():
+    gate = _gate_of(_coverage_issue(verifier.KIND_UNMODIFIED_TARGET, "b.py"))
+
+    text = verifier.format_gate_feedback(gate, attempt=1, max_attempts=3, wrote_nothing=False)
+
+    assert "wrote NO files" not in text
+    assert "PLANNED FILES STILL NOT WRITTEN (1):" in text and "Your next turn must be write_file_tool" in text
+
+
+def test_a_path_that_is_not_in_the_worktree_is_told_to_check_the_path_first():
+    gate = _gate_of(_coverage_issue(verifier.KIND_MISSING_TARGET, "src/Typo.java"))
+
+    text = verifier.format_gate_feedback(gate, attempt=1, max_attempts=3)
+
+    assert "not in the worktree — check the path in the plan" in text and "src/Typo.java" in text
+
+
+def test_analyzer_failures_alongside_unwritten_files_are_kept_and_numbered_from_one():
+    gate = _gate_of(
+        _coverage_issue(verifier.KIND_MISSING_NEW_FILE, "new.py"),
+        {"severity": "blocker", "file": None, "reason": "alpha: analyze failed", "details": "foo.alpha:1:1: boom"},
+    )
+
+    text = verifier.format_gate_feedback(gate, attempt=1, max_attempts=3)
+
+    assert "PLANNED FILES STILL NOT WRITTEN (1):" in text
+    assert "also reported these — fix them as well:" in text
+    assert "1. alpha: analyze failed" in text and "   foo.alpha:1:1: boom" in text
+    assert "Your next turn must be write_file_tool" in text
+
+
+def test_feedback_with_no_unwritten_files_is_the_fix_these_failures_message_it_always_was():
+    gate = _gate_of({"severity": "blocker", "file": None, "reason": "alpha: analyze failed", "details": "foo.alpha:1:1: boom"})
+
+    text = verifier.format_gate_feedback(gate, attempt=1, max_attempts=3, wrote_nothing=False)
+
+    assert "Fix these specific failures — nothing else:" in text
+    assert "do not rewrite files from scratch" in text
+    assert "PLANNED FILES STILL NOT WRITTEN" not in text and "wrote NO files" not in text
+
+
+def test_changes_left_to_a_person_are_not_the_reviewers_to_demand():
+    """A plan's read_only_changes (a contract repo's YAML, for MKT2-866) are
+    made by a person outside the story: the reviewer is shown them apart
+    from the plan and told not to fail the run over them."""
+    from forge.agents.roles.verifier import _VERIFIER_REVIEW_CORE, _build_llm_payload
+
+    plan = {
+        "files_to_modify": [{"path": "src/Search.java", "purpose": "export"}],
+        "read_only_changes": [{"path": "@contracts/orders.yaml", "purpose": "add the export path"}],
+        "plan_markdown": "# Plan",
+    }
+
+    payload = _build_llm_payload(plan, ["the export works"], [], [], {})
+
+    assert "read_only_changes" not in payload["plan"]
+    assert payload["left_to_a_person"] == [{"path": "@contracts/orders.yaml", "purpose": "add the export path"}]
+    assert "Never set passed=false because they are missing" in _VERIFIER_REVIEW_CORE
+    assert "left_to_a_person" not in _build_llm_payload({"files_to_modify": []}, [], [], [], {})
+
+
+async def test_the_review_sees_every_repo_the_story_changed(git_repo, tmp_path, registered_fake_profiles, monkeypatch):
+    """MKT2-866: backend and portal changed, the review was shown only the
+    backend, and rejected the story for "no frontend diffs"."""
+    import json
+    import subprocess
+
+    portal = tmp_path / "portal"
+    subprocess.run(["git", "-C", git_repo, "worktree", "add", "-q", "-b", "feat/portal", str(portal)], check=True)
+    (portal / "export.ts").write_text("export const exportCustomers = () => {};\n")
+    with open(f"{git_repo}/Search.java", "w") as handle:
+        handle.write("class Search {}\n")
+    sent = {}
+
+    async def fake_review(**kwargs):
+        sent["payload"] = json.loads(kwargs["messages"][-1]["content"])
+        return {"passed": True, "issues": [], "required_fixes": []}, {"model": "fake"}
+
+    monkeypatch.setattr(verifier, "get_int_config", lambda key, default=0: 0)
+    monkeypatch.setattr(verifier, "chat_completion_json", fake_review)
+    gate = {"passed": True, "issues": [], "required_fixes": [], "profiles": {}, "changed_files": ["Search.java"], "dev_targets": []}
+
+    result = await verifier.run_verifier(
+        plan={"files_to_create": [{"path": "Search.java"}, {"path": "@portal/export.ts"}], "files_to_modify": []},
+        acceptance_criteria=["export works"], worktree_path=git_repo, file_changes=[], precomputed_gate=gate,
+        story_worktrees={"portal": {"worktree_path": str(portal)}}, default_label="api",
+    )
+
+    assert [d["path"] for d in result["diffs"]] == ["Search.java", "@portal/export.ts"]
+    assert [d["path"] for d in sent["payload"]["diffs"]] == ["Search.java", "@portal/export.ts"]
+    assert "exportCustomers" in sent["payload"]["diffs"][1]["diff"]
+
+
+def test_every_changed_file_is_shown_within_the_budget():
+    """No file dropped for coming 21st; small diffs whole, big ones share what is left."""
+    small = [{"path": f"s{i}.ts", "diff": "x" * 500} for i in range(20)]
+    big = [{"path": "big.java", "diff": "y" * 200_000}]
+
+    shown = verifier._budgeted_diffs(small + big)
+
+    assert [d["path"] for d in shown] == [d["path"] for d in small + big]
+    assert all(len(d["diff"]) == 500 for d in shown[:20])
+    assert len(shown[20]["diff"]) == verifier._MAX_DIFF_CHARS
+    many = verifier._budgeted_diffs([{"path": f"f{i}", "diff": "z" * 50_000} for i in range(30)])
+    assert len(many) == 30 and sum(len(d["diff"]) for d in many) <= verifier._DIFF_BUDGET_CHARS

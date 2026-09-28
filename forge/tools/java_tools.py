@@ -17,7 +17,7 @@ import os
 import re
 import xml.etree.ElementTree as ET
 
-from forge.tools import language_hooks
+from forge.tools import jdk, language_hooks
 from forge.tools.language_hooks import LanguageProfile
 
 MAVEN_COMPILE_TIMEOUT_SECONDS = 300
@@ -28,6 +28,19 @@ GRADLE_TIMEOUT_SECONDS = 600
 _JAVAC_ERROR_RE = re.compile(r"\[ERROR\]\s+(\S+\.java):\[(\d+),(\d+)\]\s*(.*)")
 _PACKAGE_RE = re.compile(r"^\s*package\s+([\w.]+)\s*;", re.MULTILINE)
 _DTEST_FLAG_RE = re.compile(r"^-Dtest=")
+# javac itself failing, not failing to compile the code: Maven's "Fatal error
+# compiling" (the compiler crashed — MKT2-866's Lombok on a JDK newer than it
+# supports), a class file or release the running JDK cannot handle, or no
+# usable JDK at all.
+_TOOLCHAIN_FAILURE_RES = tuple(re.compile(p) for p in (
+    r"Fatal error compiling:?[^\n]*",
+    r"Unsupported class file major version \d+",
+    r"(?:error: )?invalid (?:target|source) release:?[^\n]*",
+    r"release version \d+ not supported",
+    r"No compiler is provided in this environment[^\n]*",
+    r"JAVA_HOME (?:environment variable )?is not defined correctly[^\n]*",
+    r"Could not create the Java Virtual Machine",
+))
 
 
 def _maven_wrapper(worktree_path: str) -> str:
@@ -247,6 +260,20 @@ Java/Spring Boot conventions for this codebase:
 """.strip()
 
 
+def java_environment_problem(worktree_path: str, result: dict) -> str | None:
+    """Why a failed build is the JDK rather than the code, or None. Only a
+    failure with no compiler error in the source qualifies: one of those is
+    the code's, whatever else the output says."""
+    if result.get("passed", True) or result.get("error_count"):
+        return None
+    output = "\n".join(part for part in (result.get("stdout"), result.get("stderr")) if part)
+    for pattern in _TOOLCHAIN_FAILURE_RES:
+        match = pattern.search(output)
+        if match:
+            return f"The Java build fails before compiling any source: {match.group(0).strip()}. {jdk.describe(worktree_path)}"
+    return None
+
+
 def java_maven_profile() -> LanguageProfile:
     return LanguageProfile(
         key="java_maven",
@@ -269,6 +296,9 @@ def java_maven_profile() -> LanguageProfile:
         test_command_prefixes=(("mvn", "test"), ("./mvnw", "test")),
         format_test_command=_format_maven_test_command,
         dev_conventions=JAVA_PROMPT_CONVENTIONS,
+        command_env=jdk.java_env,
+        build_output=("target/",),
+        environment_problem=java_environment_problem,
     )
 
 
@@ -293,4 +323,7 @@ def java_gradle_profile() -> LanguageProfile:
         test_command_prefixes=(("./gradlew", "test"), ("gradle", "test")),
         format_test_command=_format_gradle_test_command,
         dev_conventions=JAVA_PROMPT_CONVENTIONS,
+        command_env=jdk.java_env,
+        build_output=("build/", ".gradle/"),
+        environment_problem=java_environment_problem,
     )

@@ -52,6 +52,43 @@ def test_pricing_estimate_two_providers_same_model_name_dont_collide():
     assert estimate_cost_usd("self-hosted", "gpt-5.1", input_tokens=1_000_000, cache_read_tokens=0, output_tokens=0) is None
 
 
+def test_pricing_gpt_5_6_luna_including_cache_writes():
+    """The model forge's own dev and planner runs use: without a row, both
+    runs recorded cost_source="unknown" and max_budget_usd never counted."""
+    from forge.llm.pricing import estimate_cost_usd
+
+    cost = estimate_cost_usd(
+        "openai", "gpt-5.6-luna",
+        input_tokens=1_000_000, cache_read_tokens=600_000, cache_creation_tokens=100_000, output_tokens=100_000,
+    )
+
+    # 300k uncached at 0.20 + 600k read at 0.02 + 100k written at 0.25 + 100k out at 1.20
+    assert cost == pytest.approx(0.06 + 0.012 + 0.025 + 0.12)
+
+
+def test_pricing_matches_a_dated_snapshot_id_to_its_row():
+    from forge.llm.pricing import estimate_cost_usd
+
+    dated = estimate_cost_usd("openai", "gpt-5.6-luna-2026-08-01", input_tokens=1_000_000, cache_read_tokens=0, output_tokens=0)
+    permaslug = estimate_cost_usd(
+        "openai", "deepseek/deepseek-v4-pro-20260813", input_tokens=1_000_000, cache_read_tokens=0, output_tokens=0,
+    )
+
+    assert dated == pytest.approx(0.20)
+    assert permaslug == pytest.approx(1.32)  # the "deepseek/deepseek-v4-pro-0813" row
+
+
+def test_pricing_does_not_guess_between_two_undated_matches(monkeypatch):
+    from forge.llm import pricing
+
+    rows = dict(pricing.MODEL_PRICING["openai"])
+    rows["vendor/model-0101"] = pricing.ModelPricing(input_per_mtok=1, output_per_mtok=1, cached_input_per_mtok=1)
+    rows["vendor/model-0202"] = pricing.ModelPricing(input_per_mtok=2, output_per_mtok=2, cached_input_per_mtok=2)
+    monkeypatch.setitem(pricing.MODEL_PRICING, "openai", rows)
+
+    assert pricing.pricing_for("openai", "vendor/model-20260303") is None
+
+
 def test_record_phase_usage_accumulates_across_invocations(project_id):
     from forge.services.usage import get_story_usage, record_phase_usage
 
@@ -181,3 +218,44 @@ def test_get_epic_usage_for_epic_with_no_usage_recorded(project_id):
     usage = get_epic_usage("ENG-1")
     assert usage["totals"]["cost_usd"] is None
     assert all(story["phases"] == [] for story in usage["stories"])
+
+
+def test_pricing_covers_every_model_a_config_default_names():
+    """A model with no pricing row silently disables max_budget_usd for
+    that model (estimate_cost_usd returns None, so the loop's running
+    total never moves). Any model forge ships as a default must therefore
+    have a row."""
+    from forge.config.store import CONFIG_FIELDS
+    from forge.llm.pricing import MODEL_PRICING
+
+    model_keys = {"dev_sdk_model", "planner_sdk_model", "verifier_qa_model"}
+    defaults = {f.default for f in CONFIG_FIELDS if f.key in model_keys and f.default}
+
+    missing = sorted(d for d in defaults if d not in MODEL_PRICING["openai"])
+    assert missing == [], f"config defaults with no pricing row: {missing}"
+
+
+def test_openrouter_models_are_priced_under_the_openai_provider_key():
+    """forge/llm/registry.py names the provider after the adapter, not the
+    base_url, so an OpenRouter model resolves as provider="openai". A row
+    filed under any other key would never be looked up."""
+    from forge.llm.pricing import estimate_cost_usd
+
+    for model in ("moonshotai/kimi-k3", "z-ai/glm-5.3", "deepseek/deepseek-v4-pro-0813", "deepseek/deepseek-v4.1-flash"):
+        cost = estimate_cost_usd("openai", model, input_tokens=1_000_000, cache_read_tokens=0, output_tokens=0)
+        assert cost is not None and cost > 0, model
+
+
+def test_cached_input_is_always_cheaper_than_uncached():
+    """The tombstone compaction in forge/agents/loop.py exists to keep the
+    prompt prefix cacheable, and these rows are what turn that into a
+    number. A row where cached >= uncached is a typo."""
+    from forge.llm.pricing import MODEL_PRICING
+
+    offenders = [
+        f"{provider}/{model}"
+        for provider, models in MODEL_PRICING.items()
+        for model, pricing in models.items()
+        if pricing.cached_input_per_mtok >= pricing.input_per_mtok
+    ]
+    assert offenders == []

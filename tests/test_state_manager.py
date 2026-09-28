@@ -79,6 +79,59 @@ def test_story_lifecycle_and_listing(project_id):
     assert story["parked_reason"] == "plan_approval_gate"
 
 
+def test_clarification_answer_resolves_the_gate_and_clears_the_question(project_id):
+    """set_story_clarification_answers is what POST /api/stories/{key}/answer
+    calls after resolving a human's picks against the pending questions —
+    see forge/api/run_routes.py. It must clear the pending question (no
+    stale form on the next read) and clear the same gate /approve does,
+    since the reconciler cannot tell this state apart from an ordinary
+    plan-approval one."""
+    from forge.state.manager import StateManager
+
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id)
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0)
+    questions = [{
+        "id": "q0", "question": "Which store should own this?", "context": "seen in cart.ts",
+        "options": [{"id": "A", "label": "Redux", "description": "existing store"}],
+    }]
+    sm.set_story_clarification_questions("ENG-2", questions)
+
+    story = sm.get_story("ENG-2")
+    assert story["clarification_questions"] == questions
+    assert story["gate_approved"] is False
+
+    answers = [{"question": "Which store should own this?", "option_label": "Redux", "option_description": "existing store"}]
+    assert sm.set_story_clarification_answers("ENG-2", answers) is True
+
+    story = sm.get_story("ENG-2")
+    assert story["clarification_answers"] == answers
+    assert story["clarification_questions"] == []  # no longer pending
+    assert story["gate_approved"] is True
+
+
+def test_clarification_questions_defaults_to_empty_and_clears_on_none(project_id):
+    from forge.state.manager import StateManager
+
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id)
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0)
+
+    assert sm.get_story("ENG-2")["clarification_questions"] == []
+
+    sm.set_story_clarification_questions("ENG-2", [{"id": "q0", "question": "Which?", "context": None, "options": []}])
+    assert len(sm.get_story("ENG-2")["clarification_questions"]) == 1
+
+    sm.set_story_clarification_questions("ENG-2", None)
+    assert sm.get_story("ENG-2")["clarification_questions"] == []
+
+
+def test_setting_clarification_answers_on_an_unknown_story_returns_false(project_id):
+    from forge.state.manager import StateManager
+
+    assert StateManager().set_story_clarification_answers("ENG-999", []) is False
+
+
 def test_retry_story_run_failure_redispatches(project_id):
     """failure_stage="run" (or unset) goes back to "pending" — a full
     redispatch, since a run failure never reaches a PR to preserve."""
@@ -101,23 +154,24 @@ def test_retry_story_run_failure_redispatches(project_id):
 
 
 def test_retry_story_merge_failure_reattempts_merge(project_id):
-    """failure_stage="merge" goes back to "awaiting_pr_review" with the gate
-    cleared, mirroring how a CI failure already parks a story rather than
-    discarding its work — the run itself already succeeded here."""
+    """failure_stage="merge" goes back to "ready_to_merge" with a fresh merge
+    budget — the run itself already succeeded, so its committed work is kept
+    and only the landing on the epic branch is tried again."""
     from forge.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id)
     sm.create_story("ENG-2", epic_key="ENG-1", wave=0)
-    sm.set_story_gate_approved("ENG-2", True)
     sm.set_story_status("ENG-2", "failed", failure_stage="merge")
+    sm.increment_story_merge_attempts("ENG-2")
+    sm.increment_story_merge_attempts("ENG-2")
 
     sm.retry_story("ENG-2")
 
     story = sm.get_story("ENG-2")
-    assert story["status"] == "awaiting_pr_review"
+    assert story["status"] == "ready_to_merge"
     assert story["failure_stage"] is None
-    assert story["gate_approved"] is False
+    assert story["merge_attempts"] == 0
     assert story["retry_count"] == 1
 
 
@@ -147,7 +201,11 @@ def test_pull_request_upsert(project_id):
 
     sm.upsert_pull_request("ENG-2", number=42, url="https://github.com/acme/widgets/pull/42")
     pr = sm.get_pull_request("ENG-2")
-    assert pr == {"story_key": "ENG-2", "number": 42, "url": "https://github.com/acme/widgets/pull/42", "state": "open"}
+    # repo_label is "" for a story that wrote only its default repo.
+    assert pr == {
+        "story_key": "ENG-2", "repo_label": "", "number": 42,
+        "url": "https://github.com/acme/widgets/pull/42", "state": "open",
+    }
 
     sm.upsert_pull_request("ENG-2", state="merged")
     pr = sm.get_pull_request("ENG-2")
@@ -186,19 +244,33 @@ def test_project_and_project_repo_round_trip():
     assert sm.list_project_repos(project_id) == [
         {
             "id": repo_id, "project_id": project_id, "path": "/repo/widgets", "label": "widgets",
-            "clone_url": None, "created_at": sm.get_project_repo(repo_id)["created_at"],
+            "clone_url": None, "kind": "repo", "read_only": False, "generated_guide": None, "generated_guide_at": None,
+            "created_at": sm.get_project_repo(repo_id)["created_at"],
         }
     ]
+
+    # a generated guide is stored, stamped, and can be discarded again
+    assert sm.set_project_repo_guide(repo_id, "the guide") is True
+    stored = sm.get_project_repo(repo_id)
+    assert stored["generated_guide"] == "the guide" and stored["generated_guide_at"]
+    assert sm.set_project_repo_guide(repo_id, None) is True
+    assert sm.get_project_repo(repo_id)["generated_guide"] is None
+    assert sm.get_project_repo(repo_id)["generated_guide_at"] is None
+    assert sm.set_project_repo_guide(repo_id + 999, "x") is False
 
     sm.create_epic("ENG-1", project_id=project_id)
     assert sm.get_project(project_id)["epic_count"] == 1
 
+    # A folder being an epic's default is no reason to keep it: the epic moves
+    # to the project's next folder, or to none once the last one goes.
+    other_id = sm.add_project_repo(project_id, "/tmp/other")
     sm.set_epic_project_repo("ENG-1", repo_id)
-    assert sm.remove_project_repo(repo_id) is False  # still referenced by ENG-1
-
-    sm.set_epic_project_repo("ENG-1", None)
-    assert sm.remove_project_repo(repo_id) is True
+    assert sm.remove_project_repo(repo_id) == {"removed": True, "epics_moved": ["ENG-1"], "moved_to": other_id}
     assert sm.get_project_repo(repo_id) is None
+    assert sm.get_epic("ENG-1")["project_repo_id"] == other_id
+    assert sm.remove_project_repo(other_id) == {"removed": True, "epics_moved": ["ENG-1"], "moved_to": None}
+    assert sm.get_epic("ENG-1")["project_repo_id"] is None
+    assert sm.remove_project_repo(other_id) is None  # already gone
 
 
 def test_list_projects_orders_newest_first_and_counts():

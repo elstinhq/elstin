@@ -7,12 +7,19 @@ response objects.
 """
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import openai
 import pytest
 
-from forge.llm.errors import LlmAuthError, LlmBadRequestError, LlmRateLimitError
+from forge.llm.errors import (
+    LlmAuthError,
+    LlmBadRequestError,
+    LlmContextOverflowError,
+    LlmRateLimitError,
+    is_context_overflow_message,
+)
 from forge.llm.openai_compat import OpenAiCompatProvider
 from forge.llm.types import (
     ImageBlock,
@@ -91,6 +98,33 @@ async def test_complete_parses_tool_calls(provider, monkeypatch):
     assert len(calls) == 1
     assert calls[0].name == "read_file_tool"
     assert calls[0].arguments == {"path": "a.py"}
+
+
+@pytest.mark.parametrize(
+    ("tools", "tool_choice", "expected"),
+    [
+        (True, "none", "none"),
+        (True, None, "absent"),
+        # tool_choice without tools is meaningless, and OpenAI rejects it.
+        (False, "none", "absent"),
+    ],
+)
+async def test_tool_choice_is_sent_only_alongside_tools(provider, monkeypatch, tools, tool_choice, expected):
+    captured = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _fake_completion(content="done", usage=_fake_usage())
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", fake_create)
+
+    await provider.complete(LlmRequest(
+        model="gpt-5.1", messages=[text_message("user", "hi")], tool_choice=tool_choice,
+        tools=[ToolDef(name="t", description="d", parameters={"type": "object", "properties": {}})] if tools else [],
+    ))
+
+    assert captured.get("tool_choice", "absent") == expected
+    assert ("tools" in captured) is tools
 
 
 async def test_complete_parses_structured_output(provider, monkeypatch):
@@ -185,3 +219,231 @@ def _fake_http_response(status_code: int):
 
     request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
     return httpx.Response(status_code, request=request)
+
+
+# --- reasoning_effort routing ------------------------------------------
+# Sending the field to a model that rejects it, or sending a LEVEL a model
+# rejects, is a 400 -> LlmBadRequestError, which the agent loop never
+# retries. So the adapter decides per model, and drops the field rather
+# than gamble. See forge/llm/openai_compat.py's _EFFORT_SUPPORT.
+
+
+@pytest.mark.parametrize(
+    "model,effort,expected",
+    [
+        # OpenAI's own families: unchanged, any configured level passes through.
+        ("gpt-5.1", "medium", "medium"),
+        ("gpt-5.1-mini", "xhigh", "xhigh"),
+        ("o3", "low", "low"),
+        # A gateway that namespaces the vendor must match the same rules.
+        ("openai/gpt-5.1", "medium", "medium"),
+        # Documented levels for these two OpenRouter reasoning models.
+        ("z-ai/glm-5.3", "max", "max"),
+        ("z-ai/glm-5.3", "high", "high"),
+        ("moonshotai/kimi-k3", "low", "low"),
+        # GLM accepts low/high/max but NOT medium — which happens to be
+        # forge's default dev_sdk_effort, so forwarding it would 400 every
+        # single call. Dropped instead.
+        ("z-ai/glm-5.3", "medium", None),
+        ("moonshotai/kimi-k3", "high", None),
+        # Non-reasoning / unknown models never get the field.
+        ("deepseek/deepseek-v4-pro-0813", "medium", None),
+        ("some-future-model", "high", None),
+        # No effort configured means nothing to send.
+        ("gpt-5.1", None, None),
+        ("z-ai/glm-5.3", "", None),
+    ],
+)
+def test_resolve_reasoning_effort(model, effort, expected):
+    from forge.llm.openai_compat import resolve_reasoning_effort
+
+    assert resolve_reasoning_effort(model, effort) == expected
+
+
+async def test_reasoning_effort_is_sent_for_a_supported_model(provider, monkeypatch):
+    captured = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _fake_completion(content="{}", model="z-ai/glm-5.3")
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", fake_create)
+
+    await provider.complete(LlmRequest(model="z-ai/glm-5.3", messages=[text_message("user", "hi")], effort="max"))
+
+    assert captured["reasoning_effort"] == "max"
+
+
+async def test_unsupported_effort_level_is_omitted_from_the_request(provider, monkeypatch):
+    """The whole point: the request still goes out, just without the field."""
+    captured = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _fake_completion(content="{}", model="z-ai/glm-5.3")
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", fake_create)
+
+    response = await provider.complete(
+        LlmRequest(model="z-ai/glm-5.3", messages=[text_message("user", "hi")], effort="medium")
+    )
+
+    assert "reasoning_effort" not in captured
+    assert response.stop_reason == "end_turn"
+
+
+# --- the overall deadline on one call -------------------------------------
+
+
+def _request() -> LlmRequest:
+    return LlmRequest(model="gpt-5.1", messages=[text_message("user", "hi")])
+
+
+async def test_a_call_that_never_answers_is_abandoned_at_the_deadline(monkeypatch):
+    """One run's single model call sat for 2h39m. The SDK's own timeout is per
+    read and a keep-alive gateway never trips it, so the deadline is ours."""
+    from forge.llm.errors import LlmTimeoutError
+
+    provider = OpenAiCompatProvider(api_key="sk-test", request_timeout_seconds=0.05)
+    cancelled = asyncio.Event()
+
+    async def hangs(**kwargs):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", hangs)
+
+    with pytest.raises(LlmTimeoutError, match="no response from the model within 0.05s"):
+        await asyncio.wait_for(provider.complete(_request()), timeout=2)
+
+    assert cancelled.is_set()  # the request itself was cancelled, not left running
+
+
+async def test_a_call_that_answers_in_time_is_unaffected(monkeypatch):
+    provider = OpenAiCompatProvider(api_key="sk-test", request_timeout_seconds=5)
+
+    async def quick(**kwargs):
+        return _fake_completion(content="hello", usage=_fake_usage())
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", quick)
+
+    assert (await provider.complete(_request())).text() == "hello"
+
+
+@pytest.mark.parametrize("off", [None, 0, -1])
+async def test_no_deadline_when_it_is_off(monkeypatch, off):
+    provider = OpenAiCompatProvider(api_key="sk-test", request_timeout_seconds=off)
+
+    async def slowish(**kwargs):
+        await asyncio.sleep(0.05)
+        return _fake_completion(content="late but fine", usage=_fake_usage())
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", slowish)
+
+    assert (await provider.complete(_request())).text() == "late but fine"
+
+
+@pytest.mark.usefixtures("forge_db")
+def test_the_configured_deadline_reaches_the_provider():
+    from forge.config.store import set_config
+    from forge.llm.registry import get_provider
+
+    set_config("openai_api_key", "sk-test")
+    assert get_provider()._request_timeout == 900  # the default: a legitimate dev step tops out near 7.5 minutes
+
+    set_config("llm_request_timeout_seconds", "12")
+    assert get_provider()._request_timeout == 12
+
+    set_config("llm_request_timeout_seconds", "0")
+    assert get_provider()._request_timeout is None
+
+
+# --- usage: cache fields and the provider-reported cost ------------------------
+
+
+async def _complete_with_usage(provider, monkeypatch, usage):
+    async def fake_create(**kwargs):
+        return _fake_completion(content="ok", usage=usage)
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", fake_create)
+    return await provider.complete(LlmRequest(model="gpt-5.1", messages=[text_message("user", "hi")]))
+
+
+async def test_openrouter_reported_cost_and_cache_writes_are_read(provider, monkeypatch):
+    usage = SimpleNamespace(
+        prompt_tokens=4785, completion_tokens=5005, total_tokens=9790, cost=0.00915,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=4096, cache_write_tokens=12),
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=4951),
+    )
+
+    response = await _complete_with_usage(provider, monkeypatch, usage)
+
+    assert response.usage.cost_usd == pytest.approx(0.00915)
+    assert response.usage.cache_read_tokens == 4096
+    assert response.usage.cache_creation_tokens == 12
+    assert response.usage.reasoning_tokens == 4951
+
+
+async def test_deepseek_style_cache_hits_are_read(provider, monkeypatch):
+    usage = SimpleNamespace(prompt_tokens=1000, completion_tokens=10, total_tokens=1010, prompt_cache_hit_tokens=768)
+
+    response = await _complete_with_usage(provider, monkeypatch, usage)
+
+    assert response.usage.cache_read_tokens == 768
+    assert response.usage.cost_usd is None
+
+
+# --- malformed tool-call arguments ------------------------------------------------
+
+
+@pytest.mark.parametrize("raw,fragment", [('{"path": "a.py"', "not valid JSON"), ('["a.py"]', "must be a JSON object")])
+async def test_tool_call_arguments_that_are_not_a_json_object_are_flagged(provider, monkeypatch, raw, fragment):
+    tool_call = SimpleNamespace(id="call_1", function=SimpleNamespace(name="read_file_tool", arguments=raw))
+
+    async def fake_create(**kwargs):
+        return _fake_completion(tool_calls=[tool_call], finish_reason="tool_calls", usage=_fake_usage())
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", fake_create)
+    response = await provider.complete(LlmRequest(model="gpt-5.1", messages=[text_message("user", "hi")]))
+
+    [call] = response.tool_calls()
+    assert call.arguments == {}
+    assert fragment in call.arguments_error
+
+
+# --- context overflow ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "This model's maximum context length is 128000 tokens. However, your messages resulted in 131072 tokens.",
+        "prompt is too long: 210000 tokens > 200000 maximum",
+        "Input is too long for requested model.",
+    ],
+)
+async def test_a_context_overflow_400_maps_to_its_own_error(provider, monkeypatch, message):
+    async def fake_create(**kwargs):
+        raise openai.BadRequestError(message, response=_fake_http_response(400), body=None)
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", fake_create)
+
+    with pytest.raises(LlmContextOverflowError):
+        await provider.complete(LlmRequest(model="gpt-5.1", messages=[text_message("user", "hi")]))
+
+
+async def test_a_413_maps_to_context_overflow(provider, monkeypatch):
+    async def fake_create(**kwargs):
+        raise openai.APIStatusError("Request Entity Too Large", response=_fake_http_response(413), body=None)
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", fake_create)
+
+    with pytest.raises(LlmContextOverflowError):
+        await provider.complete(LlmRequest(model="gpt-5.1", messages=[text_message("user", "hi")]))
+
+
+def test_a_rate_limit_that_mentions_tokens_is_not_an_overflow():
+    assert not is_context_overflow_message("Rate limit reached: too many tokens per minute; context_length_exceeded")

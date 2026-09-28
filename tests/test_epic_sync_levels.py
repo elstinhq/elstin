@@ -7,7 +7,7 @@ ordering still comes out the way it did before QA tickets existed.
 """
 from __future__ import annotations
 
-from forge.services.epic_sync import _compute_levels
+from forge.services.epic_sync import _compute_levels, compute_dependencies, levels_from_dependencies
 from forge.services.jira_service import JiraTicket
 
 
@@ -80,3 +80,52 @@ def test_level_order_is_natural_not_lexicographic():
     assert sorted(["ENG-1000", "ENG-999", "ENG-99"], key=issue_key_sort_key) == ["ENG-99", "ENG-999", "ENG-1000"]
     # A key with no trailing number still sorts deterministically.
     assert issue_key_sort_key("NOPE")[0] == "NOPE"
+
+
+# --- dependencies (what the reconciler schedules on) -----------------------
+
+
+def test_dependencies_follow_blocking_links_in_both_directions():
+    children = [
+        _ticket("A"),
+        _ticket("B", blocked_by=["A"]),
+        JiraTicket(key="C", summary="C", description="", status="To Do", issue_type="Story", priority=None,
+                   linked_issues=[{"key": "D", "link_type": "blocks"}]),
+        _ticket("D"),
+    ]
+
+    assert compute_dependencies(children, {k: "dev" for k in "ABCD"}) == {"A": [], "B": ["A"], "C": [], "D": ["C"]}
+
+
+def test_a_qa_ticket_depends_on_every_dev_ticket_and_nothing_depends_on_it():
+    children = [_ticket("DEV-1"), _ticket("DEV-2", blocked_by=["QA-1"]), _ticket("QA-1")]
+    kinds = {"DEV-1": "dev", "DEV-2": "dev", "QA-1": "qa"}
+
+    assert compute_dependencies(children, kinds) == {"DEV-1": [], "DEV-2": [], "QA-1": ["DEV-1", "DEV-2"]}
+
+
+def test_a_cycle_is_chained_in_key_order_and_outside_edges_are_kept():
+    """X waits on the cycle's last member, so it still runs after the whole
+    cycle rather than being folded into it."""
+    children = [
+        _ticket("C-1", blocked_by=["C-3"]),
+        _ticket("C-2", blocked_by=["C-1"]),
+        _ticket("C-3", blocked_by=["C-2"]),
+        _ticket("X-1", blocked_by=["C-3"]),
+    ]
+
+    deps = compute_dependencies(children, {k: "dev" for k in ("C-1", "C-2", "C-3", "X-1")})
+
+    assert deps == {"C-1": [], "C-2": ["C-1"], "C-3": ["C-2"], "X-1": ["C-3"]}
+    assert levels_from_dependencies(deps) == [["C-1"], ["C-2"], ["C-3"], ["X-1"]]
+
+
+def test_independent_chains_stay_independent():
+    """B waits for A only; D waits for C only — so levels group them, but
+    nothing makes D wait for A."""
+    children = [_ticket("A"), _ticket("B", blocked_by=["A"]), _ticket("C"), _ticket("D", blocked_by=["C"])]
+
+    deps = compute_dependencies(children, {k: "dev" for k in "ABCD"})
+
+    assert deps["D"] == ["C"]
+    assert levels_from_dependencies(deps) == [["A", "C"], ["B", "D"]]

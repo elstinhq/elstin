@@ -1,18 +1,22 @@
 """Epic/story views for the dashboard, plus the JIRA-sync endpoint that
 registers an epic and its child tickets under a project so the daemon has
 something to poll, the per-epic prose refresh (summary/description only),
-and the folder-assignment endpoint that's kept deliberately separate —
-syncing tickets from JIRA and picking one of the project's folders are
-two independent actions (the daemon leaves an epic alone until a folder
-is set; see forge/daemon/main.py's poll_once)."""
+the folder-assignment endpoint, and "look again" for prior work (branches
+that already carry a ticket's work — forge/services/prior_work.py). A new
+epic gets a default repo
+assigned automatically (forge/services/epic_sync.py, forge/daemon/main.py's
+poll_once backfills any that still slip through) — the endpoint below only
+exists for a human override, never a required setup step."""
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 from jira import JIRAError
 from pydantic import BaseModel
 
+from forge.daemon.ticket_removal import TicketBusy, TicketNotFound, TicketRemovalError, remove_epic as remove_epic_ticket
+from forge.orchestration.reconciler import display_epic_phase
 from forge.services.epic_sync import sync_epic_fields_from_jira, sync_epic_from_jira
-from forge.services.usage import get_epic_usage
+from forge.services.usage import get_epic_usage, get_run_outcome
 from forge.state.manager import StateManager
 
 router = APIRouter(prefix="/api/epics", tags=["epics"])
@@ -34,7 +38,25 @@ class EpicGateRequest(BaseModel):
 def _story_with_pr(sm: StateManager, story_key: str) -> dict:
     story = sm.get_story(story_key) or {}
     story["pull_request"] = sm.get_pull_request(story_key)
+    # thread_id == run_id == story_key by construction (forge/orchestration/
+    # graph.py). None until the story's first dispatch. Lets the dashboard
+    # tell "dev wrote real code, the build/verify step failed" apart from
+    # "this never got past planning" on a failed story (see
+    # forge/services/usage.py's record_run_outcome for the accumulate-
+    # across-retries caveat on these counters).
+    story["run_outcome"] = get_run_outcome(story_key) if story.get("thread_id") else None
     return story
+
+
+def _with_stories(sm: StateManager, epic: dict) -> dict:
+    """The epic as the dashboard shows it: its stories attached, and its
+    phase read off them (see display_epic_phase for why the stored one can't
+    be shown as is)."""
+    epic["stories"] = [_story_with_pr(sm, s["jira_key"]) for s in sm.list_stories_for_epic(epic["jira_key"])]
+    # The epic's own pull request, one per repo — the only one forge opens.
+    epic["pull_requests"] = sm.list_epic_pull_requests(epic["jira_key"])
+    epic["phase"] = display_epic_phase(epic["phase"], (s.get("status") for s in epic["stories"]))
+    return epic
 
 
 @router.get("")
@@ -45,8 +67,7 @@ def list_epics() -> list[dict]:
         epic = sm.get_epic(epic_key)
         if epic is None:
             continue
-        epic["stories"] = [_story_with_pr(sm, s["jira_key"]) for s in sm.list_stories_for_epic(epic_key)]
-        epics.append(epic)
+        epics.append(_with_stories(sm, epic))
     return epics
 
 
@@ -56,8 +77,7 @@ def get_epic(epic_key: str) -> dict:
     epic = sm.get_epic(epic_key)
     if epic is None:
         raise HTTPException(status_code=404, detail=f"No such epic: {epic_key}")
-    epic["stories"] = [_story_with_pr(sm, s["jira_key"]) for s in sm.list_stories_for_epic(epic_key)]
-    return epic
+    return _with_stories(sm, epic)
 
 
 @router.get("/{epic_key}/usage")
@@ -78,7 +98,7 @@ def sync_epic(body: EpicSyncRequest) -> dict:
     if sm.get_project(body.project_id) is None:
         raise HTTPException(status_code=404, detail=f"No such project: {body.project_id}")
     try:
-        sync_epic_from_jira(body.jira_key, project_id=body.project_id)
+        report = sync_epic_from_jira(body.jira_key, project_id=body.project_id)
     except ValueError as exc:  # JIRA not configured, auth failed, or epic belongs to another project
         status = 409 if "different project" in str(exc) else 400
         raise HTTPException(status_code=status, detail=str(exc)) from exc
@@ -88,7 +108,8 @@ def sync_epic(body: EpicSyncRequest) -> dict:
                 status_code=404, detail=f"JIRA issue {body.jira_key} not found or not accessible"
             ) from exc
         raise HTTPException(status_code=502, detail=(exc.text or str(exc))) from exc
-    return get_epic(body.jira_key)
+    # By the key the epic is stored under — what was typed may be a URL.
+    return get_epic(report.epic_key)
 
 
 @router.post("/{epic_key}/sync")
@@ -120,6 +141,47 @@ def set_epic_repo(epic_key: str, body: EpicRepoRequest) -> dict:
     if project_repo is None or project_repo["project_id"] != epic["project_id"]:
         raise HTTPException(status_code=400, detail="That folder does not belong to this epic's project")
     sm.set_epic_project_repo(epic_key, body.project_repo_id)
+    return get_epic(epic_key)
+
+
+@router.delete("/{epic_key}")
+async def remove_epic(epic_key: str) -> dict:
+    """Remove the ticket from forge, locally and completely: its rows, its
+    worktrees and local branches, its run checkpoints. Nothing is sent to
+    GitHub or JIRA — see forge/daemon/ticket_removal.py for what is and is not
+    touched, and what the report lists as left behind."""
+    try:
+        return await remove_epic_ticket(StateManager(), epic_key)
+    except TicketNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except TicketBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except TicketRemovalError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/{epic_key}/prior-work/refresh")
+def refresh_prior_work(epic_key: str) -> dict:
+    """Look again for work that already exists — e.g. after a branch was
+    pushed since the epic was added. Marks the lookup of every story that
+    has not started (and the epic's own, until its branch exists) for a
+    fresh one; the next daemon poll looks them up again, before any of them
+    is dispatched. A branch a person picked stays picked where it still
+    applies. A story already underway keeps the branch it started from."""
+    sm = StateManager()
+    epic = sm.get_epic(epic_key)
+    if epic is None:
+        raise HTTPException(status_code=404, detail=f"No such epic: {epic_key}")
+    for story in sm.list_stories_for_epic(epic_key):
+        prior = story.get("prior_work")
+        closed = story["status"] == "skipped" and story.get("parked_reason") == "closed_externally"
+        if (story["status"] == "pending" or closed) and not story.get("branch") and prior is not None:
+            sm.set_story_prior_work(story["jira_key"], {
+                "stale": True, "picks": prior.get("picks") or {},
+                **({"epic_merge": prior["epic_merge"]} if prior.get("epic_merge") else {}),
+            })
+    if not epic.get("integration_branch"):
+        sm.set_epic_prior_work(epic_key, None)
     return get_epic(epic_key)
 
 

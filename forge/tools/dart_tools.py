@@ -555,4 +555,5 @@ def dart_flutter_profile() -> LanguageProfile:
         planner_conventions=_DI_REGISTRATION_CONVENTIONS,
         dev_conventions=_DEPRECATED_API_CONVENTIONS,
         verifier_review_conventions=_VERIFIER_REVIEW_CONVENTIONS,
+        build_output=(".dart_tool/", "build/"),
     )

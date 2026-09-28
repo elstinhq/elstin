@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from forge.db.engine import session_scope
-from forge.db.models import Story
+from forge.db.models import Epic, ProjectRepo, Story, StoryWorktree
 
 
 class _StoryMixin:
@@ -17,8 +17,13 @@ class _StoryMixin:
         description: str | None = None,
         kind: str = "dev",
         kind_reason: str | None = None,
+        issue_type: str | None = None,
+        labels: list[str] | None = None,
         parent_key: str | None = None,
         status: str = "pending",
+        external_source: str | None = None,
+        external_id: str | None = None,
+        depends_on: list[str] | None = None,
     ) -> None:
         with session_scope() as session:
             if session.get(Story, jira_key) is not None:
@@ -27,6 +32,12 @@ class _StoryMixin:
                 jira_key=jira_key, epic_key=epic_key, wave=wave, status=status,
                 summary=summary, description=description,
                 kind=kind, kind_reason=kind_reason, parent_key=parent_key,
+                issue_type=issue_type, labels=list(labels) if labels else None,
+                external_source=external_source, external_id=external_id,
+                # None (not []) when the caller does not know them: readers then
+                # fall back to the epic's levels (epic_sync.stored_dependencies)
+                # rather than treating the story as free to start at once.
+                depends_on=list(depends_on) if depends_on is not None else None,
             ))
 
     def list_subtasks(self, parent_key: str) -> list[dict]:
@@ -37,12 +48,12 @@ class _StoryMixin:
 
         with session_scope() as session:
             rows = session.execute(select(Story).where(Story.parent_key == parent_key)).scalars().all()
-            return sorted((_story_to_dict(row) for row in rows), key=lambda s: issue_key_sort_key(s["jira_key"]))
+            return sorted((_story_to_dict(session, row) for row in rows), key=lambda s: issue_key_sort_key(s["jira_key"]))
 
     def get_story(self, jira_key: str) -> dict | None:
         with session_scope() as session:
             story = session.get(Story, jira_key)
-            return _story_to_dict(story) if story is not None else None
+            return _story_to_dict(session, story) if story is not None else None
 
     def update_story_jira_fields(
         self, jira_key: str, *, summary: str, description: str | None
@@ -59,7 +70,18 @@ class _StoryMixin:
     def list_stories_for_epic(self, epic_key: str) -> list[dict]:
         with session_scope() as session:
             rows = session.execute(select(Story).where(Story.epic_key == epic_key)).scalars().all()
-            return [_story_to_dict(row) for row in rows]
+            return [_story_to_dict(session, row) for row in rows]
+
+    def set_story_project_repo(self, jira_key: str, project_repo_id: int | None) -> bool:
+        """Point one story at a specific repo, or None to inherit the
+        epic's. Returns False for an unknown story so the API layer can
+        answer 404 rather than silently succeeding."""
+        with session_scope() as session:
+            story = session.get(Story, jira_key)
+            if story is None:
+                return False
+            story.project_repo_id = project_repo_id
+            return True
 
     def set_story_status(
         self, jira_key: str, status: str, *, parked_reason: str | None = None, failure_stage: str | None = None
@@ -87,6 +109,69 @@ class _StoryMixin:
                 story.worktree_path = worktree_path
                 story.branch = branch
 
+    def record_story_worktree(
+        self,
+        jira_key: str,
+        *,
+        repo_label: str,
+        repo_path: str,
+        worktree_path: str,
+        branch: str,
+        project_repo_id: int | None = None,
+        is_default: bool = False,
+    ) -> None:
+        """Record one repo's worktree for a story, replacing any prior row
+        for that (story, repo).
+
+        `is_default` also mirrors the values onto Story.worktree_path /
+        Story.branch. That mirror is what keeps the dashboard and every
+        single-repo code path working unchanged now that a story can have
+        several worktrees — the table is the full picture, the two columns
+        are the default repo's."""
+        with session_scope() as session:
+            row = (
+                session.query(StoryWorktree)
+                .filter_by(story_key=jira_key, repo_label=repo_label)
+                .one_or_none()
+            )
+            if row is None:
+                row = StoryWorktree(story_key=jira_key, repo_label=repo_label)
+                session.add(row)
+            row.repo_path = repo_path
+            row.project_repo_id = project_repo_id
+            row.worktree_path = worktree_path
+            row.branch = branch
+
+            if is_default:
+                story = session.get(Story, jira_key)
+                if story is not None:
+                    story.worktree_path = worktree_path
+                    story.branch = branch
+
+    def list_story_worktrees(self, jira_key: str) -> list[dict]:
+        """Every repo this story has a worktree in, creation order.
+
+        Empty for a story dispatched before per-repo worktrees existed;
+        callers fall back to Story.worktree_path/branch, so an in-flight
+        story keeps working across the upgrade."""
+        with session_scope() as session:
+            rows = (
+                session.query(StoryWorktree)
+                .filter_by(story_key=jira_key)
+                .order_by(StoryWorktree.id)
+                .all()
+            )
+            return [
+                {
+                    "repo_label": r.repo_label,
+                    "repo_path": r.repo_path,
+                    "project_repo_id": r.project_repo_id,
+                    "worktree_path": r.worktree_path,
+                    "branch": r.branch,
+                }
+                for r in rows
+            ]
+
     def set_story_kind(self, jira_key: str, kind: str, *, reason: str = "manual") -> None:
         """A human correcting forge's sync-time guess. Records the reason as
         "manual" so a later reader can tell an overridden classification
@@ -103,11 +188,110 @@ class _StoryMixin:
             if story is not None:
                 story.wave = wave
 
+    def set_story_dependencies(self, jira_key: str, depends_on: list[str]) -> None:
+        """The stories this one waits for (Story.depends_on) — written by
+        forge/services/epic_sync.py on every sync and relevel."""
+        with session_scope() as session:
+            story = session.get(Story, jira_key)
+            if story is not None:
+                story.depends_on = list(depends_on)
+
+    def set_story_prior_work(self, jira_key: str, prior_work: dict | None) -> None:
+        """The lookup of work already done on this ticket
+        (forge/services/prior_work.py) — or None to look again."""
+        with session_scope() as session:
+            story = session.get(Story, jira_key)
+            if story is not None:
+                story.prior_work = dict(prior_work) if prior_work is not None else None
+
+    def send_back_to_planning(self, jira_key: str, *, keep_answers: bool = False) -> bool:
+        """A plan waiting for approval that no longer fits the code — the
+        epic branch gained work it was made without — goes back to `pending`
+        to be planned again, its questions and answers with it. Only from
+        "awaiting_plan_approval": anything later has work to keep. False,
+        changing nothing, otherwise.
+
+        `keep_answers`: a person asked for the new plan (POST /{key}/replan)
+        — the code has not changed under their answers, which stand as
+        decisions for the fresh run."""
+        with session_scope() as session:
+            story = session.get(Story, jira_key)
+            if story is None or story.status != "awaiting_plan_approval":
+                return False
+            story.status = "pending"
+            story.parked_reason = None
+            story.gate_approved = False
+            story.clarification_questions = None
+            if not keep_answers:
+                story.clarification_answers = None
+            return True
+
+    def pick_story_prior_branch(self, jira_key: str, repo_label: str, branch: str | None) -> bool:
+        """A human's answer where several branches diverged: continue from
+        `branch` in `repo_label`, or start fresh (None). False — nothing
+        recorded — unless that repo's lookup offered that branch and the
+        story has not started."""
+        with session_scope() as session:
+            story = session.get(Story, jira_key)
+            # A ticket closed as done is picked for too: its chosen branch is
+            # what gets merged into the epic branch.
+            if story is None or story.status not in ("pending", "skipped") or story.branch or not story.prior_work:
+                return False
+            finding = (story.prior_work.get("repos") or {}).get(repo_label)
+            if not finding:
+                return False
+            if branch is not None and branch not in {c.get("branch") for c in finding.get("candidates") or []}:
+                return False
+            prior_work = dict(story.prior_work)
+            prior_work["picks"] = {**(prior_work.get("picks") or {}), repo_label: branch or ""}
+            story.prior_work = prior_work  # a new object: JSON columns do not track in-place edits
+            return True
+
+    def increment_story_merge_attempts(self, jira_key: str) -> int:
+        """One more send-back over landing this story; returns the new count."""
+        with session_scope() as session:
+            story = session.get(Story, jira_key)
+            if story is None:
+                return 0
+            story.merge_attempts = (story.merge_attempts or 0) + 1
+            return story.merge_attempts
+
     def set_story_gate_approved(self, jira_key: str, approved: bool = True) -> None:
         with session_scope() as session:
             story = session.get(Story, jira_key)
             if story is not None:
                 story.gate_approved = approved
+
+    def set_story_clarification_questions(self, jira_key: str, questions: list[dict] | None) -> None:
+        """The planner's pending questions, persisted so the API/UI can
+        show them and a human's answer can survive past this process (see
+        forge/api/run_routes.py's /answer endpoint). Called on every run
+        completion, not only when questions exist — None clears a stale
+        form left over from an earlier round."""
+        with session_scope() as session:
+            story = session.get(Story, jira_key)
+            if story is not None:
+                story.clarification_questions = list(questions) if questions else None
+
+    def set_story_clarification_answers(self, jira_key: str, answers: list[dict]) -> bool:
+        """A human's resolved answers to `clarification_questions` (see
+        forge/api/run_routes.py's /answer endpoint, which resolves each
+        submitted option against the question that actually offered it).
+
+        Clears clarification_questions — it is no longer pending — and sets
+        gate_approved the same way /approve does: the reconciler cannot
+        tell an awaiting_clarification story apart from an ordinary
+        plan-approval one (both map to "awaiting_plan_approval" in
+        forge/daemon/main.py's _GRAPH_STATUS_TO_STORY_STATUS), so answering
+        clears the same gate. Returns False for an unknown story."""
+        with session_scope() as session:
+            story = session.get(Story, jira_key)
+            if story is None:
+                return False
+            story.clarification_answers = list(answers)
+            story.clarification_questions = None
+            story.gate_approved = True
+            return True
 
     def set_story_coverage_gap(self, jira_key: str, coverage_gap: bool, *, detail: str | None = None) -> None:
         with session_scope() as session:
@@ -115,6 +299,14 @@ class _StoryMixin:
             if story is not None:
                 story.coverage_gap = coverage_gap
                 story.coverage_gap_detail = detail
+
+    def set_story_read_only_changes(self, jira_key: str, changes: list[dict] | None) -> None:
+        """From the story's latest plan: changes it needs that forge may not
+        make, for a person. None clears what an earlier plan listed."""
+        with session_scope() as session:
+            story = session.get(Story, jira_key)
+            if story is not None:
+                story.read_only_changes = list(changes) if changes else None
 
     def set_story_pr_open_error(self, jira_key: str, error: str | None) -> None:
         with session_scope() as session:
@@ -135,14 +327,12 @@ class _StoryMixin:
         too, not just the story).
 
         failure_stage picks the recovery path: "merge" (the run succeeded,
-        only merging the story's branch into the epic's integration branch
-        conflicted) goes back to awaiting_pr_review with gate_approved
-        cleared, mirroring how a CI failure already parks a story rather
-        than discarding its work (see forge/daemon/main.py's
-        _ci_checks_block_merge). Anything else — "run", or unset for a
-        story that failed before this column existed — goes back to
-        pending for a full redispatch, since a run failure never reaches a
-        PR to preserve.
+        only landing it on the epic branch failed) goes back to
+        ready_to_merge, so the merge queue tries again with the story's work
+        intact and a fresh attempt budget. Anything else — "run", or unset
+        for a story that failed before this column existed — goes back to
+        pending for a full redispatch, since a run failure has nothing
+        committed worth keeping.
         """
         with session_scope() as session:
             story = session.get(Story, jira_key)
@@ -152,9 +342,9 @@ class _StoryMixin:
             story.retry_count += 1
             story.parked_reason = None
             story.failure_stage = None
+            story.merge_attempts = 0
             if stage == "merge":
-                story.status = "awaiting_pr_review"
-                story.gate_approved = False
+                story.status = "ready_to_merge"
             else:
                 story.status = "pending"
             epic_key = story.epic_key
@@ -173,14 +363,47 @@ class _StoryMixin:
             return frozenset(rows)
 
 
-def _story_to_dict(story: Story) -> dict:
+def _resolve_story_repo(session, story: Story) -> tuple[int | None, str | None]:
+    """(effective project_repo_id, filesystem path) for the repo this story
+    writes to.
+
+    Falls back to the epic's repo when the story has no override, which is
+    the normal case — a per-story repo only appears on a project whose
+    repos are split by concern. Resolved here rather than in the daemon so
+    every caller of get_story/list_stories_for_epic sees one answer and
+    cannot accidentally use the epic's repo for a story that overrode it."""
+    repo_id = story.project_repo_id
+    if repo_id is None:
+        epic = session.get(Epic, story.epic_key)
+        repo_id = epic.project_repo_id if epic is not None else None
+    if repo_id is None:
+        return None, None
+    project_repo = session.get(ProjectRepo, repo_id)
+    return repo_id, (project_repo.path if project_repo is not None else None)
+
+
+def _story_to_dict(session, story: Story) -> dict:
+    effective_repo_id, repo_path = _resolve_story_repo(session, story)
     return {
+        # The story's own override, or None when it inherits the epic's.
+        "project_repo_id": story.project_repo_id,
+        # The repo this story actually writes to, override or inherited.
+        # Every story-scoped git operation in forge/daemon/main.py keys off
+        # this rather than epic["repo"].
+        "effective_project_repo_id": effective_repo_id,
+        "repo": repo_path,
         "jira_key": story.jira_key,
         "epic_key": story.epic_key,
         "parent_key": story.parent_key,
         "summary": story.summary,
         "description": story.description,
+        "issue_type": story.issue_type,
+        "labels": list(story.labels or []),
         "wave": story.wave,
+        # None only for a row that predates the column and was never
+        # re-synced — see forge/services/epic_sync.py's stored_dependencies.
+        "depends_on": list(story.depends_on) if story.depends_on is not None else None,
+        "prior_work": story.prior_work,
         "status": story.status,
         "kind": story.kind,
         "kind_reason": story.kind_reason,
@@ -189,9 +412,21 @@ def _story_to_dict(story: Story) -> dict:
         "branch": story.branch,
         "parked_reason": story.parked_reason,
         "gate_approved": story.gate_approved,
+        "clarification_questions": list(story.clarification_questions or []),
+        "clarification_answers": list(story.clarification_answers or []),
         "coverage_gap": story.coverage_gap,
         "coverage_gap_detail": story.coverage_gap_detail,
+        "read_only_changes": list(story.read_only_changes or []),
         "pr_open_error": story.pr_open_error,
         "retry_count": story.retry_count,
         "failure_stage": story.failure_stage,
+        "merge_attempts": story.merge_attempts or 0,
+        "external_source": story.external_source,
+        "external_id": story.external_id,
+        "external_synced_at": story.external_synced_at.isoformat() if story.external_synced_at else None,
+        "external_hash": story.external_hash,
+        "external_status": story.external_status,
+        "external_closed": story.external_closed,
+        "external_pending": story.external_pending,
+        "external_changed_at": story.external_changed_at.isoformat() if story.external_changed_at else None,
     }

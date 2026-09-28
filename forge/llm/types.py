@@ -58,6 +58,11 @@ class ToolCallBlock:
     id: str
     name: str
     arguments: dict[str, Any]
+    # Set by an adapter when the provider's arguments could not be decoded
+    # (not valid JSON): `arguments` is then {} and this says why, so the
+    # loop answers the model with the real problem instead of running the
+    # tool with no arguments. None for every well-formed call.
+    arguments_error: str | None = None
     type: Literal["tool_call"] = "tool_call"
 
 
@@ -148,6 +153,12 @@ class LlmRequest:
     # response that hits the *provider's* own cap comes back as
     # stop_reason="max_tokens" and the loop treats it as a hard failure.
     parallel_tool_calls: bool = True
+    # None leaves the choice to the model. "none" declares `tools` but
+    # forbids calling them, which is not the same as sending no tools: the
+    # tool list sits ahead of the messages in the rendered prompt, so a
+    # request that drops it misses the provider's prefix cache from the
+    # first byte. See forge/agents/roles/explorer.py's `_wrap_up`.
+    tool_choice: Literal["none"] | None = None
 
 
 @dataclass(frozen=True)

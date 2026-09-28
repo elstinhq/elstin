@@ -14,7 +14,6 @@ def test_unset_fields_fall_back_to_declared_defaults():
 
     assert get_config("worktrees_base_dir") == "/data/repos"
     assert get_bool_config("require_plan_approval") is True
-    assert get_bool_config("require_pr_review") is True
     assert get_config("jira_base_url") is None  # no default — genuinely unset
 
 
@@ -31,11 +30,11 @@ def test_set_config_round_trips_and_invalidates_cache():
 def test_bool_config_parsing():
     from forge.config.store import get_bool_config, set_config
 
-    set_config("require_pr_review", "false")
-    assert get_bool_config("require_pr_review") is False
+    set_config("require_plan_approval", "false")
+    assert get_bool_config("require_plan_approval") is False
 
-    set_config("require_pr_review", "true")
-    assert get_bool_config("require_pr_review") is True
+    set_config("require_plan_approval", "true")
+    assert get_bool_config("require_plan_approval") is True
 
 
 def test_list_config_for_display_masks_secrets_but_not_plain_fields():

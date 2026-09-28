@@ -7,6 +7,7 @@ this repo's convention of faking at the service boundary (forge/llm/)
 rather than mocking run_dev itself."""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 import pytest
@@ -184,3 +185,236 @@ async def test_run_dev_resumes_from_prior_history(git_repo: str, monkeypatch: py
 
     assert len(captured_requests[0].messages) == 3  # 2 prior turns + this iteration's brief
     assert captured_requests[0].messages[0].content[0].text == "earlier turn"
+
+
+async def test_run_dev_uses_gate_feedback_as_the_brief_on_top_of_prior_history(git_repo: str, monkeypatch: pytest.MonkeyPatch):
+    """The Tier 1 gate's fix message is appended to the existing history
+    as the next user turn — no fresh FIX MODE brief, no re-injected file
+    contents — so the model keeps its context and the prompt prefix
+    stays cacheable."""
+    import forge.agents.roles.dev_loop as dev_loop_module
+    from forge.config.store import set_config
+    from forge.llm.types import history_to_json, text_message
+
+    set_config("openai_api_key", "sk-test")
+    prior_history = history_to_json([text_message("user", "the plan"), text_message("assistant", "wrote a.py")])
+    captured_requests = []
+
+    @dataclass
+    class CapturingProvider(FakeProvider):
+        async def complete(self, request: LlmRequest) -> LlmResponse:
+            captured_requests.append(request)
+            return await super().complete(request)
+
+    monkeypatch.setattr(dev_loop_module, "get_provider", lambda: CapturingProvider(script=[_text_response("fixed")]))
+
+    await run_dev(
+        plan={}, context_bundle={}, worktree_path=git_repo, project_path=git_repo,
+        prior_history=prior_history, verifier_report={"required_fixes": ["stale review finding"]},
+        gate_feedback="Deterministic checks FAILED with 1 problem(s) in a.py (fix attempt 1/3).\n1. analyze failed",
+    )
+
+    messages = captured_requests[0].messages
+    assert len(messages) == 3
+    assert messages[2].role == "user"
+    assert messages[2].content[0].text.startswith("Deterministic checks FAILED with 1 problem(s) in a.py")
+    assert "FIX MODE" not in messages[2].content[0].text
+    assert "stale review finding" not in messages[2].content[0].text
+
+
+async def test_run_dev_no_progress_stop_is_a_soft_stop(git_repo: str, monkeypatch: pytest.MonkeyPatch):
+    """The idle-turn budget ends the loop like a turn cap does: truncated,
+    history kept for the next round, no DevLoopError."""
+    import forge.agents.roles.dev_loop as dev_loop_module
+    from forge.config.store import set_config
+
+    set_config("openai_api_key", "sk-test")
+    set_config("dev_sdk_max_idle_turns", "2")
+    monkeypatch.setattr(
+        dev_loop_module, "get_provider",
+        lambda: FakeProvider(script=[
+            _tool_call_response("search_codebase_tool", {"query": "foo"}, call_id="c1"),
+            _tool_call_response("search_codebase_tool", {"query": "bar"}, call_id="c2"),
+            _text_response("never reached"),
+        ]),
+    )
+
+    result = await run_dev(plan={}, context_bundle={}, worktree_path=git_repo, project_path=git_repo)
+
+    assert result["truncated"] is True
+    assert result["dev_history"]
+
+
+@pytest.mark.parametrize(
+    "base,files,expected",
+    [
+        (4, 0, 4), (4, 1, 4), (4, 2, 4),  # a small plan keeps the configured budget
+        (4, 3, 5), (4, 5, 6), (4, 15, 11),  # +1 turn per two further files
+        (4, 200, 16),  # but bounded: a looping model must still be stopped
+        (2, 15, 8),
+        (0, 15, 0), (-1, 5, 0),  # off stays off
+    ],
+)
+def test_idle_budget_grows_with_the_plan_and_is_bounded(base, files, expected):
+    from forge.agents.roles.dev_loop import idle_budget_for_plan
+
+    assert idle_budget_for_plan(base, files) == expected
+
+
+async def _run_with_read_only_turns(git_repo: str, monkeypatch: pytest.MonkeyPatch, *, planned_files: int, read_turns: int):
+    """A dev run that explores for `read_turns` turns and then finishes
+    without ever writing — the shape of the run that failed three fix rounds."""
+    import forge.agents.roles.dev_loop as dev_loop_module
+    from forge.config.store import set_config
+
+    set_config("openai_api_key", "sk-test")
+    set_config("dev_sdk_max_idle_turns", "2")
+    monkeypatch.setattr(
+        dev_loop_module, "get_provider",
+        lambda: FakeProvider(script=[
+            _tool_call_response("search_codebase_tool", {"query": f"q{i}"}, call_id=f"c{i}") for i in range(read_turns)
+        ] + [_text_response("done")]),
+    )
+    plan = {"files_to_create": [{"path": f"new_{i}.py"} for i in range(planned_files)]}
+    return await run_dev(plan=plan, context_bundle={}, worktree_path=git_repo, project_path=git_repo)
+
+
+async def test_a_multi_file_plan_is_not_cut_off_by_the_exploration_a_small_one_would_be(
+    git_repo: str, monkeypatch: pytest.MonkeyPatch
+):
+    """Five read-only turns with a base budget of 2: one planned file gets 2
+    and is stopped; twelve get 2 + 5 = 7 and are still reading when they
+    finish. The base is the same — the plan size is the difference."""
+    small = await _run_with_read_only_turns(git_repo, monkeypatch, planned_files=1, read_turns=5)
+    large = await _run_with_read_only_turns(git_repo, monkeypatch, planned_files=12, read_turns=5)
+
+    assert small["truncated"] is True
+    assert large["truncated"] is False
+
+
+async def test_a_multi_file_plan_that_only_loops_is_still_stopped(git_repo: str, monkeypatch: pytest.MonkeyPatch):
+    """Scaling must not remove the guard: 12 files allows 7 idle turns, not 20."""
+    result = await _run_with_read_only_turns(git_repo, monkeypatch, planned_files=12, read_turns=20)
+
+    assert result["truncated"] is True
+
+
+async def test_dev_run_seeds_the_checklist_from_the_plan_and_reshows_it_each_turn(
+    git_repo: str, monkeypatch: pytest.MonkeyPatch
+):
+    import forge.agents.roles.dev_loop as dev_loop_module
+    from forge.config.store import set_config
+
+    set_config("openai_api_key", "sk-test")
+    captured = []
+
+    @dataclass
+    class CapturingProvider(FakeProvider):
+        async def complete(self, request: LlmRequest) -> LlmResponse:
+            captured.append(request)
+            return await super().complete(request)
+
+    monkeypatch.setattr(
+        dev_loop_module, "get_provider",
+        lambda: CapturingProvider(script=[
+            _tool_call_response("update_progress_tool", {"updates": [{"path": "widget.py", "status": "doing"}]}, call_id="c1"),
+            _text_response("all done"),
+        ]),
+    )
+
+    plan = {"files_to_create": [{"path": "widget.py"}], "files_to_modify": [{"path": "README.md"}]}
+    result = await run_dev(plan=plan, context_bundle={}, worktree_path=git_repo, project_path=git_repo)
+
+    # Turn one sees the seeded board, turn two sees the model's own update.
+    assert "[ ] create widget.py" in captured[0].messages[-1].content[0].text
+    assert "[>] create widget.py" in captured[1].messages[-1].content[0].text
+    # And it comes back out for the next fix round.
+    assert result["dev_progress"] == [
+        {"path": "widget.py", "action": "create", "status": "doing"},
+        {"path": "README.md", "action": "modify", "status": "pending"},
+    ]
+
+
+async def test_dev_run_resumes_a_prior_checklist_instead_of_reseeding(git_repo: str, monkeypatch: pytest.MonkeyPatch):
+    """A fix round must not report already-written files as pending."""
+    import forge.agents.roles.dev_loop as dev_loop_module
+    from forge.config.store import set_config
+
+    set_config("openai_api_key", "sk-test")
+    captured = []
+
+    @dataclass
+    class CapturingProvider(FakeProvider):
+        async def complete(self, request: LlmRequest) -> LlmResponse:
+            captured.append(request)
+            return await super().complete(request)
+
+    monkeypatch.setattr(dev_loop_module, "get_provider", lambda: CapturingProvider(script=[_text_response("fixed")]))
+
+    prior = [{"path": "widget.py", "action": "create", "status": "done"}]
+    result = await run_dev(
+        plan={"files_to_create": [{"path": "widget.py"}]}, context_bundle={},
+        worktree_path=git_repo, project_path=git_repo,
+        prior_history=[{"role": "user", "content": [{"type": "text", "text": "earlier"}]}],
+        prior_progress=prior,
+    )
+
+    assert "[x] create widget.py" in captured[0].messages[-1].content[0].text
+    assert result["dev_progress"][0]["status"] == "done"
+    # The caller's list is not mutated in place across runs.
+    assert prior[0]["status"] == "done"
+
+
+def test_changes_left_to_a_person_are_named_but_not_in_dev_s_plan():
+    """A read-only repo's changes (plan_gate.normalize_plan) are a person's:
+    dev codes against them but neither makes them nor copies them elsewhere."""
+    from forge.agents.roles.dev_loop import _build_prompt
+
+    plan = {
+        "files_to_modify": [{"path": "src/Search.java", "purpose": "columns"}],
+        "read_only_changes": [{"path": "@contracts/orders.yaml", "purpose": "add the columns to the contract"}],
+        "plan_markdown": "# Plan",
+    }
+
+    prompt = _build_prompt(continuing=False, plan=plan, context_bundle={}, brief="the brief")
+
+    approved, _, rest = prompt.partition("\n\n")
+    assert "read_only_changes" not in approved and "src/Search.java" in approved
+    assert "Not yours to make" in rest
+    assert "- @contracts/orders.yaml: add the columns to the contract" in rest
+
+
+async def test_files_the_story_already_changed_stay_writable_off_the_plan(git_repo: str, tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """A Retry keeps the story's worktrees, and the new plan may take their
+    work as done without listing it. A fix there must still be possible —
+    in the default repo and in another repo the plan does not even name."""
+    import subprocess
+
+    import forge.agents.roles.dev_loop as dev_loop_module
+    from forge.config.store import set_config
+
+    portal = tmp_path / "portal"
+    subprocess.run(["git", "-C", git_repo, "worktree", "add", "-q", "-b", "feat/p", str(portal)], check=True)
+    (portal / "export.ts").write_text("export const x = 1;\n")  # the earlier run's portal work
+    with open(f"{git_repo}/Search.java", "w") as handle:  # ...and its backend work
+        handle.write("class Search {}\n")
+    set_config("openai_api_key", "sk-test")
+    monkeypatch.setattr(
+        dev_loop_module, "get_provider",
+        lambda: FakeProvider(script=[
+            _tool_call_response("edit_file_tool", {"path": "@portal/export.ts", "target_content": "x = 1", "replacement_content": "x = 2"}, "c1"),
+            _tool_call_response("edit_file_tool", {"path": "Search.java", "target_content": "{}", "replacement_content": "{ int n; }"}, "c2"),
+            _tool_call_response("write_file_tool", {"path": "Other.java", "content": "class Other {}\n"}, "c3"),
+            _text_response("fixed"),
+        ]),
+    )
+
+    await run_dev(
+        plan={"files_to_modify": [{"path": "README.md"}]}, context_bundle={}, worktree_path=git_repo, project_path=git_repo,
+        default_label="api", repo_roots={"api": git_repo, "portal": str(portal)},
+        story_worktrees={"portal": {"repo_path": git_repo, "worktree_path": str(portal), "branch": "feat/p"}},
+    )
+
+    assert (portal / "export.ts").read_text() == "export const x = 2;\n"
+    assert open(f"{git_repo}/Search.java").read() == "class Search { int n; }\n"
+    assert not os.path.exists(f"{git_repo}/Other.java")  # neither planned nor the story's: still refused

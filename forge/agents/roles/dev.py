@@ -21,6 +21,7 @@ from typing import Any
 from forge.tools import language_hooks
 from forge.tools.git_tools import list_changed_files, stage_files
 from forge.tools.grep import read_file
+from forge.tools.workspace import Workspace
 
 DEV_SYSTEM_LOOP_CORE = """You are a senior software developer implementing an approved plan in a git worktree.
 You work iteratively by calling tools. Analyze your progress after each tool result and decide what to do next.
@@ -30,7 +31,8 @@ you created and modified — do not call any more tools.
 CRITICAL — Issue independent tool calls TOGETHER in a single turn:
 - You can return SEVERAL tool calls in one response. Any calls that do not depend on each other's results MUST go out together.
 - Creating planned files: when the plan lists several files to create and you know what goes in them, issue ALL those "write_file" calls in ONE turn. Do NOT write one file per turn.
-- Exploring: issue all the "read_file" / "search_codebase" calls you need at once rather than one at a time.
+- Exploring: issue all the "outline_file" / "read_file" / "search_codebase" / "find_files" calls you need at once rather than one at a time.
+- To see what is in a folder or find a file by name, use "find_files" (e.g. 'some/folder/*' or '**/*.ext'). The shell ("run_command") cannot list, find or read files and takes no pipes — do not try ls, find, grep or cat there.
 - Only split across turns when a call genuinely needs an earlier call's result (e.g. read a file, then edit it based on what you read).
 - Every extra turn re-sends the entire conversation so far, so one turn with five calls costs far less than five turns with one call.
 
@@ -41,7 +43,17 @@ Rules:
 - Ensure "target_content" matches a block in the file. Whitespace differences (trailing spaces, indentation) are tolerated, but the block must be unique unless you pass allow_multiple.
 - Verify your code compiles with the "analyze_changed_files" tool after a batch of changes — you do NOT need to analyze after every single edit.
 - If compile errors are found, fix them iteratively or rollback files to undo mistakes using "roll_back_file".
-- For a large file where you only need to see one method/widget/class, pass "offset"/"limit" to "read_file" to read just that range instead of the whole file.
+- "read_file" serves at most 250 lines per call. Before reading a file you have not seen, call "outline_file" — its classes and methods with line numbers — or "search_codebase" to find the lines you need, then pass "offset"/"limit" to read just that range; page with the offset the response header gives you.
+- Never re-issue a tool call with the same arguments as your previous turn — the repeated call is rejected. If the last result was not enough, change what you ask for.
+- Every turn should move the implementation forward. After a few turns of only reading and searching, start editing; a run that keeps reading without editing is stopped early.
+- If a file the plan says to MODIFY already does what the ticket needs, do not edit it: call "declare_already_satisfied" with the specific reason (what the file already contains). NEVER add a comment, rename or reformat just to make a planned file count as changed — that is worse than declaring it satisfied, and the reviewer sees your declaration and checks it. Only files the plan modifies qualify; a file to create must be written.
+
+CRITICAL — the progress checklist:
+- A PROGRESS CHECKLIST appears at the end of every message you receive. It is the authoritative record of what remains, and it is yours to maintain.
+- Call "update_progress" the moment a file's state changes: to "doing" when you start on it, to "done" once it is written AND analyze passes for it. Batch several files into one call.
+- Do NOT mark a file done because you intend to write it. Done means the edit landed.
+- Updating the checklist is bookkeeping, not progress. It does not substitute for editing files, and a run that only updates its checklist is still treated as making no progress.
+- When every entry is done and analyze passes, stop calling tools and reply with your plain-text summary.
 
 CRITICAL — Scope discipline (ENFORCED: the tool layer rejects out-of-scope writes/edits and blocked commands):
 - ONLY create or modify files that are listed in the approved plan (files_to_create, files_to_modify).
@@ -85,7 +97,6 @@ def _format_skills_block(skills: list[dict[str, str]] | None) -> str:
 
 _FIX_MODE_FILE_CAP = 8_000
 _FIX_MODE_MAX_FILES = 4
-
 
 def _norm_rel(path: str) -> str:
     return os.path.normpath(str(path).strip().lstrip("/")).replace("\\", "/")
@@ -186,27 +197,50 @@ def _build_iteration_brief(
     return "\n".join(lines)
 
 
-def _finalize_dev_changes(worktree_path: str, plan: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Stage changed files and run any post-edit codegen step each
-    detected language's profile needs (e.g. Dart's build_runner — most
-    languages, including Java, don't have one). Returns (file_changes,
-    dev_verify_state) — dev_verify_state is `{profile_key: state}`, fed
-    back into the verifier as VerifyContext.prior_state per profile."""
-    changed_files = list_changed_files(worktree_path)
+def _finalize_dev_changes(
+    write_roots: dict[str, str], plan: dict[str, Any], default_label: str = ""
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Stage changed files and run any post-edit codegen step each detected
+    language's profile needs (e.g. Dart's build_runner — most languages,
+    including Java, don't have one), in EVERY repo the plan writes.
+
+    Returns (file_changes, dev_verify_state). file_changes carries paths in
+    display form (`@api/x.py` for a non-default repo) so the verifier and
+    the gate can route each one back to the repo it belongs to.
+    dev_verify_state is `{repo_label: {profile_key: state}}` when the story
+    spans repos, and the historical `{profile_key: state}` when it does not
+    — a single-repo run's shape is unchanged."""
+    workspace = Workspace(default_label=default_label, roots=dict(write_roots))
     file_changes: list[dict[str, Any]] = []
-    dev_verify_state: dict[str, Any] = {}
+    per_repo_state: dict[str, Any] = {}
 
-    if not changed_files:
-        return file_changes, dev_verify_state
+    create_paths = {
+        _norm_rel(f.get("path") if isinstance(f, dict) else str(f))
+        for f in plan.get("files_to_create", [])
+        if (f.get("path") if isinstance(f, dict) else f)
+    }
 
-    stage_files(worktree_path, changed_files)
-    for profile in language_hooks.detect_profiles(worktree_path):
-        if profile.after_dev_changes is None:
+    for label, root in workspace.read_roots():
+        changed_files = list_changed_files(root)
+        if not changed_files:
             continue
-        dev_verify_state[profile.key] = profile.after_dev_changes(worktree_path, changed_files)
+        stage_files(root, changed_files)
 
-    create_paths = [f.get("path") for f in plan.get("files_to_create", [])]
-    for path in changed_files:
-        action_type = "create" if path in create_paths else "modify"
-        file_changes.append({"path": path, "action": action_type, "summary": "Updated iteratively by agentic dev loop"})
-    return file_changes, dev_verify_state
+        repo_state: dict[str, Any] = {}
+        for profile in language_hooks.detect_profiles(root):
+            if profile.after_dev_changes is None:
+                continue
+            repo_state[profile.key] = profile.after_dev_changes(root, changed_files)
+        if repo_state:
+            per_repo_state[label] = repo_state
+
+        for path in changed_files:
+            display = workspace.display_path(label, path)
+            action_type = "create" if _norm_rel(display) in create_paths else "modify"
+            file_changes.append(
+                {"path": display, "action": action_type, "summary": "Updated iteratively by agentic dev loop"}
+            )
+
+    if len(workspace.roots) <= 1:
+        return file_changes, per_repo_state.get(default_label, {})
+    return file_changes, per_repo_state

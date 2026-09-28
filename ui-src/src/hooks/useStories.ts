@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "../lib/api";
+import { api, type ClarificationAnswerInput } from "../lib/api";
 import { queryKeys } from "../lib/queryClient";
-import type { ActivityEvent } from "../types/api";
+import type { ActivityEvent, ExternalChangeAction } from "../types/api";
 
 // Every story mutation ends with the same refresh the vanilla page did after
 // each fetch — re-pull this project's epic list so waves/statuses/gates
@@ -24,6 +24,24 @@ export function useApproveStory(projectId: number) {
   });
 }
 
+export function useAnswerStoryQuestions(projectId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ storyKey, answers }: { storyKey: string; answers: ClarificationAnswerInput[] }) =>
+      api.answerStoryQuestions(storyKey, answers),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) }),
+  });
+}
+
+export function usePickPriorBranch(projectId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ storyKey, repoLabel, branch }: { storyKey: string; repoLabel: string; branch: string | null }) =>
+      api.pickPriorBranch(storyKey, repoLabel, branch),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) }),
+  });
+}
+
 export function useRetryStory(projectId: number) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -32,10 +50,37 @@ export function useRetryStory(projectId: number) {
   });
 }
 
+export function useReplanStory(projectId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (storyKey: string) => api.replanStory(storyKey),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) }),
+  });
+}
+
+export function useCancelStory(projectId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (storyKey: string) => api.cancelStory(storyKey),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) }),
+  });
+}
+
 export function useSetStoryKind(projectId: number) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ storyKey, kind }: { storyKey: string; kind: string }) => api.setStoryKind(storyKey, kind),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) }),
+  });
+}
+
+export function useResolveExternalChange(projectId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ storyKey, action }: { storyKey: string; action: ExternalChangeAction }) =>
+      api.resolveExternalChange(storyKey, action),
+    // A re-plan moves the story back to pending, so the whole epic list is
+    // refreshed, not just the flag.
     onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) }),
   });
 }
@@ -120,5 +165,16 @@ export function useStoryUsage(storyKey: string | null) {
     queryKey: queryKeys.storyUsage(storyKey ?? ""),
     queryFn: () => api.getStoryUsage(storyKey as string),
     enabled: storyKey != null,
+  });
+}
+
+// Reopens the story's LangGraph checkpoint server-side — not free, so this
+// is only fetched while the story detail dialog is actually open
+// (`enabled`), same convention as useStoryActivity.
+export function useStoryPlan(storyKey: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.storyPlan(storyKey ?? ""),
+    queryFn: () => api.getStoryPlan(storyKey as string),
+    enabled: enabled && storyKey != null,
   });
 }

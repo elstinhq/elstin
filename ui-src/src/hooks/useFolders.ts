@@ -2,14 +2,40 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { queryKeys } from "../lib/queryClient";
 
+// A folder's subfolders for the folder picker. Not cached across opens:
+// what is on disk changes, and the picker is opened on purpose.
+export function useBrowseFolder(path: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ["browse-folder", path ?? ""],
+    queryFn: () => api.browseFolder(path),
+    enabled,
+    staleTime: 0,
+    gcTime: 0,
+    retry: false,
+  });
+}
+
 export function useProjectRepos(projectId: number) {
   return useQuery({ queryKey: queryKeys.projectRepos(projectId), queryFn: () => api.listProjectRepos(projectId) });
 }
 
-export function useCloneProjectRepo(projectId: number) {
+export function useAddProjectRepo(projectId: number) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (url: string) => api.cloneProjectRepo(projectId, { url }),
+    mutationFn: (body: { url?: string; path?: string; kind?: "repo" | "reference"; read_only?: boolean }) =>
+      api.addProjectRepo(projectId, body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.projectRepos(projectId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) });
+    },
+  });
+}
+
+export function useSetRepoReadOnly(projectId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ repoId, readOnly }: { repoId: number; readOnly: boolean }) =>
+      api.setProjectRepoReadOnly(projectId, repoId, readOnly),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.projectRepos(projectId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) });
@@ -25,5 +51,27 @@ export function useRemoveProjectRepo(projectId: number) {
       queryClient.invalidateQueries({ queryKey: queryKeys.projectRepos(projectId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) });
     },
+  });
+}
+
+export function useRepoGuide(projectId: number, repoId: number) {
+  return useQuery({ queryKey: queryKeys.repoGuide(projectId, repoId), queryFn: () => api.getRepoGuide(projectId, repoId) });
+}
+
+// Both mutations answer with the guide as it now stands, so the cache is set
+// from the response instead of refetched.
+export function useGenerateRepoGuide(projectId: number, repoId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.generateRepoGuide(projectId, repoId),
+    onSuccess: (guide) => queryClient.setQueryData(queryKeys.repoGuide(projectId, repoId), guide),
+  });
+}
+
+export function useSaveRepoGuide(projectId: number, repoId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (content: string) => api.saveRepoGuide(projectId, repoId, content),
+    onSuccess: (guide) => queryClient.setQueryData(queryKeys.repoGuide(projectId, repoId), guide),
   });
 }

@@ -84,6 +84,23 @@ def test_get_story_exposes_kind_and_its_reason(epic):
     assert "kind_reason" in story
 
 
+def test_get_story_exposes_run_outcome_once_dispatched(epic):
+    from forge.services.usage import record_run_outcome
+
+    with _client() as client:
+        # Never dispatched: no thread_id yet, nothing to report.
+        assert client.get("/api/stories/ENG-2").json()["run_outcome"] is None
+
+    epic.set_story_thread_id("ENG-2", "ENG-2")
+    record_run_outcome("ENG-2", dev_passes=4, gate_runs=4, gate_failures=3, verifier_runs=1, outcome="failed")
+
+    with _client() as client:
+        run_outcome = client.get("/api/stories/ENG-2").json()["run_outcome"]
+    assert run_outcome["dev_passes"] == 4
+    assert run_outcome["gate_failures"] == 3
+    assert run_outcome["outcome"] == "failed"
+
+
 def test_retry_story_redispatches_a_run_failure(epic):
     epic.set_epic_phase("ENG-1", "failed")
     epic.set_story_status("ENG-2", "failed", failure_stage="run")
@@ -99,7 +116,6 @@ def test_retry_story_redispatches_a_run_failure(epic):
 
 
 def test_retry_story_reattempts_a_merge_failure(epic):
-    epic.set_story_gate_approved("ENG-2", True)
     epic.set_story_status("ENG-2", "failed", failure_stage="merge")
 
     with _client() as client:
@@ -107,8 +123,8 @@ def test_retry_story_reattempts_a_merge_failure(epic):
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "awaiting_pr_review"
-    assert body["gate_approved"] is False
+    assert body["status"] == "ready_to_merge"
+    assert body["merge_attempts"] == 0
 
 
 def test_retry_non_failed_story_is_refused(epic):
@@ -121,9 +137,97 @@ def test_retry_non_failed_story_is_refused(epic):
     assert epic.get_story("ENG-2")["status"] == "dispatched"  # unchanged
 
 
+def test_replan_discards_a_plan_waiting_for_approval_and_keeps_the_answers(epic):
+    """"Not this plan", short of approving it. MKT2-866's answer (leave out
+    Webshop ID) is a decision the new plan must follow, so it stays."""
+    answers = [{"question": "Include Webshop ID?", "option_label": "No", "option_description": None}]
+    epic.set_story_clarification_answers("ENG-2", answers)
+    epic.set_story_status("ENG-2", "awaiting_plan_approval", parked_reason="plan_approval_gate")
+
+    with _client() as client:
+        response = client.post("/api/stories/ENG-2/replan")
+
+    assert response.status_code == 200
+    story = epic.get_story("ENG-2")
+    assert story["status"] == "pending" and story["gate_approved"] is False
+    assert story["clarification_answers"] == answers
+
+
+def test_replan_is_refused_once_a_plan_is_past_approval(epic):
+    epic.set_story_status("ENG-2", "dispatched")
+
+    with _client() as client:
+        response = client.post("/api/stories/ENG-2/replan")
+
+    assert response.status_code == 409 and "only a story waiting on plan approval" in response.json()["detail"]
+    assert epic.get_story("ENG-2")["status"] == "dispatched"
+
+
 def test_retry_unknown_story_is_a_404():
     with _client() as client:
         response = client.post("/api/stories/ENG-999/retry")
+    assert response.status_code == 404
+
+
+_QUESTIONS = [
+    {
+        "id": "q0", "question": "Which store should own the cart total?", "context": "seen in cart.ts",
+        "options": [
+            {"id": "A", "label": "Redux", "description": "the existing global store"},
+            {"id": "B", "label": "Local component state", "description": None},
+        ],
+    },
+]
+
+
+def test_answering_a_clarification_question_resolves_it_and_clears_the_gate(epic):
+    epic.set_story_status("ENG-2", "awaiting_plan_approval")
+    epic.set_story_clarification_questions("ENG-2", _QUESTIONS)
+
+    with _client() as client:
+        response = client.post("/api/stories/ENG-2/answer", json={"answers": [{"question_id": "q0", "option_id": "A"}]})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["clarification_questions"] == []
+    assert body["clarification_answers"] == [
+        {"question": "Which store should own the cart total?", "option_label": "Redux", "option_description": "the existing global store"},
+    ]
+    assert body["gate_approved"] is True
+
+
+def test_answering_with_no_pending_questions_is_refused(epic):
+    with _client() as client:
+        response = client.post("/api/stories/ENG-2/answer", json={"answers": [{"question_id": "q0", "option_id": "A"}]})
+
+    assert response.status_code == 409
+
+
+def test_answering_leaves_a_missing_question_unanswered_as_a_422(epic):
+    epic.set_story_clarification_questions("ENG-2", _QUESTIONS)
+
+    with _client() as client:
+        response = client.post("/api/stories/ENG-2/answer", json={"answers": []})
+
+    assert response.status_code == 422
+    assert "q0" in response.json()["detail"]
+    # Nothing committed on a rejected, partial submission.
+    assert epic.get_story("ENG-2")["clarification_questions"] == _QUESTIONS
+
+
+def test_answering_with_an_option_the_question_never_offered_is_a_422(epic):
+    epic.set_story_clarification_questions("ENG-2", _QUESTIONS)
+
+    with _client() as client:
+        response = client.post("/api/stories/ENG-2/answer", json={"answers": [{"question_id": "q0", "option_id": "Z"}]})
+
+    assert response.status_code == 422
+    assert epic.get_story("ENG-2")["clarification_questions"] == _QUESTIONS
+
+
+def test_answer_unknown_story_is_a_404():
+    with _client() as client:
+        response = client.post("/api/stories/ENG-999/answer", json={"answers": []})
     assert response.status_code == 404
 
 
@@ -186,15 +290,13 @@ def test_sync_story_404_when_jira_ticket_missing(epic, monkeypatch: pytest.Monke
 @pytest.fixture()
 def manual_run_epic(project_id, git_repo, tmp_path) -> StateManager:
     """A one-story, one-level epic under a project with auto_run_enabled
-    off and every approval gate off too, wired to a real repo — nothing
+    off and plan approval off too, wired to a real repo — nothing
     dispatches it except an explicit POST .../start."""
     from forge.config.store import set_config, set_project_config
 
     set_config("worktrees_base_dir", str(tmp_path / "worktrees"))
     set_project_config(project_id, "auto_run_enabled", "false")
     set_project_config(project_id, "require_plan_approval", "false")
-    set_project_config(project_id, "require_pr_open_approval", "false")
-    set_project_config(project_id, "require_pr_review", "false")
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2"]], manual_gate=False)
@@ -210,8 +312,8 @@ def test_start_story_dispatches_a_pending_story(manual_run_epic):
 
     assert response.status_code == 200
     assert response.json()["triggered"] == "DispatchStory"
-    # Every gate is off, so the run doesn't stop until the PR-open gate.
-    assert manual_run_epic.get_story("ENG-2")["status"] == "awaiting_pr_open"
+    # Plan approval is off, so the run goes straight through to merge-ready.
+    assert manual_run_epic.get_story("ENG-2")["status"] == "ready_to_merge"
 
 
 def test_start_story_blocked_when_epic_on_hold(epic):
@@ -233,7 +335,7 @@ def test_start_story_blocked_for_a_later_unresolved_level(manual_run_epic):
         response = client.post("/api/stories/ENG-3/start")
 
     assert response.status_code == 409
-    assert "earlier_level_unresolved" in response.json()["detail"]
+    assert "waiting_on_dependencies" in response.json()["detail"]
 
 
 def test_start_unknown_story_is_a_404():
@@ -243,10 +345,10 @@ def test_start_unknown_story_is_a_404():
 
 
 def test_approve_drives_a_manual_run_story_to_the_next_gate(manual_run_epic, monkeypatch: pytest.MonkeyPatch):
-    """With every auto-approval gate off, dispatch alone already reaches
-    the terminal awaiting_pr_open state (see test_start_story_dispatches_a_
-    pending_story), so this exercises the approve-triggers-immediately path
-    by turning the plan-approval gate back on for just this scenario."""
+    """With plan approval off, dispatch alone already reaches ready_to_merge
+    (see test_start_story_dispatches_a_pending_story), so this exercises the
+    approve-triggers-immediately path by turning the plan-approval gate back
+    on for just this scenario."""
     from forge.config.store import set_project_config
 
     project_id = manual_run_epic.get_epic("ENG-1")["project_id"]
@@ -261,9 +363,8 @@ def test_approve_drives_a_manual_run_story_to_the_next_gate(manual_run_epic, mon
 
     assert approve_response.status_code == 200
     # No poll loop runs for this project — approve had to drive the resume
-    # itself, landing straight on awaiting_pr_open (the other two gates are
-    # still off).
-    assert manual_run_epic.get_story("ENG-2")["status"] == "awaiting_pr_open"
+    # itself, landing on ready_to_merge.
+    assert manual_run_epic.get_story("ENG-2")["status"] == "ready_to_merge"
     assert manual_run_epic.get_story("ENG-2")["gate_approved"] is False
 
 

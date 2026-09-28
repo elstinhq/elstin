@@ -8,6 +8,13 @@ that, whichever gate currently applies (plan-approval, PR-open, or
 PR-review; a story only ever waits on one at a time). The next daemon poll
 cycle picks it up — no separate "resume" action needed.
 
+Clarification: a plan-approval gate sometimes carries a question instead of
+a finished plan — the planner asks when a design decision is genuinely
+ambiguous (forge/agents/roles/planner.py). POST /{key}/answer is how a
+human resolves it: every pending question must be answered in one call,
+which clears the same plan-approval gate /approve does and feeds the
+resolved answers back into the next resume instead of asking again.
+
 Kind override: forge guesses at sync time whether a ticket is
 implementation or validation work (forge/services/story_kind.py), and that
 guess reads free-text prose, so it can be wrong. This is how a human fixes
@@ -23,16 +30,43 @@ that replays the run's history, then pushes each new event the moment it
 is written (forge/services/activity_stream.py) instead of leaving the UI a
 poll interval behind the agent.
 
+Repo override: an epic is assigned one repo as its default, but a
+project whose repos are split by concern can carry an API story and a UI
+story under one epic. This is how a human points one story at a different
+repo — the one that gets its worktree, branch, commit and pull request.
+See forge/tools/workspace.py.
+
 Ticket refresh: epic re-sync deliberately leaves existing summary/
 description alone (progress must not be rewritten by a tree walk). This
 endpoint is the explicit escape hatch — pull latest JIRA prose for one
 story without touching kind, status, or wave.
+
+Prior work: before a story's branch is made, the daemon looks for branches
+that already carry its key (forge/services/prior_work.py). Where several
+carry diverged work and none contains the others, forge does not guess which
+to build on: the story waits. POST /{key}/prior-work is the answer — a
+branch the lookup offered for that repo, or `null` to start fresh.
+
+Re-plan: POST /{key}/replan throws away a plan waiting for approval and
+plans the story again from scratch — the way to say "not this plan" short
+of approving it. The person's answers to earlier questions are kept: they
+are decisions, and the fresh run is given them (forge/daemon/main.py).
+
+Plan: the planner's structured plan (feature_summary, plan_markdown,
+files_to_create/modify, acceptance_criteria, ...) lives only inside the
+story's LangGraph checkpoint (forge/db/models/gameplan.py's docstring on
+why forge doesn't duplicate it into Postgres) — once a human clears the
+plan-approval gate there was previously no way to read it back short of
+scrolling the activity feed. GET /{key}/plan reopens that checkpoint by
+thread_id and returns the `plan` key from its state, same mechanism
+forge/daemon/main.py's dispatch_story resume path already uses.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -40,12 +74,14 @@ from jira import JIRAError
 from pydantic import BaseModel
 
 from forge.config.store import resolve_bool_config
-from forge.daemon.main import check_story_action, execute_story_action
+from forge.daemon.main import cancel_run, check_story_action, execute_story_action, live_run_keys
+from forge.db.engine import get_database_url
+from forge.orchestration.graph import checkpointer_from_url, compile_graph
 from forge.orchestration.reconciler import Blocked
 from forge.services.activity_stream import iter_events
 from forge.services.epic_sync import relevel_epic, sync_story_from_jira
-from forge.services.run_activity import list_activity
-from forge.services.usage import get_story_usage
+from forge.services.run_activity import append_activity, list_activity
+from forge.services.usage import get_run_outcome, get_story_usage
 from forge.state.manager import StateManager
 
 router = APIRouter(prefix="/api/stories", tags=["stories"])
@@ -53,13 +89,50 @@ router = APIRouter(prefix="/api/stories", tags=["stories"])
 _VALID_KINDS = ("dev", "qa")
 
 
+class StoryRepoRequest(BaseModel):
+    # Null clears the override, so the story goes back to the epic's repo.
+    project_repo_id: int | None = None
+
+
 class StoryKindRequest(BaseModel):
     kind: str
+
+
+class ExternalChangeRequest(BaseModel):
+    # accept: take the new text, keep the plan. replan: take it and start
+    # over. dismiss: keep the current text and stop flagging this version.
+    action: Literal["accept", "replan", "dismiss"]
+
+
+class ClarificationAnswer(BaseModel):
+    question_id: str
+    option_id: str
+
+
+class PriorBranchPickRequest(BaseModel):
+    repo_label: str
+    # A branch the prior-work lookup offered for that repo, or None to start
+    # fresh from the epic branch.
+    branch: str | None = None
+
+
+class ClarificationAnswerRequest(BaseModel):
+    answers: list[ClarificationAnswer]
 
 
 def _story_with_pr(sm: StateManager, story_key: str) -> dict:
     story = sm.get_story(story_key) or {}
     story["pull_request"] = sm.get_pull_request(story_key)
+    # thread_id == run_id == story_key by construction (forge/orchestration/
+    # graph.py). None until the story's first dispatch. The counters
+    # accumulate across every retry under this run_id (forge/services/
+    # usage.py's record_run_outcome), so on a story that has retried, this
+    # is the run's lifetime total, not just the latest attempt — the
+    # distinction the UI actually needs (dev wrote real code vs. the run
+    # never got past planning) holds either way: a fresh "run"-stage
+    # failure only ever accumulates from the attempt that produced it,
+    # since retry_story's "run" recovery path is a full redispatch.
+    story["run_outcome"] = get_run_outcome(story_key) if story.get("thread_id") else None
     return story
 
 
@@ -79,6 +152,27 @@ def _maybe_trigger_manual_run(sm: StateManager, story_key: str, background_tasks
     result = check_story_action(sm, epic, story_key)
     if not isinstance(result, Blocked):
         background_tasks.add_task(execute_story_action, sm, epic, result)
+
+
+@router.post("/{story_key}/prior-work")
+def pick_prior_branch(story_key: str, body: PriorBranchPickRequest) -> dict:
+    """Which of the diverged branches found for this ticket its work
+    continues from, in one repo — or none (`branch: null`). Only while the
+    story has not started: once its branch exists, what it started from is
+    history. Nothing is dispatched from here; the story becomes ready like
+    any other (the next poll, or Start in a manual-run project)."""
+    sm = StateManager()
+    story = sm.get_story(story_key)
+    if story is None:
+        raise HTTPException(status_code=404, detail=f"No such story: {story_key}")
+    if story["status"] not in ("pending", "skipped") or story.get("branch"):
+        raise HTTPException(status_code=409, detail=f"{story_key} has already started; its branch exists")
+    finding = ((story.get("prior_work") or {}).get("repos") or {}).get(body.repo_label)
+    if not finding:
+        raise HTTPException(status_code=404, detail=f"No prior work was found for {story_key} in {body.repo_label}")
+    if not sm.pick_story_prior_branch(story_key, body.repo_label, body.branch):
+        raise HTTPException(status_code=422, detail=f"{body.branch!r} is not a branch found for {story_key} in {body.repo_label}")
+    return sm.get_story(story_key)
 
 
 @router.post("/{story_key}/start")
@@ -111,6 +205,88 @@ def approve_story(story_key: str, background_tasks: BackgroundTasks) -> dict:
     return {"story_key": story_key, "gate_approved": True}
 
 
+@router.post("/{story_key}/replan")
+def replan_story(story_key: str, background_tasks: BackgroundTasks) -> dict:
+    """Plan a story waiting for approval again, keeping its answers — see
+    this module's docstring."""
+    sm = StateManager()
+    story = sm.get_story(story_key)
+    if story is None:
+        raise HTTPException(status_code=404, detail=f"No such story: {story_key}")
+    if story_key in live_run_keys() or not sm.send_back_to_planning(story_key, keep_answers=True):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{story_key} is {story['status']} — only a story waiting on plan approval can be re-planned",
+        )
+    append_activity(story_key, type="status", phase="system", title="Re-plan requested: the plan is made again")
+    _maybe_trigger_manual_run(sm, story_key, background_tasks)
+    return _story_with_pr(sm, story_key)
+
+
+@router.post("/{story_key}/answer")
+def answer_story_questions(story_key: str, body: ClarificationAnswerRequest, background_tasks: BackgroundTasks) -> dict:
+    """A human's answer to the planner's clarification questions (see
+    forge/agents/roles/planner.py's CLARIFICATION QUESTIONS rules and
+    forge/orchestration/graph.py's `awaiting_clarification`).
+
+    The reconciler cannot tell this state apart from an ordinary
+    plan-approval gate — both collapse to "awaiting_plan_approval"
+    (forge/daemon/main.py's _GRAPH_STATUS_TO_STORY_STATUS) — so
+    set_story_clarification_answers clears the same gate /approve does,
+    and the next resume feeds the resolved answers back into the planner
+    (forge/daemon/main.py's resume patch) instead of asking again.
+
+    Every pending question must be answered in one call: the planner
+    prompt only has an all-or-nothing "clarification answers provided"
+    branch (forge/agents/roles/planner.py), so a partial set would either
+    be silently ignored or produce a plan reasoning from an answer that was
+    never given."""
+    sm = StateManager()
+    story = sm.get_story(story_key)
+    if story is None:
+        raise HTTPException(status_code=404, detail=f"No such story: {story_key}")
+    pending = story.get("clarification_questions") or []
+    if not pending:
+        raise HTTPException(status_code=409, detail=f"{story_key} has no pending clarification questions")
+
+    by_id = {q["id"]: q for q in pending}
+    submitted = {a.question_id: a.option_id for a in body.answers}
+    missing = [qid for qid in by_id if qid not in submitted]
+    if missing:
+        raise HTTPException(status_code=422, detail=f"missing answer(s) for question(s): {', '.join(missing)}")
+
+    resolved: list[dict] = []
+    for question_id, option_id in submitted.items():
+        question = by_id.get(question_id)
+        if question is None:
+            raise HTTPException(status_code=422, detail=f"no such question: {question_id}")
+        option = next((o for o in question.get("options") or [] if o.get("id") == option_id), None)
+        if option is None:
+            raise HTTPException(status_code=422, detail=f"{question_id}: no such option {option_id!r}")
+        resolved.append({
+            "question": question.get("question"),
+            "option_label": option.get("label"),
+            "option_description": option.get("description"),
+        })
+
+    sm.set_story_clarification_answers(story_key, resolved)
+    _maybe_trigger_manual_run(sm, story_key, background_tasks)
+    return _story_with_pr(sm, story_key)
+
+
+@router.post("/{story_key}/cancel")
+async def cancel_story_run(story_key: str) -> dict:
+    """Stop a story's run in flight. The story is left failed ("cancelled"), so
+    Retry starts it over and Remove clears it. `async` on purpose: cancelling an
+    asyncio task has to happen on the event loop's own thread."""
+    sm = StateManager()
+    if sm.get_story(story_key) is None:
+        raise HTTPException(status_code=404, detail=f"No such story: {story_key}")
+    if not await cancel_run(story_key):
+        raise HTTPException(status_code=409, detail=f"{story_key} has no run in progress")
+    return _story_with_pr(sm, story_key)
+
+
 @router.post("/{story_key}/retry")
 def retry_story(story_key: str, background_tasks: BackgroundTasks) -> dict:
     """Recovers a story the reconciler halted the whole epic on (any
@@ -132,6 +308,28 @@ def retry_story(story_key: str, background_tasks: BackgroundTasks) -> dict:
         )
     sm.retry_story(story_key)
     _maybe_trigger_manual_run(sm, story_key, background_tasks)
+    return _story_with_pr(sm, story_key)
+
+
+@router.post("/{story_key}/external-change")
+def resolve_external_change(story_key: str, body: ExternalChangeRequest, background_tasks: BackgroundTasks) -> dict:
+    """A human's answer to a ticket that changed in its source after forge
+    planned or started the story — see forge/services/external_sync.py for
+    why it was held rather than applied."""
+    sm = StateManager()
+    story = sm.get_story(story_key)
+    if story is None:
+        raise HTTPException(status_code=404, detail=f"No such story: {story_key}")
+    if story["external_pending"] is None:
+        raise HTTPException(status_code=409, detail=f"{story_key} has no changed-in-source text waiting")
+    try:
+        sm.resolve_external_change(story_key, body.action)
+    except ValueError as exc:  # a re-plan was asked for while work is in flight
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if body.action == "replan":
+        # A re-planned story goes back to pending; for a manual-mode project
+        # nothing else will start it (same as retry).
+        _maybe_trigger_manual_run(sm, story_key, background_tasks)
     return _story_with_pr(sm, story_key)
 
 
@@ -165,6 +363,42 @@ def set_story_kind(story_key: str, body: StoryKindRequest) -> dict:
     return {"story_key": story_key, "kind": body.kind, "epic_key": story["epic_key"], "levels": levels}
 
 
+@router.put("/{story_key}/repo")
+def set_story_repo(story_key: str, body: StoryRepoRequest) -> dict:
+    """Point one story at a specific repo on its project, or clear the
+    override with a null so it inherits the epic's."""
+    sm = StateManager()
+    story = sm.get_story(story_key)
+    if story is None:
+        raise HTTPException(status_code=404, detail=f"No such story: {story_key}")
+    if story["parent_key"]:
+        # A sub-task is never dispatched, so it has no worktree of its own
+        # to place — it rides along with its parent's.
+        raise HTTPException(
+            status_code=409,
+            detail=f"{story_key} is a sub-task of {story['parent_key']} — set the repo on the parent story instead",
+        )
+    if story["status"] != "pending":
+        # The worktree, branch and any open PR already live in the old
+        # repo. Moving the target underneath them would orphan all three.
+        raise HTTPException(
+            status_code=409,
+            detail=f"{story_key} is already {story['status']} — only a pending story can change repo",
+        )
+
+    epic = sm.get_epic(story["epic_key"])
+    if body.project_repo_id is not None:
+        project_repo = sm.get_project_repo(body.project_repo_id)
+        if project_repo is None or project_repo["project_id"] != epic["project_id"]:
+            raise HTTPException(
+                status_code=400,
+                detail="project_repo_id must be a repo belonging to this story's project",
+            )
+
+    sm.set_story_project_repo(story_key, body.project_repo_id)
+    return {"story_key": story_key, **{k: sm.get_story(story_key)[k] for k in ("project_repo_id", "repo")}}
+
+
 @router.post("/{story_key}/sync")
 def sync_story(story_key: str) -> dict:
     """Refresh summary/description from JIRA for one already-synced story."""
@@ -186,10 +420,9 @@ def sync_story(story_key: str) -> dict:
 @router.get("/{story_key}")
 def get_story(story_key: str) -> dict:
     sm = StateManager()
-    story = sm.get_story(story_key)
-    if story is None:
+    if sm.get_story(story_key) is None:
         raise HTTPException(status_code=404, detail=f"No such story: {story_key}")
-    return story
+    return _story_with_pr(sm, story_key)
 
 
 @router.get("/{story_key}/activity")
@@ -287,3 +520,32 @@ def get_story_usage_route(story_key: str) -> dict:
     if sm.get_story(story_key) is None:
         raise HTTPException(status_code=404, detail=f"No such story: {story_key}")
     return get_story_usage(story_key)
+
+
+@router.get("/{story_key}/plan")
+async def get_story_plan(story_key: str) -> dict:
+    """The planner's plan for this story, read back from its LangGraph
+    checkpoint by thread_id (see this module's docstring). `plan` is null
+    before a run has been dispatched at all, and also for a "qa" story,
+    which never runs a planner node."""
+    sm = StateManager()
+    story = sm.get_story(story_key)
+    if story is None:
+        raise HTTPException(status_code=404, detail=f"No such story: {story_key}")
+    thread_id = story.get("thread_id")
+    if not thread_id:
+        return {"story_key": story_key, "plan": None}
+
+    config = {"configurable": {"thread_id": thread_id}}
+    # require_plan_approval only affects where the graph would interrupt on
+    # an actual invoke — irrelevant to a plain state read.
+    async with checkpointer_from_url(get_database_url()) as checkpointer:
+        graph = compile_graph(checkpointer, require_plan_approval=False)
+        snapshot = await graph.aget_state(config)
+
+    # initial_state() seeds "plan" as {} before the planner node has ever
+    # run — falsy either way, so a plain truthiness check covers both "no
+    # run yet" and "run started but hasn't reached the planner" the same
+    # way as the no-thread_id case above.
+    plan = (snapshot.values or {}).get("plan") or None
+    return {"story_key": story_key, "plan": plan}

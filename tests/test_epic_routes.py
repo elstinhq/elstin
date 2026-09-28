@@ -31,7 +31,7 @@ def test_list_epics_includes_stories_and_pr_state(project_id):
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2"]])
     sm.create_story("ENG-2", epic_key="ENG-1", wave=0, summary="Add a widget")
-    sm.set_story_status("ENG-2", "awaiting_pr_review")
+    sm.set_story_status("ENG-2", "ready_to_merge")
     sm.upsert_pull_request("ENG-2", number=7, url="https://github.com/acme/widgets/pull/7", state="open")
 
     with _client() as client:
@@ -41,8 +41,12 @@ def test_list_epics_includes_stories_and_pr_state(project_id):
         assert len(epics[0]["stories"]) == 1
         story = epics[0]["stories"][0]
         assert story["jira_key"] == "ENG-2"
-        assert story["status"] == "awaiting_pr_review"
-        assert story["pull_request"] == {"story_key": "ENG-2", "number": 7, "url": "https://github.com/acme/widgets/pull/7", "state": "open"}
+        assert story["status"] == "ready_to_merge"
+        # repo_label is "" for a story that wrote only its default repo.
+        assert story["pull_request"] == {
+            "story_key": "ENG-2", "repo_label": "", "number": 7,
+            "url": "https://github.com/acme/widgets/pull/7", "state": "open",
+        }
 
 
 def test_get_epic_by_key(project_id):
@@ -68,9 +72,12 @@ def test_get_epic_404_for_unknown_key():
 def test_sync_epic_returns_epic_shape_with_no_repo(project_id, monkeypatch: pytest.MonkeyPatch):
     from forge.state.manager import StateManager
 
-    def fake_sync(jira_key: str, *, project_id: int) -> None:
+    def fake_sync(jira_key: str, *, project_id: int):
+        from forge.services.external_sync import ReconcileReport
+
         StateManager().create_epic(jira_key, project_id=project_id, levels=[["ENG-2"]])
         StateManager().create_story("ENG-2", epic_key=jira_key, wave=0, summary="Add a widget")
+        return ReconcileReport(epic_key=jira_key)
 
     monkeypatch.setattr(epic_routes, "sync_epic_from_jira", fake_sync)
 
@@ -120,6 +127,27 @@ def test_sync_epic_404_when_jira_ticket_not_found(project_id, monkeypatch: pytes
     with _client() as client:
         response = client.post("/api/epics/sync", json={"jira_key": "NOPE-1", "project_id": project_id})
         assert response.status_code == 404
+
+
+def test_epic_phase_is_read_off_its_stories(project_id):
+    """Nothing ever advances the stored phase past its "planning" default, so
+    an epic whose only story was waiting to open its PR still said planning."""
+    from forge.state.manager import StateManager
+
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2"]])
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0)
+
+    with _client() as client:
+        assert client.get("/api/epics/ENG-1").json()["phase"] == "planning"
+
+        sm.set_story_status("ENG-2", "ready_to_merge")
+        assert client.get("/api/epics/ENG-1").json()["phase"] == "implementing"
+        assert [e["phase"] for e in client.get("/api/epics").json()] == ["implementing"]
+        assert [e["phase"] for e in client.get(f"/api/projects/{project_id}/epics").json()] == ["implementing"]
+
+    # only what is reported changes: the daemon still polls on the stored phase
+    assert sm.get_epic("ENG-1")["phase"] == "planning"
 
 
 def test_sync_epic_fields_refreshes_prose(project_id, monkeypatch: pytest.MonkeyPatch):

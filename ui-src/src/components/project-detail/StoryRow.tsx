@@ -1,16 +1,36 @@
-import { CoverageGapTag, KindTag, PrOpenErrorTag, StatusTagFor } from "../shared/StatusTag";
+import {
+  ClosedExternallyTag,
+  CodeWrittenTag,
+  CoverageGapTag,
+  ExternalChangedTag,
+  GATE_ACTION,
+  KindTag,
+  MergeAttemptsTag,
+  PARKED_REASON_LABEL,
+  PriorWorkTag,
+  ReadOnlyChangesTag,
+  StatusTagFor,
+  WaitingOnTag,
+  unmetDependencies,
+} from "../shared/StatusTag";
 import { Twisty } from "../shared/Twisty";
+import { CancelRunButton } from "./CancelRunButton";
+import { PriorWorkChoiceButton } from "./PriorWorkChoice";
+import { needsChoice } from "../../lib/priorWork";
 import { useApproveStory, useRetryStory, useStartStory } from "../../hooks/useStories";
 import { useToast } from "../../lib/toast";
 import type { Story } from "../../types/api";
 import { Button } from "../ui/button";
 import { cn } from "../../lib/utils";
+import { displayKey } from "../../lib/ticketSource";
 
 interface StoryRowProps {
   projectId: number;
   story: Story;
   subtasks?: Story[];
   isSubtask?: boolean;
+  // Every story's status in the epic, by key — what "waits for …" reads.
+  statusByKey?: Map<string, string>;
   autoRunEnabled: boolean;
   expandedStories: Set<string>;
   onToggleExpand: (key: string) => void;
@@ -22,6 +42,7 @@ export function StoryRow({
   story,
   subtasks = [],
   isSubtask = false,
+  statusByKey = new Map(),
   autoRunEnabled,
   expandedStories,
   onToggleExpand,
@@ -33,8 +54,11 @@ export function StoryRow({
   const { showToast } = useToast();
 
   const isOpen = expandedStories.has(story.jira_key);
-  const parked =
-    story.status === "awaiting_plan_approval" || story.status === "awaiting_pr_open" || story.status === "awaiting_pr_review";
+  const gate = GATE_ACTION[story.status];
+  const waiting = unmetDependencies(story, statusByKey).length > 0;
+  // Several diverged branches and no pick yet: the daemon would refuse to
+  // start it, so Start gives way to Choose branch.
+  const choosing = story.status === "pending" && needsChoice(story.prior_work).length > 0;
 
   return (
     <>
@@ -58,15 +82,27 @@ export function StoryRow({
           <span className="w-4 shrink-0" />
         )}
 
-        <span className={cn("shrink-0 font-mono text-sm", isSubtask ? "w-[70px] opacity-75" : "w-[78px]")}>
-          {story.jira_key}
+        <span className={cn("shrink-0 font-mono text-sm", isSubtask ? "min-w-[70px] opacity-75" : "min-w-[78px]")}>
+          {displayKey(story)}
         </span>
         <KindTag story={story} />
         <CoverageGapTag story={story} />
-        <PrOpenErrorTag story={story} />
         <StatusTagFor status={story.status} />
+        <ReadOnlyChangesTag story={story} />
+        <WaitingOnTag story={story} statusByKey={statusByKey} />
+        <PriorWorkTag story={story} />
+        <MergeAttemptsTag story={story} />
+        <CodeWrittenTag story={story} />
+        <ExternalChangedTag story={story} />
+        <ClosedExternallyTag story={story} />
 
-        {story.parked_reason ? <span className="text-muted-foreground text-xs">({story.parked_reason})</span> : null}
+        {/* A gate reason (plan_approval_gate) only repeats what the status
+            tag and the button already say; any other reason
+            (already_satisfied, closed_externally, ...) is new information
+            and stays. */}
+        {story.parked_reason && !story.parked_reason.endsWith("_gate") ? (
+          <span className="text-muted-foreground text-xs">({PARKED_REASON_LABEL[story.parked_reason] ?? story.parked_reason})</span>
+        ) : null}
 
         <span className="text-muted-foreground w-[34px] shrink-0 text-xs">{`W${story.wave}`}</span>
 
@@ -82,20 +118,15 @@ export function StoryRow({
           <span className="flex-1" />
         )}
 
-        {story.pull_request && story.pull_request.number ? (
-          <Button variant="outline" size="sm" className="shrink-0" asChild>
-            <a href={story.pull_request.url || "#"} target="_blank" rel="noreferrer">
-              #{story.pull_request.number} ({story.pull_request.state})
-            </a>
-          </Button>
-        ) : null}
-
         {/* Manual-run projects (auto_run_enabled off) need an explicit tap
             to dispatch a pending top-level story — nothing autopicks it.
             Sub-tasks are never dispatched on their own (see AGENTS.md), so
             they never get this button even though their status can also be
-            "pending". */}
-        {!autoRunEnabled && story.status === "pending" && !isSubtask ? (
+            "pending" — nor does a story still waiting on a dependency, which
+            the daemon would refuse to start. */}
+        {!isSubtask ? <PriorWorkChoiceButton projectId={projectId} story={story} /> : null}
+
+        {!autoRunEnabled && story.status === "pending" && !isSubtask && !waiting && !choosing ? (
           <Button
             size="sm"
             className="shrink-0"
@@ -111,12 +142,30 @@ export function StoryRow({
           </Button>
         ) : null}
 
-        {parked ? (
+        {story.status === "dispatched" && !isSubtask ? (
+          <CancelRunButton projectId={projectId} storyKey={story.jira_key} label={displayKey(story)} />
+        ) : null}
+
+        {gate ? (
           story.gate_approved ? (
-            <span className="text-muted-foreground shrink-0 whitespace-nowrap text-xs">approved — waiting</span>
+            <span className="text-muted-foreground shrink-0 whitespace-nowrap text-xs">{gate.approved}</span>
+          ) : story.clarification_questions.length ? (
+            // The planner is waiting on a decision, not a plain plan review —
+            // answering means picking an option per question, which needs the
+            // detail dialog's form, not a one-click approve here.
+            <Button size="sm" variant="outline" className="shrink-0" onClick={() => onOpenStory(story.jira_key)}>
+              Answer questions
+            </Button>
           ) : (
-            <Button size="sm" className="shrink-0" loading={approveStory.isPending} onClick={() => approveStory.mutate(story.jira_key)}>
-              Approve
+            <Button
+              size="sm"
+              className="shrink-0"
+              title={gate.hint}
+              aria-label={`${gate.label} — ${displayKey(story)}`}
+              loading={approveStory.isPending}
+              onClick={() => approveStory.mutate(story.jira_key)}
+            >
+              {gate.label}
             </Button>
           )
         ) : story.status === "failed" ? (

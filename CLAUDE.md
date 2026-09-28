@@ -14,9 +14,10 @@ commands and orientation AGENTS.md doesn't cover.
 
 A local, single-tenant JIRA-epic-to-PR agent platform: a deterministic
 reconciler decides what to do next, a LangGraph planner → dev → verifier
-(or epic QA) loop runs per story in an isolated git worktree, and the
-daemon opens GitHub PRs, waits for CI, and merges into a shared epic
-integration branch. Runs as one process (`docker compose up`) with
+(or epic QA) loop runs per story in an isolated git worktree — independent
+stories in parallel, a story waiting only for the stories it depends on —
+each finished story is verified and merged into the epic branch locally,
+and once all have merged the epic opens one GitHub pull request. Runs as one process (`docker compose up`) with
 Postgres-backed state — no Kubernetes, no multi-tenancy, no `.env` file
 (the only process env var is `DATABASE_URL`; everything else is configured
 live at `/settings` and stored in Postgres).
@@ -36,10 +37,19 @@ alembic upgrade head
 Run the full stack instead:
 
 ```bash
-docker compose up
+scripts/forge.sh
 # Dashboard: http://localhost:8000/
 # Settings:  http://localhost:8000/settings
 ```
+
+`scripts/forge.sh` wraps `docker compose` (or `podman compose`) with
+engine detection, an image rebuild on every `up` — the image bakes in
+`forge/`, `alembic/` and the UI bundle, so a stale one runs code you no
+longer have and fails migrations with a misleading "Can't locate
+revision" — a health wait, and `stop`/`down`/`logs`/`status`/`rebuild`/
+`psql`/`reset` subcommands. `scripts/stop.sh` is the stop half (`--keep`
+stops the containers without removing them); both leave every volume
+alone, so only `reset` loses data. Plain `docker compose up` still works.
 
 Tests:
 
@@ -95,8 +105,9 @@ stylesheet `<link>`, both of which must run before the JS bundle.
 ## Testing conventions specific to this repo
 
 - Never call a real LLM provider / GitHub / live JIRA in tests.
-  `tests/conftest.py`'s `fake_agents` fixture monkeypatches the four
-  agent entry points on `forge.orchestration.graph` (imported by name at
+  `tests/conftest.py`'s `fake_agents` fixture monkeypatches the five
+  graph entry points (planner, dev, the Tier 1 deterministic gate,
+  verifier, epic QA) on `forge.orchestration.graph` (imported by name at
   module load, so patch them there, not at their definition site); a role
   module tested directly instead fakes `forge.llm.registry.get_provider`.
 - `git_repo` fixture (`tests/conftest.py`) gives a real repo with an
@@ -124,6 +135,10 @@ stylesheet `<link>`, both of which must run before the JS bundle.
    *Which* tickets arrive in the first place is a third place:
    `forge/services/jira_filter.py` (a project's saved JIRA query, compiled
    to JQL) plus `forge/daemon/ticket_sync.py` (the slow background sweep
-   that re-runs it). A sweep only ever adds: new roots are ingested, roots
-   forge already has are **re-walked** so stories added to them in JIRA
-   later still arrive, and nothing is ever unsynced, paused, or reordered.
+   that re-runs it). A sweep ingests new roots and **re-walks** roots
+   forge already has (and every in-progress epic, matched or not) so stories
+   added later still arrive; nothing is ever unsynced or reordered. The
+   re-walk also reconciles content and closure with the source — see
+   `forge/services/external_sync.py`: text changed under a plan is *held*
+   for a human, never rewritten; closed/deleted tickets stop being
+   dispatched.

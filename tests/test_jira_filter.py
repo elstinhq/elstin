@@ -96,9 +96,16 @@ class _FakeJiraService:
     tree_by_root: dict[str, list[JiraTicket]] = {}
     last_jql: str | None = None
     search_error: Exception | None = None
+    name = "jira"
 
     def __init__(self, project_id: int | None = None) -> None:
         self.project_id = project_id
+
+    def normalize_key(self, raw):
+        return raw
+
+    def compile_filter(self, ticket_filter: dict) -> str:
+        return jira_filter.build_jql(ticket_filter)
 
     def search_tickets(self, jql: str, max_results: int = 50) -> list[JiraTicket]:
         _FakeJiraService.last_jql = jql
@@ -116,8 +123,8 @@ def fake_jira(monkeypatch: pytest.MonkeyPatch):
     _FakeJiraService.tree_by_root = {}
     _FakeJiraService.last_jql = None
     _FakeJiraService.search_error = None
-    monkeypatch.setattr(jira_filter, "JiraService", _FakeJiraService)
-    monkeypatch.setattr(epic_sync, "JiraService", _FakeJiraService)
+    monkeypatch.setattr(jira_filter, "get_ticket_source", lambda project_id: _FakeJiraService(project_id=project_id))
+    monkeypatch.setattr(epic_sync, "get_ticket_source", lambda project_id: _FakeJiraService(project_id=project_id))
     return _FakeJiraService
 
 
@@ -198,13 +205,13 @@ def test_re_walking_leaves_human_decisions_and_in_flight_stories_untouched(proje
 
     sm = StateManager()
     sm.set_epic_manual_gate("ENG-1", False)  # the human resumed it
-    sm.set_story_status("ENG-2", "awaiting_pr_review")  # and it is mid-flight
+    sm.set_story_status("ENG-2", "ready_to_merge")  # and it is mid-flight
 
     fake_jira.tree_by_root["ENG-1"].append(_ticket("ENG-3", parent_key="ENG-1"))
     jira_filter.sync_project_filter(project_id)
 
     assert sm.get_epic("ENG-1")["manual_gate"] is False
-    assert sm.get_story("ENG-2")["status"] == "awaiting_pr_review"
+    assert sm.get_story("ENG-2")["status"] == "ready_to_merge"
     assert sm.get_story("ENG-3")["status"] == "pending"
 
 
@@ -243,10 +250,10 @@ def test_sync_continues_past_one_failing_ticket(project_id, fake_jira, monkeypat
 
     real_sync = jira_filter.sync_epic_from_jira
 
-    def _flaky(jira_key: str, *, project_id: int) -> None:
+    def _flaky(jira_key: str, *, project_id: int):
         if jira_key == "ENG-1":
             raise RuntimeError("boom")
-        real_sync(jira_key, project_id=project_id)
+        return real_sync(jira_key, project_id=project_id)
 
     monkeypatch.setattr(jira_filter, "sync_epic_from_jira", _flaky)
 

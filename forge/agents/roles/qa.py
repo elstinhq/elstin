@@ -43,6 +43,61 @@ from forge.services.run_activity import append_activity
 from forge.services.usage import record_phase_usage
 from forge.tools import language_hooks
 
+_NULLABLE_STRING = {"type": ["string", "null"]}
+
+_STRING_LIST = {"type": "array", "items": {"type": "string"}}
+
+# The report's shape, enforced by the provider rather than requested in
+# prose — same reasoning as the verifier's schema, and it matters more
+# here: forge/agents/roles/qa.py's format_qa_report_comment is this
+# report's only consumer and it reads specific keys, so a reply that
+# parses but uses different key names produces an empty JIRA comment
+# rather than a visible failure.
+QA_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["pass", "pass_with_findings", "fail"]},
+        "summary": {"type": "string"},
+        "gaps": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "acceptance_criterion": {"type": "string"},
+                    # Nullable: a gap can fall between stories rather than
+                    # inside one, which is exactly what epic QA is for.
+                    "story_key": _NULLABLE_STRING,
+                    "finding": {"type": "string"},
+                    "severity": {"type": "string", "enum": ["blocker", "major", "minor"]},
+                },
+                "required": ["acceptance_criterion", "story_key", "finding", "severity"],
+                "additionalProperties": False,
+            },
+        },
+        "scenarios": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "scenario_name": {"type": "string"},
+                    "flow_type": {"type": "string"},
+                    "steps": _STRING_LIST,
+                    "verification_points": _STRING_LIST,
+                },
+                "required": ["scenario_name", "flow_type", "steps", "verification_points"],
+                "additionalProperties": False,
+            },
+        },
+        "regression_scope": _STRING_LIST,
+        "manual_checklist": _STRING_LIST,
+    },
+    # full_test_suite is deliberately absent: the deterministic suite result
+    # is stamped onto the report after parsing (evidence beats opinion), so
+    # asking the model for it would invite it to invent one.
+    "required": ["verdict", "summary", "gaps", "scenarios", "regression_scope", "manual_checklist"],
+    "additionalProperties": False,
+}
+
 QA_SYSTEM = """You are a QA architect performing independent end-to-end validation of a completed epic.
 
 Every implementation story in the epic has been merged onto one branch. You are reviewing the combined result against what the stories collectively promised — not reviewing any single story.
@@ -104,7 +159,8 @@ async def run_epic_qa(
     epic: dict[str, Any],
     dev_stories: list[dict[str, Any]],
     branch_diff: dict[str, Any],
-    worktree_path: str,
+    other_repo_diffs: list[dict[str, Any]] | None = None,
+    worktree_path: str = "",
     project_path: str,
     run_id: str | None = None,
 ) -> dict[str, Any]:
@@ -155,11 +211,29 @@ async def run_epic_qa(
             },
         }
 
+        # A cross-repo epic: the same integration branch in each repo its
+        # stories wrote to. Present only when there is more than one, so a
+        # single-repo epic's payload is byte-identical to before.
+        if other_repo_diffs:
+            payload["other_repo_diffs"] = [
+                {
+                    "repo": d.get("repo"),
+                    "base": d.get("base"),
+                    "branch": d.get("branch"),
+                    "changed_files": d.get("changed_files", []),
+                    "diff": (d.get("diff") or "")[:_MAX_DIFF_CHARS],
+                    "diff_truncated": d.get("diff_truncated", False),
+                }
+                for d in other_repo_diffs
+            ]
+
         qa_report, llm_usage = await chat_completion_json(
             messages=[
                 {"role": "system", "content": QA_SYSTEM},
                 {"role": "user", "content": json.dumps(payload, indent=2)[:_MAX_PAYLOAD_CHARS]},
             ],
+            response_schema=QA_JSON_SCHEMA,
+            response_schema_name="epic_qa_report",
             run_id=run_id,
             phase="qa",
             label="epic_qa",
