@@ -61,7 +61,11 @@ model does:
    done so far is real. Opt-in per role (the planner never modifies files,
    so it leaves both unset). In the last IDLE_WARNING_WINDOW turns before
    the stop the trailing message also carries a warning saying how many are
-   left, so the cut-off is never a surprise.
+   left, so the cut-off is never a surprise. The turn cap can warn the
+   same way (LoopConfig.turn_warning_window, also opt-in): a role whose
+   answer is its final turn's text — an explorer's report — is told when
+   its last turns are coming, so it answers instead of being cut off
+   mid-read.
 
 5. **A trailing reminder** (LoopConfig.trailing_reminder). A callable
    re-evaluated every turn whose text is appended to the request as a
@@ -119,7 +123,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from forge.agents.tool_arguments import argument_errors, repair_arguments
 from forge.llm.base import LlmProvider
@@ -284,6 +288,13 @@ class LoopResult:
     # story_usage.api_duration_ms so the UI can separate "slow model"
     # from "slow dart analyze".
     api_duration_ms: int = 0
+    # `history` with the trailing reminders it leaves out put back: the run
+    # exactly as the provider last saw it. For a caller that sends one more
+    # request on top of a finished run and needs it to hit the provider's
+    # prefix cache — built from `history` instead, it would drop the
+    # reminders out of the middle of that prefix (forge/agents/roles/
+    # explorer.py's `_wrap_up`). Never for persisting or resuming.
+    sent_history: list[Message] = field(default_factory=list)
 
 
 @dataclass
@@ -295,6 +306,10 @@ class LoopConfig:
     tool_fns: dict[str, ToolFn] = field(default_factory=dict)
     response_format: ResponseFormat | None = None
     effort: str | None = None
+    # Sent on every request: "none" declares `tools` but forbids calling
+    # them (forge/llm/types.py's LlmRequest.tool_choice). None = the model
+    # decides.
+    tool_choice: Literal["none"] | None = None
     max_turns: int = 0  # 0 = unbounded
     max_budget_usd: float = 0.0  # 0 = unbounded
     compaction_token_threshold: int = _DEFAULT_COMPACTION_TOKEN_THRESHOLD
@@ -321,6 +336,10 @@ class LoopConfig:
     # End the loop (TERMINAL_NO_PROGRESS) after this many consecutive
     # tool-calling turns that executed no progress_tools call. 0 = off.
     max_idle_turns: int = 0
+    # The last this many turns max_turns allows each carry a warning in the
+    # trailing message, the final one saying to answer without a tool call
+    # (see _turn_warning). 0 = off; also off without max_turns.
+    turn_warning_window: int = 0
     # Re-evaluated every turn; its text is appended to the request as a
     # final user message and never kept in `history`. Return "" to append
     # nothing this turn. See point 5 in the module docstring.
@@ -637,6 +656,32 @@ def _idle_warning(idle_turns: int, config: LoopConfig) -> str:
     )
 
 
+def _turn_warning(turn: int, config: LoopConfig) -> str:
+    """A nudge for a run whose turn cap is about to end it.
+
+    `turn` counts the turns already taken, so the request being built is
+    turn + 1. A capped run's last text is whatever it wrote beside its final
+    tool call — "let me check the schema next" — which answers nothing, and
+    a role whose output IS that text (an explorer's report) then has to pay
+    for one more call to get an answer. Told in time, the model spends its
+    last turn answering instead. Empty when the warning is off or there is
+    still room."""
+    if not (config.max_turns and config.turn_warning_window):
+        return ""
+    left_after = config.max_turns - (turn + 1)
+    if left_after >= config.turn_warning_window:
+        return ""
+    if left_after <= 0:
+        return (
+            "TURN LIMIT: this is your last turn. Give your final answer now, from what you already have, "
+            "and do not call a tool: there is no turn after this one to read its result."
+        )
+    return (
+        f"TURN LIMIT: {left_after} more turn(s) after this one, and the last must be your final answer, "
+        "not a tool call. Spend what is left on what you still need most."
+    )
+
+
 async def run_agent_loop(config: LoopConfig, initial_messages: list[Message]) -> LoopResult:
     history: list[Message] = list(initial_messages)
     usage_total = Usage()
@@ -685,10 +730,10 @@ async def run_agent_loop(config: LoopConfig, initial_messages: list[Message]) ->
                 # remaining epic for the cycle.
                 logger.warning("trailing_reminder raised — continuing without it this turn", exc_info=True)
                 reminder = ""
-        # Rides in the same trailing message — see _idle_warning.
-        warning = _idle_warning(idle_turns, config)
-        if warning:
-            reminder = f"{reminder}\n\n{warning}" if reminder else warning
+        # Ride in the same trailing message — see _idle_warning, _turn_warning.
+        for warning in (_idle_warning(idle_turns, config), _turn_warning(turn, config)):
+            if warning:
+                reminder = f"{reminder}\n\n{warning}" if reminder else warning
         # Stored, not just sent: the next request must begin with every
         # message this one sent (module docstring, point 5).
         reminder_index: int | None = None
@@ -710,6 +755,7 @@ async def run_agent_loop(config: LoopConfig, initial_messages: list[Message]) ->
             tools=config.tools,
             response_format=config.response_format,
             effort=config.effort,
+            tool_choice=config.tool_choice,
         )
 
         response, last_error, turn_api_ms = await _complete_with_retry(config, request)
@@ -739,7 +785,7 @@ async def run_agent_loop(config: LoopConfig, initial_messages: list[Message]) ->
 
         if response is None:
             return LoopResult(
-                history=caller_history(), usage=usage_total, terminal_reason=TERMINAL_ERROR, is_error=True,
+                history=caller_history(), sent_history=list(history), usage=usage_total, terminal_reason=TERMINAL_ERROR, is_error=True,
                 turns_used=turn, api_duration_ms=api_duration_ms,
                 error_message=str(last_error) if last_error else "unknown provider error",
             )
@@ -778,7 +824,7 @@ async def run_agent_loop(config: LoopConfig, initial_messages: list[Message]) ->
             detail = _UNUSABLE_STOP_REASONS[response.stop_reason]
             logger.warning("Loop ending on unusable stop_reason=%s: %s", response.stop_reason, detail)
             return LoopResult(
-                history=caller_history(), usage=usage_total, terminal_reason=response.stop_reason, is_error=True,
+                history=caller_history(), sent_history=list(history), usage=usage_total, terminal_reason=response.stop_reason, is_error=True,
                 turns_used=turn, api_duration_ms=api_duration_ms, final_text=response.text(),
                 error_message=f"Provider stopped with {response.stop_reason!r}: {detail}.",
             )
@@ -786,7 +832,7 @@ async def run_agent_loop(config: LoopConfig, initial_messages: list[Message]) ->
         tool_calls = response.tool_calls()
         if not tool_calls:
             return LoopResult(
-                history=caller_history(), usage=usage_total, terminal_reason=TERMINAL_END_TURN, is_error=False,
+                history=caller_history(), sent_history=list(history), usage=usage_total, terminal_reason=TERMINAL_END_TURN, is_error=False,
                 turns_used=turn, api_duration_ms=api_duration_ms,
                 structured_output=response.structured_output, final_text=response.text(),
             )
@@ -801,12 +847,12 @@ async def run_agent_loop(config: LoopConfig, initial_messages: list[Message]) ->
 
         if config.max_turns and turn >= config.max_turns:
             return LoopResult(
-                history=caller_history(), usage=usage_total, terminal_reason=TERMINAL_MAX_TURNS, is_error=False,
+                history=caller_history(), sent_history=list(history), usage=usage_total, terminal_reason=TERMINAL_MAX_TURNS, is_error=False,
                 turns_used=turn, api_duration_ms=api_duration_ms, final_text=response.text(),
             )
         if config.max_budget_usd and budget_spent >= config.max_budget_usd:
             return LoopResult(
-                history=caller_history(), usage=usage_total, terminal_reason=TERMINAL_MAX_BUDGET, is_error=False,
+                history=caller_history(), sent_history=list(history), usage=usage_total, terminal_reason=TERMINAL_MAX_BUDGET, is_error=False,
                 turns_used=turn, api_duration_ms=api_duration_ms, final_text=response.text(),
             )
 
@@ -817,7 +863,7 @@ async def run_agent_loop(config: LoopConfig, initial_messages: list[Message]) ->
                 idle_turns, len(tool_calls), outcome.intercepted,
             )
             return LoopResult(
-                history=caller_history(), usage=usage_total, terminal_reason=TERMINAL_NO_PROGRESS, is_error=False,
+                history=caller_history(), sent_history=list(history), usage=usage_total, terminal_reason=TERMINAL_NO_PROGRESS, is_error=False,
                 turns_used=turn, api_duration_ms=api_duration_ms, final_text=response.text(),
                 error_message=f"No file-modifying tool call in the last {idle_turns} turn(s).",
             )

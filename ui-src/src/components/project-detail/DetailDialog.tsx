@@ -389,7 +389,9 @@ function StoryDetailBody({ projectId, story, activityEnabled }: { projectId: num
         <DetailRow label="Status in source">
           {story.external_closed
             ? `${story.external_status} — closed${story.status === "skipped" ? ", so forge skipped this story" : "; this run was already under way and will finish"}`
-            : story.external_status}
+            : story.parked_reason === "on_hold_in_source"
+              ? `${story.external_status} — forge leaves this ticket alone until it moves out of that status`
+              : story.external_status}
         </DetailRow>
       ) : null}
       <DetailRow label="Kind">

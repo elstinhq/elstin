@@ -73,12 +73,15 @@ from forge.services.usage import record_run_outcome
 from forge.state.manager import StateManager
 from forge.tools.codebase_skeleton import build_workspace_skeleton
 from forge.tools.git_tools import (
-    CODE_FORGE_CO_AUTHOR, CODE_FORGE_EMAIL, CODE_FORGE_NAME, GitMergeError, branch_exists, commit_all,
-    get_branch_diff_summary,
+    CODE_FORGE_CO_AUTHOR, CODE_FORGE_EMAIL, CODE_FORGE_NAME, GitMergeError, branch_exists, commit_all, commit_paths,
+    get_branch_diff_summary, list_changed_files,
 )
 from forge.tools.reference_folder import reference_copy_path, sync_reference_copy
 from forge.tools.workspace import REFERENCE_SIGIL, build_repo_roots
-from forge.tools.worktree import _repo_lock, create_worktree, default_branch, resolve_base_ref, run_git
+from forge.tools.worktree import (
+    _repo_lock, add_to_gitignore, create_worktree, default_branch, exclude_build_output, missing_gitignore_entries,
+    resolve_base_ref, run_git,
+)
 
 logger = logging.getLogger("forge.daemon")
 
@@ -299,6 +302,45 @@ def _ensure_epic_branches(
                 title=f"Epic branch {epic_branch} continues from {start}",
                 detail=f"In {label}: a branch named after the epic already carried work for it.",
             )
+
+
+def _ignore_build_output_on_epic(epic: dict, writable_roots: dict[str, str], worktrees_base_dir: str) -> None:
+    """Commit, on the epic branch of each writable repo, the build-output
+    entries its .gitignore is missing (`target/` for Maven, `node_modules/`
+    for Vite, … — LanguageProfile.build_output), so the epic's pull request
+    fixes the repo for everyone rather than forge only hiding the folders
+    locally (info/exclude). MKT2-866's `mkt-apiservice` had no .gitignore on
+    main. Off when the project turns `manage_gitignore` off. Runs under the
+    epic's merge lock, before a story branches from the epic branch; never
+    stops a run."""
+    if not resolve_bool_config("manage_gitignore", epic["project_id"]):
+        return
+    for label, repo_path in writable_roots.items():
+        worktree = existing_epic_worktree(worktrees_base_dir, epic["jira_key"], repo_path)
+        if not worktree:
+            continue
+        try:
+            entries = missing_gitignore_entries(worktree)
+            if not entries:
+                continue
+            add_to_gitignore(worktree, entries)
+            commit_paths(
+                worktree, [".gitignore"],
+                f"Ignore build output: {', '.join(entries)}\n\n"
+                "The build writes these and the repo's .gitignore did not cover them, so a local build left them "
+                "to be committed by mistake. Added by code_forge.",
+                author=_commit_author(),
+            )
+        except Exception:  # noqa: BLE001 — a missing ignore entry is never worth a failed run
+            logger.warning("epic %s: could not update .gitignore in %s", epic["jira_key"], repo_path, exc_info=True)
+            run_git(worktree, "checkout", "--", ".gitignore", check=False)
+            continue
+        append_activity(
+            epic["jira_key"], type="status", phase="system",
+            title=f"Added {', '.join(entries)} to .gitignore in {label}",
+            detail="Committed on the epic branch, so it is part of the epic's pull request. Turn off with the "
+                   "project's manage_gitignore setting.",
+        )
 
 
 def _prior_start_ref(repo_path: str, candidate: dict | None) -> str | None:
@@ -537,12 +579,44 @@ def _replan_behind_done_work(sm: StateManager, epic: dict) -> list[str]:
         logger.info("epic %s: re-planning %s — done work was merged into the epic branch", epic["jira_key"], replanned)
     return replanned
 
+def _reusable_worktree(repo_path: str, entry: dict | None) -> dict | None:
+    """{worktree_path, branch} for the story's recorded worktree in
+    `repo_path` when it is still there and still on its branch — to keep,
+    rather than recreate — else None."""
+    if not entry or not entry.get("worktree_path") or not entry.get("branch"):
+        return None
+    path = entry["worktree_path"]
+    if not os.path.isdir(path):
+        return None
+    listing = run_git(repo_path, "worktree", "list", "--porcelain", check=False).stdout
+    for block in listing.split("\n\n"):
+        lines = set(block.splitlines())
+        if {f"worktree {path}", f"worktree {os.path.realpath(path)}"} & lines and f"branch refs/heads/{entry['branch']}" in lines:
+            return {"worktree_path": path, "branch": entry["branch"]}
+    return None
+
+
+def _earlier_run_changes(known_worktrees: dict[str, dict], default_label: str, read_only_labels: list[str]) -> list[str]:
+    """Files the story's worktrees already change — an earlier run's work,
+    kept (`_reusable_worktree`) — as the plan writes paths: unprefixed in the
+    default repo, `@label/` elsewhere."""
+    changed: list[str] = []
+    for label, entry in sorted(known_worktrees.items(), key=lambda item: item[0] != default_label):
+        path = entry.get("worktree_path")
+        if label in read_only_labels or not path or not os.path.isdir(path):
+            continue
+        changed.extend(rel if label == default_label else f"{REFERENCE_SIGIL}{label}/{rel}" for rel in list_changed_files(path))
+    return changed
+
+
 def _build_story_brief(
     sm: StateManager,
     story: dict,
     repo_path: str | None = None,
     repo_roots: dict[str, str] | None = None,
     default_label: str = "",
+    *,
+    earlier_changes: list[str] | None = None,
 ) -> str:
     """The `user_request` handed to the planner.
 
@@ -578,6 +652,15 @@ def _build_story_brief(
             if subtask.get("description"):
                 block += "\n" + subtask["description"].strip()
             parts.append(block)
+
+    if earlier_changes:
+        parts.append(
+            "## Work from this story's earlier run\n"
+            "A run of this story that did not finish left these changes in its worktrees — they are in your "
+            "workspace now. Read them against the ticket: list each one that still needs work under "
+            "files_to_modify, and plan only what is missing or wrong. Do not plan them as new files or rewrite "
+            "what already works.\n" + "\n".join(f"- {path}" for path in earlier_changes[:60])
+        )
 
     brief = "\n\n".join(parts)[:_MAX_BRIEF_CHARS]
     # After the story's own text, and inside the same cap, so the story
@@ -908,14 +991,20 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
         await asyncio.to_thread(look_up_prior_work, sm, epic)
         async with _epic_merge_lock(epic["jira_key"]):
             await asyncio.to_thread(_bring_done_work_into_epic, sm, epic)
+            await asyncio.to_thread(_ignore_build_output_on_epic, epic, writable_roots, worktrees_base_dir)
 
         # ...unless this ticket already has work on a branch of its own: then
         # its branch starts from that work, with the epic branch merged in,
         # so the planner reads what is done and plans only what is missing.
         prior = story.get("prior_work")
         continued = start_candidate(prior, default_label)
-        start_ref = await asyncio.to_thread(_prior_start_ref, story_repo, continued)
-        wt = await asyncio.to_thread(
+        # A run that failed left its work in the story's worktree, uncommitted
+        # — kept, as it is in the story's other repos, so the new plan builds
+        # on it (`_earlier_run_changes`). Recreating it threw MKT2-866's
+        # compiling, tested backend away on Retry while keeping its portal.
+        kept = await asyncio.to_thread(_reusable_worktree, story_repo, known_worktrees.get(default_label))
+        start_ref = None if kept else await asyncio.to_thread(_prior_start_ref, story_repo, continued)
+        wt = kept or await asyncio.to_thread(
             create_worktree,
             story_repo,
             story_key=story_key,
@@ -936,6 +1025,11 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
             story_key, repo_label=default_label, repo_path=story_repo,
             worktree_path=worktree_path, branch=wt["branch"], is_default=True,
         )
+        if kept:
+            append_activity(
+                story_key, type="status", phase="system", title=f"Kept this story's worktree in {default_label}",
+                detail="Work from the earlier run is kept; the new plan builds on it.",
+            )
         if start_ref:
             await asyncio.to_thread(
                 _continue_prior_work, story_key, story_repo, epic, worktree_path, continued, worktrees_base_dir,
@@ -967,6 +1061,14 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
             }
             for entry in await asyncio.to_thread(sm.list_story_worktrees, story_key)
         }
+
+    # Build output never reaches a commit — in worktrees made before forge
+    # excluded it, too (forge/tools/worktree.py's exclude_build_output).
+    for repo_path in writable_roots.values():
+        await asyncio.to_thread(
+            exclude_build_output, repo_path,
+            tuple(e["worktree_path"] for e in known_worktrees.values() if e.get("repo_path") == repo_path),
+        )
 
     # Where each repo is read, and what a repo the plan names later branches
     # from — see FeatureRunState.read_roots / story_base_refs.
@@ -1018,8 +1120,10 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
         else:
             # The codebase map is drawn from what the planner will read (the
             # worktree and the epic branch), not the clones.
+            earlier = await asyncio.to_thread(_earlier_run_changes, known_worktrees, default_label, read_only_labels)
             brief = await asyncio.to_thread(
-                _build_story_brief, sm, story, read_roots.get(default_label) or story_repo, read_roots, default_label
+                _build_story_brief, sm, story, read_roots.get(default_label) or story_repo, read_roots, default_label,
+                earlier_changes=earlier,
             )
             state = initial_state(story_key, brief, story_repo)
             state["worktree_path"] = worktree_path
@@ -1410,6 +1514,8 @@ def _epic_pr_body(sm: StateManager, epic: dict) -> str:
             line += " — QA review (report posted on the ticket)"
         elif story.get("parked_reason") == "already_satisfied":
             line += " — already satisfied by the existing code; no change"
+        elif story.get("parked_reason") == "on_hold_in_source":
+            line += f" — {story.get('external_status') or 'on hold'} in the source; not in this pull request"
         elif story["status"] == "skipped":
             brought = sorted({
                 result["branch"] for result in ((story.get("prior_work") or {}).get("epic_merge") or {}).values()

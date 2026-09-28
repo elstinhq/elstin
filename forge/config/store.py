@@ -39,6 +39,15 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         "How often to re-run each project's ticket filter, in seconds (minimum 30)",
         False, "300", "string",
     ),
+    # A ticket in one of these is set aside until it leaves it — not started,
+    # not re-planned (forge/services/external_sync.py). Matched on the
+    # status name, since JIRA files "On Hold" under To Do.
+    ConfigField(
+        "ticket_hold_statuses",
+        "Source statuses that mean \"on hold\": forge leaves such a ticket alone until it moves out of them "
+        "(comma-separated, any case)",
+        False, "On Hold, Blocked, Paused, Parked, Deferred", "string",
+    ),
     ConfigField("github_org", "GitHub organization", False, None, "string"),
     ConfigField("github_token", "GitHub token", True, None, "string"),
     ConfigField(
@@ -55,6 +64,11 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         "git_author_email",
         "Commit author email (use the address on your GitHub account so commits are credited to you; code_forge is added as co-author)",
         False, None, "string",
+    ),
+    ConfigField(
+        "manage_gitignore",
+        "Add a repo's missing build-output entries (target/, node_modules/, …) to its .gitignore, committed on the epic branch",
+        False, "true", "bool",
     ),
     ConfigField("llm_provider", "LLM provider (only 'openai' is wired today)", False, "openai", "string"),
     ConfigField(
@@ -161,6 +175,8 @@ PROJECT_OVERRIDABLE_KEYS = frozenset({
     "auto_run_enabled",
     "require_plan_approval",
     "generate_project_guide",
+    "ticket_hold_statuses",
+    "manage_gitignore",
 })
 
 _cache_lock = threading.Lock()

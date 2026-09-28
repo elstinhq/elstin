@@ -100,6 +100,33 @@ async def test_complete_parses_tool_calls(provider, monkeypatch):
     assert calls[0].arguments == {"path": "a.py"}
 
 
+@pytest.mark.parametrize(
+    ("tools", "tool_choice", "expected"),
+    [
+        (True, "none", "none"),
+        (True, None, "absent"),
+        # tool_choice without tools is meaningless, and OpenAI rejects it.
+        (False, "none", "absent"),
+    ],
+)
+async def test_tool_choice_is_sent_only_alongside_tools(provider, monkeypatch, tools, tool_choice, expected):
+    captured = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _fake_completion(content="done", usage=_fake_usage())
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", fake_create)
+
+    await provider.complete(LlmRequest(
+        model="gpt-5.1", messages=[text_message("user", "hi")], tool_choice=tool_choice,
+        tools=[ToolDef(name="t", description="d", parameters={"type": "object", "properties": {}})] if tools else [],
+    ))
+
+    assert captured.get("tool_choice", "absent") == expected
+    assert ("tools" in captured) is tools
+
+
 async def test_complete_parses_structured_output(provider, monkeypatch):
     completion = _fake_completion(content='{"answer": 42}', usage=_fake_usage())
 

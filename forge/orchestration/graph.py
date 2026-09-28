@@ -243,6 +243,25 @@ async def gate_node(state: FeatureRunState) -> dict:
 
     record_run_outcome(run_id, gate_runs=1, gate_failures=0 if gate.get("passed") else 1)
 
+    # The build environment, not the code (LanguageProfile.environment_problem):
+    # the developer step cannot fix a toolchain, and sent back it "fixes"
+    # working code trying — MKT2-866 lost three passes to a JDK. Stop, say why.
+    environment = [issue["environment"] for issue in gate.get("issues") or [] if isinstance(issue, dict) and issue.get("environment")]
+    if environment:
+        reason = "; ".join(dict.fromkeys(environment))
+        logger.error("gate environment problem run_id=%s: %s", run_id, reason)
+        if run_id:
+            append_activity(run_id, type="status", phase="verifier", title="Build environment problem — stopping, the code is not at fault", detail=reason[:4000])
+        return {
+            "status": "failed",
+            "tier1_gate": gate,
+            "gate_attempts": attempts,
+            "verifier_report": gate,
+            "gate_feedback": None,
+            "error": f"Build environment problem: {reason}",
+            "messages": [{"role": "gate", "content": "The build environment failed, not the code; stopped."}],
+        }
+
     if gate.get("passed"):
         logger.info("gate passed run_id=%s -> verifier", run_id)
         return {"status": "verifying", "tier1_gate": gate, "gate_attempts": 0, "gate_feedback": None}

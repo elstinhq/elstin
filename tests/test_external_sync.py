@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 import forge.services.epic_sync as epic_sync
 import forge.services.jira_filter as jira_filter
-from forge.services.external_sync import CLOSED_EXTERNALLY
+from forge.services.external_sync import CLOSED_EXTERNALLY, ON_HOLD_IN_SOURCE
 from forge.services.jira_service import JiraTicket
 from forge.state.manager import StateManager
 
@@ -304,6 +304,78 @@ def test_reopening_restores_only_a_skip_that_sync_made(project_id):
     assert sm.get_story("ENG-2")["status"] == "pending"
     assert sm.get_story("ENG-3")["status"] == "skipped"
     assert sorted(report.reopened) == ["ENG-2", "ENG-3"]
+
+
+# ---------------------------------------------------------------- on hold
+
+
+def test_a_ticket_on_hold_when_added_is_set_aside_and_does_not_block_the_epic(project_id):
+    """MKT2-856: On Hold in JIRA (filed under To Do, so not closed), and
+    forge planned it anyway."""
+    _epic(project_id, _t("ENG-2", parent="ENG-1", status="On Hold"), _t("ENG-3", parent="ENG-1"))
+
+    sm = StateManager()
+    story = sm.get_story("ENG-2")
+    assert (story["status"], story["parked_reason"], story["external_status"]) == ("skipped", ON_HOLD_IN_SOURCE, "On Hold")
+    assert story["external_closed"] is False
+    assert sm.get_story("ENG-3")["status"] == "pending"
+
+
+def test_a_plan_waiting_for_approval_is_set_aside_when_the_ticket_goes_on_hold(project_id):
+    _epic(project_id, _t("ENG-2", parent="ENG-1"))
+    sm = StateManager()
+    _start(sm, "ENG-2", "awaiting_plan_approval")
+    _edit("ENG-2", status="on hold")  # any case
+
+    report = _resync(project_id)
+
+    assert (sm.get_story("ENG-2")["status"], sm.get_story("ENG-2")["parked_reason"]) == ("skipped", ON_HOLD_IN_SOURCE)
+    assert report.on_hold == ["ENG-2"]
+
+
+def test_a_run_under_way_when_the_ticket_goes_on_hold_finishes(project_id):
+    _epic(project_id, _t("ENG-2", parent="ENG-1"))
+    sm = StateManager()
+    _start(sm, "ENG-2", "dispatched")
+    _edit("ENG-2", status="On Hold")
+
+    report = _resync(project_id)
+
+    assert sm.get_story("ENG-2")["status"] == "dispatched"
+    assert report.on_hold == []
+
+
+def test_off_hold_it_comes_back_and_closed_it_stays_closed(project_id):
+    _epic(project_id, _t("ENG-2", parent="ENG-1", status="On Hold"), _t("ENG-3", parent="ENG-1", status="On Hold"))
+    sm = StateManager()
+
+    _edit("ENG-2", status="In Progress")
+    _edit("ENG-3", status="Done", closed=True)
+    report = _resync(project_id)
+
+    assert sm.get_story("ENG-2")["status"] == "pending" and report.off_hold == ["ENG-2"]
+    assert (sm.get_story("ENG-3")["status"], sm.get_story("ENG-3")["parked_reason"]) == ("skipped", CLOSED_EXTERNALLY)
+    assert report.closed == ["ENG-3"]
+
+
+def test_which_statuses_mean_on_hold_is_a_project_setting(project_id):
+    from forge.config.store import set_project_config
+
+    set_project_config(project_id, "ticket_hold_statuses", "Waiting for PO")
+    _epic(project_id, _t("ENG-2", parent="ENG-1", status="Waiting for PO"), _t("ENG-3", parent="ENG-1", status="On Hold"))
+
+    sm = StateManager()
+    assert sm.get_story("ENG-2")["parked_reason"] == ON_HOLD_IN_SOURCE
+    assert sm.get_story("ENG-3")["status"] == "pending"
+
+
+def test_the_epic_pull_request_says_which_ticket_is_on_hold(project_id):
+    import forge.daemon.main as daemon
+
+    _epic(project_id, _t("ENG-2", parent="ENG-1", status="On Hold"))
+    sm = StateManager()
+
+    assert "**ENG-2** ENG-2 summary — On Hold in the source; not in this pull request" in daemon._epic_pr_body(sm, sm.get_epic("ENG-1"))
 
 
 def test_a_closed_epic_is_put_on_hold(project_id):

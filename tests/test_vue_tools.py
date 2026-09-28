@@ -243,3 +243,84 @@ def test_vue_vite_profile_shape():
     assert profile.run_all_tests is not None
     assert profile.verify is None
     assert "Pinia" in profile.dev_conventions
+
+
+# --- ESLint on what the story changed ---------------------------------------------
+
+
+def _lint_repo(git_repo: str, monkeypatch, errors_now: dict[str, int], errors_at_head: dict[str, int]):
+    """A Vue repo with ESLint, and a fake ESLint: `errors_now` for the files as
+    they are, `errors_at_head` for their committed versions (read on stdin)."""
+    import subprocess
+
+    _write(os.path.join(git_repo, "eslint.config.js"), "export default [];\n")
+    for path in ("src/Old.vue", "src/Clean.ts", "src/Legacy.vue"):
+        _write(os.path.join(git_repo, path), "x\n")
+    subprocess.run(["git", "-C", git_repo, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", git_repo, "commit", "-q", "-m", "base"], check=True)
+    for path in ("src/Old.vue", "src/Clean.ts", "src/Legacy.vue", "src/New.ts"):
+        _write(os.path.join(git_repo, path), "changed\n")
+    fixed: list[list[str]] = []
+
+    def fake_eslint(worktree, args, *, stdin=None):
+        if stdin is not None:
+            path = args[args.index("--stdin-filename") + 1]
+            return {path: [{"line": 1, "column": 1, "message": "old", "ruleId": "r"}] * errors_at_head.get(path, 0)}
+        return {p: [{"line": 2, "column": 1, "message": "Insert `;`", "ruleId": "prettier/prettier"}] * errors_now.get(p, 0) for p in args}
+
+    def fake_run(cmd, *, cwd, timeout, input=None):
+        if cmd[:3] == ["npx", "eslint", "--fix"]:
+            fixed.append(cmd[3:])
+            return {"passed": True, "exit_code": 0}
+        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)  # git rev-parse HEAD
+        return {"passed": proc.returncode == 0, "stdout": proc.stdout, "stderr": proc.stderr}
+
+    vue_tools._baseline_cache.clear()
+    monkeypatch.setattr(vue_tools, "_eslint_errors", fake_eslint)
+    monkeypatch.setattr(vue_tools.language_hooks, "run", fake_run)
+    return fixed
+
+
+def test_a_story_is_held_to_its_own_lint_errors_not_the_repos(git_repo, monkeypatch):
+    """MKT2-866 reached its PR with prettier errors; the MKT portal also has
+    17,000 errors in older files a story may touch. New and previously clean
+    files must be clean; an older file fails only when the story added to it."""
+    _lint_repo(
+        git_repo, monkeypatch,
+        errors_now={"src/New.ts": 2, "src/Clean.ts": 1, "src/Old.vue": 3, "src/Legacy.vue": 5},
+        errors_at_head={"src/Old.vue": 3, "src/Legacy.vue": 4},
+    )
+
+    count, lines = vue_tools.lint_story_changes(git_repo)
+
+    assert count == 2 + 1 + 1  # New.ts, Clean.ts, and Legacy.vue's one extra — not Old.vue's existing three
+    assert any(line.startswith("src/New.ts:2:1: Insert `;` (prettier/prettier)") for line in lines)
+    assert any("src/Legacy.vue:2:1" in line and "(the file had 4 before this change)" in line for line in lines)
+    assert not any(line.startswith("src/Old.vue") for line in lines)
+
+
+def test_only_new_or_previously_clean_files_are_auto_formatted(git_repo, monkeypatch):
+    """Formatting is the tool's job, not a fix round's — but reformatting a
+    whole older file would be the drive-by rewrite the repo's guide forbids."""
+    fixed = _lint_repo(git_repo, monkeypatch, errors_now={}, errors_at_head={"src/Old.vue": 3, "src/Legacy.vue": 4})
+
+    result = vue_tools.vue_format_changed_files(git_repo, ["src/Old.vue", "src/Clean.ts", "src/Legacy.vue", "src/New.ts", "README.md"])
+
+    assert fixed == [["src/Clean.ts", "src/New.ts"]]
+    assert result["formatted"] == ["src/Clean.ts", "src/New.ts"]
+
+
+def test_the_analyze_step_fails_on_the_storys_lint_errors(tmp_path, monkeypatch):
+    _write(str(tmp_path / "tsconfig.json"), "{}")
+    monkeypatch.setattr(vue_tools.language_hooks, "run", lambda cmd, *, cwd, timeout, input=None: {"passed": True, "stdout": "", "stderr": ""})
+    monkeypatch.setattr(vue_tools, "lint_story_changes", lambda path: (1, ["src/New.ts:2:1: Insert `;` (prettier/prettier)"]))
+
+    result = vue_tools.run_vue_analyze(str(tmp_path), ["src/New.ts"])
+
+    assert result["passed"] is False and result["error_count"] == 1 and result["lint_error_count"] == 1
+    assert result["error_lines"] == ["src/New.ts:2:1: Insert `;` (prettier/prettier)"]
+
+
+def test_no_eslint_config_means_no_lint(tmp_path):
+    assert vue_tools.lint_story_changes(str(tmp_path)) == (0, [])
+    assert vue_tools.vue_format_changed_files(str(tmp_path), ["src/a.ts"])["skipped"] is True

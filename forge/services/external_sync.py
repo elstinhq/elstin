@@ -26,6 +26,13 @@ knows the skip was ours to undo. A story already in flight is only flagged —
 it finishes, and the flag says the ticket was closed underneath it. A closed
 epic is put on hold (manual_gate) and not released automatically.
 
+**On hold.** A story whose status is one of `ticket_hold_statuses` (On Hold,
+Blocked, … — JIRA files those under To Do, so they are not closed) is left
+alone the same way while it has not started: `skipped` with parked_reason
+`on_hold_in_source`, which is how it knows to come back to `pending` once the
+status moves on. A plan waiting for approval is dropped with it — the ticket
+will likely change while it waits. A story already in flight finishes.
+
 **Gone.** A story the walk did not return is only treated as gone after the
 source confirms it (`is_missing`), and never when the walk hit the source's
 size cap — a truncated tree or a failed child search must not read as
@@ -39,12 +46,14 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+from forge.config.store import resolve_config
 from forge.services.ticket_source import Ticket, TicketSource, content_hash
 from forge.state.manager import StateManager
 
 logger = logging.getLogger("forge.external_sync")
 
 CLOSED_EXTERNALLY = "closed_externally"
+ON_HOLD_IN_SOURCE = "on_hold_in_source"
 GONE_STATUS = "deleted or no longer visible"
 
 # Statuses where no plan or run depends on the ticket text.
@@ -63,16 +72,20 @@ class ReconcileReport:
     closed: list[str] = field(default_factory=list)  # newly skipped
     closed_in_flight: list[str] = field(default_factory=list)  # flagged only
     reopened: list[str] = field(default_factory=list)
+    on_hold: list[str] = field(default_factory=list)  # newly set aside
+    off_hold: list[str] = field(default_factory=list)  # back to pending
+
+    _FIELDS = ("applied", "flagged", "closed", "closed_in_flight", "reopened", "on_hold", "off_hold")
 
     def merge(self, other: "ReconcileReport") -> None:
-        for name in ("applied", "flagged", "closed", "closed_in_flight", "reopened"):
+        for name in self._FIELDS:
             getattr(self, name).extend(getattr(other, name))
 
     def changed(self) -> bool:
-        return any((self.applied, self.flagged, self.closed, self.closed_in_flight, self.reopened))
+        return any(getattr(self, name) for name in self._FIELDS)
 
     def to_dict(self) -> dict:
-        return {name: list(getattr(self, name)) for name in ("applied", "flagged", "closed", "closed_in_flight", "reopened")}
+        return {name: list(getattr(self, name)) for name in self._FIELDS}
 
 
 def _same(local: str | None, incoming: str | None) -> bool:
@@ -154,7 +167,7 @@ def _reconcile_closure(
         return
 
     if closed and not previous:
-        if row["status"] in _NOT_STARTED:
+        if row["status"] in _NOT_STARTED or _held(row):
             sm.set_story_status(key, "skipped", parked_reason=CLOSED_EXTERNALLY)
             report.closed.append(key)
             logger.info("story %s closed in the source before it started — skipped", key)
@@ -166,6 +179,34 @@ def _reconcile_closure(
         if row["status"] == "skipped" and row["parked_reason"] == CLOSED_EXTERNALLY:
             sm.set_story_status(key, "pending")
             logger.info("story %s reopened in the source — back to pending", key)
+
+
+def hold_statuses(project_id: int | None) -> frozenset[str]:
+    """The `ticket_hold_statuses` setting for a project, lower-cased."""
+    raw = resolve_config("ticket_hold_statuses", project_id) or ""
+    return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
+def _held(row: dict) -> bool:
+    return row["status"] == "skipped" and row.get("parked_reason") == ON_HOLD_IN_SOURCE
+
+
+def _reconcile_hold(
+    sm: StateManager, row: dict, *, status_text: str | None, closed: bool, holds: frozenset[str], report: ReconcileReport,
+) -> None:
+    """Set a story aside while the source has it on hold, and bring it back
+    when it no longer does — see the module docstring. Closure wins: a
+    closed ticket is `closed_externally`, not held."""
+    key = row["jira_key"]
+    on_hold = not closed and (status_text or "").strip().lower() in holds
+    if on_hold and row["status"] in _NOT_STARTED:
+        sm.set_story_status(key, "skipped", parked_reason=ON_HOLD_IN_SOURCE)
+        report.on_hold.append(key)
+        logger.info("story %s is %s in the source — set aside until it is not", key, status_text)
+    elif not on_hold and not closed and _held(row):
+        sm.set_story_status(key, "pending")
+        report.off_hold.append(key)
+        logger.info("story %s is no longer on hold in the source (%s) — back to pending", key, status_text)
 
 
 def reconcile_epic(
@@ -183,6 +224,7 @@ def reconcile_epic(
     report = ReconcileReport(epic_key=epic_key)
 
     epic = sm.get_epic(epic_key)
+    holds = hold_statuses(epic["project_id"] if epic else None)
     if epic is not None:
         _reconcile_content(sm, "epic", epic, root, report)
         _reconcile_closure(sm, "epic", epic, closed=root.closed, status_text=root.status, report=report)
@@ -203,6 +245,9 @@ def reconcile_epic(
         _reconcile_content(sm, "story", row, ticket, report, sub_reasons=sub_reasons.get(ticket.key))
         row = sm.get_story(ticket.key)  # content pass does not touch status, but stay honest
         _reconcile_closure(sm, "story", row, closed=ticket.closed, status_text=ticket.status, report=report)
+        _reconcile_hold(
+            sm, sm.get_story(ticket.key), status_text=ticket.status, closed=ticket.closed, holds=holds, report=report,
+        )
 
     _reconcile_gone(sm, source, epic_key, tickets, report)
     return report

@@ -341,6 +341,43 @@ async def test_gate_failure_routes_back_to_dev_with_feedback_and_never_enters_th
     assert result["gate_attempts"] == 0  # reset by the pass
 
 
+async def test_a_build_environment_problem_stops_the_run_instead_of_going_back_to_dev(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+):
+    """MKT2-866: javac crashed on the wrong JDK, and three dev passes went on
+    "fixing" working code. A failure the profile says is the environment
+    ends the run at once, saying why."""
+    import forge.orchestration.graph as graph_module
+
+    reason = "The Java build fails before compiling any source: Fatal error compiling: TypeTag :: UNKNOWN."
+    gate = _failing_gate(blockers=["java_maven: analyze failed"])
+    gate["issues"][0]["environment"] = reason
+    dev_calls: list[dict] = []
+
+    async def scripted_gate(**kwargs) -> dict:
+        return gate
+
+    async def recording_dev(**kwargs) -> dict:
+        dev_calls.append(kwargs)
+        return {"file_changes": [{"path": "A.java"}], "truncated": False, "messages": [], "dev_history": [], "dev_build_runner": {}}
+
+    monkeypatch.setattr(graph_module, "run_deterministic_gate", scripted_gate)
+    monkeypatch.setattr(graph_module, "run_dev", recording_dev)
+
+    thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}}
+    state = initial_state(thread_id, "Add a widget to the cart", "/repo")
+    state["worktree_path"] = "/repo-worktrees/eng-1"
+
+    async with checkpointer_from_url(postgres_url) as checkpointer:
+        graph = compile_graph(checkpointer, require_plan_approval=False)
+        result = await graph.ainvoke(state, config)
+
+    assert result["status"] == "failed"
+    assert result["error"] == f"Build environment problem: {reason}"
+    assert len(dev_calls) == 1  # never sent back
+
+
 async def test_gate_feedback_says_nothing_was_written_only_while_the_worktree_is_untouched(
     postgres_url: str, monkeypatch: pytest.MonkeyPatch
 ):

@@ -92,6 +92,20 @@ class LanguageProfile:
     # Dart's "generated DI files are gitignored, don't flag them as
     # missing" note).
     verifier_review_conventions: str = ""
+    # Extra environment for every command run in a worktree this profile
+    # matches — the build check's and the developer step's own (`run` below,
+    # forge/tools/safe_shell.py). Java's picks the JDK the project states
+    # (forge/tools/jdk.py). (worktree_path) -> {name: value}.
+    command_env: Callable[[str], dict[str, str]] | None = None
+    # Folders this toolchain writes its output to (gitignore patterns).
+    # Never staged or committed, even where the repo does not ignore them
+    # (forge/tools/worktree.py's exclude_build_output).
+    build_output: tuple[str, ...] = ()
+    # (worktree_path, failed step's result) -> why the failure is the build
+    # environment rather than the code, or None. Such a failure stops the
+    # run instead of going back to the developer step, which cannot fix a
+    # toolchain and will "fix" working code trying (MKT2-866).
+    environment_problem: Callable[[str, dict], str | None] | None = None
 
 
 _PROFILES: dict[str, LanguageProfile] = {}
@@ -258,6 +272,15 @@ def run_profile_verify(profile: LanguageProfile, ctx: VerifyContext) -> dict:
     return _default_verify(profile, ctx)
 
 
+def _mark_environment(profile: LanguageProfile, worktree_path: str, result: dict, issue: dict) -> dict:
+    """`issue`, flagged `environment` with the reason when the profile says
+    the failure is the build environment (see LanguageProfile.
+    environment_problem) — forge/orchestration/graph.py's gate_node stops
+    the run on it."""
+    reason = profile.environment_problem(worktree_path, result) if profile.environment_problem else None
+    return {**issue, "environment": reason} if reason else issue
+
+
 def _default_verify(profile: LanguageProfile, ctx: VerifyContext) -> dict:
     """Shared verify pipeline for any language that doesn't need more than
     ensure_dependencies -> analyze -> run_tests (e.g. Java: Spring wiring
@@ -272,7 +295,8 @@ def _default_verify(profile: LanguageProfile, ctx: VerifyContext) -> dict:
         deps = profile.ensure_dependencies(ctx.worktree_path)
         if not deps.get("passed", True):
             msg = f"{profile.key}: dependency install failed"
-            issues.append({"severity": "blocker", "file": None, "reason": msg, "details": deps.get("stdout") or deps.get("stderr")})
+            issue = {"severity": "blocker", "file": None, "reason": msg, "details": deps.get("stdout") or deps.get("stderr")}
+            issues.append(_mark_environment(profile, ctx.worktree_path, deps, issue))
             required_fixes.append(msg)
 
     analyze: dict[str, Any] = {"passed": True, "skipped": True, "targets": ctx.analyze_targets}
@@ -282,7 +306,8 @@ def _default_verify(profile: LanguageProfile, ctx: VerifyContext) -> dict:
         if not analyze.get("passed", True):
             msg = f"{profile.key}: analyze failed"
             details = "\n".join(analyze.get("error_lines") or []) or analyze.get("stdout") or analyze.get("stderr")
-            issues.append({"severity": "blocker", "file": None, "reason": msg, "details": details})
+            issue = {"severity": "blocker", "file": None, "reason": msg, "details": details}
+            issues.append(_mark_environment(profile, ctx.worktree_path, analyze, issue))
             required_fixes.append(msg)
 
     test_results: dict[str, Any] = {"passed": True, "skipped": True}
@@ -314,12 +339,35 @@ def _default_verify(profile: LanguageProfile, ctx: VerifyContext) -> dict:
     }
 
 
-def run(cmd: list[str], *, cwd: str, timeout: int) -> dict:
+def profile_command_env(worktree_path: str) -> dict[str, str] | None:
+    """The environment commands in `worktree_path` run with: the process's
+    own plus every matching profile's `command_env`. None when no profile
+    adds anything, meaning "inherit"."""
+    extra: dict[str, str] = {}
+    for profile in detect_profiles(worktree_path):
+        if profile.command_env is not None:
+            extra.update(profile.command_env(worktree_path))
+    return {**os.environ, **extra} if extra else None
+
+
+def build_output_patterns(worktree_path: str) -> list[str]:
+    """Every matching profile's build-output folders, in order."""
+    patterns: list[str] = []
+    for profile in detect_profiles(worktree_path):
+        patterns.extend(p for p in profile.build_output if p not in patterns)
+    return patterns
+
+
+def run(cmd: list[str], *, cwd: str, timeout: int, input: str | None = None) -> dict:
     """Shared subprocess runner for per-language hooks (dart_tools.py,
     java_tools.py, vue_tools.py) — consistent timeout/output-capping
-    behavior."""
+    behavior, and the environment the worktree's profiles ask for.
+    `input` is sent on stdin."""
     try:
-        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False, timeout=timeout)
+        proc = subprocess.run(
+            cmd, cwd=cwd, capture_output=True, text=True, check=False, timeout=timeout, env=profile_command_env(cwd),
+            input=input,
+        )
     except subprocess.TimeoutExpired as exc:
         return {
             "passed": False,

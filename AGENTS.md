@@ -496,7 +496,14 @@ locally, like removing a ticket:
   (`POST /api/stories/{key}/external-change`). A ticket the source reports
   closed or deleted stops being dispatched: an unstarted story becomes
   `skipped` (parked_reason `closed_externally`), an in-flight one is only
-  flagged, a closed epic is put on hold. A story is only called deleted
+  flagged, a closed epic is put on hold. A story whose status is in
+  `ticket_hold_statuses` (On Hold, Blocked, … — a setting, per project too;
+  JIRA files On Hold under To Do, so it is not "closed") is set aside the
+  same way while it has not started — `skipped`, parked_reason
+  `on_hold_in_source`, a plan awaiting approval dropped with it — and goes
+  back to `pending` when the status moves on (MKT2-856 was planned while On
+  Hold). The epic completes and opens its PR without it; the PR says it was
+  on hold. A story is only called deleted
   after the source confirms it, and never from a walk that hit its size cap.
   Orchestration state (kind, gates, worktrees, PRs, levels) is never touched.
 - **Sources** are per project (`projects.ticket_source`, `PUT
@@ -564,6 +571,14 @@ question — the planner then follows them as decisions but may still ask
 about something they do not settle. `send_back_to_planning` clears them
 when a re-plan should reconsider (new work merged under the plan), and
 keeps them for a person's Re-plan (`POST /api/stories/{key}/replan`).
+A fresh run (Retry after a failed run) keeps the story's worktrees and the
+uncommitted work in them — in its default repo too (`_reusable_worktree`;
+recreating it lost MKT2-866's passing backend while its portal was kept).
+The planner's brief lists that work (`_earlier_run_changes`, "Work from
+this story's earlier run"), and `dev_loop` keeps every repo the story
+already changed writable and those files editable even when the new plan
+does not list them, so a fix the gate or the review asks for there is
+still possible. Removing the epic is the clean slate.
 Their tokens roll up into the planner's `story_usage` row via the same
 `on_turn` hook, and their spend caps are carved out of
 `planner_sdk_max_budget_usd` rather than each inheriting the whole cap.
@@ -692,8 +707,15 @@ state, not a bespoke table.
     compile/lint, planned tests — subprocesses, no model). Fail → straight
     back to `dev` with a targeted fix message (`gate_feedback`, appended to
     the run's existing `dev_history`); three consecutive fails →
-    `failed`. Pass → `verifier`, which reuses the gate report
-    (`tier1_gate`) instead of re-running the toolchain. Review fail →
+    `failed`. A failure the profile says is the build environment (an
+    issue carrying `environment`, see below) → `failed` at once, saying
+    why: dev cannot fix a toolchain and "fixes" working code trying.
+    Pass → `verifier`, which reuses the gate report
+    (`tier1_gate`) instead of re-running the toolchain, and shows the
+    review what the story changed in every repo it wrote (`_story_diffs`,
+    another repo's paths `@label/`-prefixed — MKT2-866's review saw only
+    the backend and rejected it for "no frontend diffs"), every file cut to
+    its share of one budget (`_budgeted_diffs`) rather than a file count. Review fail →
     `dev` (verifier iteration budget, separate from the gate's).
   - A run that ended `completed` can be **re-entered at `dev`** by the merge
     queue: `graph.aupdate_state(..., as_node="gate")` with
@@ -728,7 +750,45 @@ MCP hop in either: `make_dev_tools()`/`make_planner_tools()` hand their
 3. Add tests under `tests/test_*_tools.py`.
 
 Do not special-case languages inside `safe_shell` / `dev_tools` — profiles
-own analyze, test, verify, safe command prefixes, and prompt conventions.
+own analyze, test, verify, safe command prefixes, and prompt conventions,
+and three things about the toolchain itself:
+
+- `command_env` — extra environment for every command in a matching
+  worktree, the gate's (`language_hooks.run`) and dev's own (`safe_shell`).
+  Java's is `tools/jdk.py`'s `java_env`: `JAVA_HOME`/`PATH` for an
+  installed JDK of the version the project states (pom `maven.compiler.
+  release` / `java.version` / `maven.compiler.source`, Gradle toolchain or
+  `sourceCompatibility`, `.java-version`), newest patch first; none stated
+  or none installed leaves the environment alone. MKT2-866 built a Java 21
+  project on the machine's default JDK 26 and javac crashed.
+- `build_output` — the toolchain's output folders (`target/`,
+  `node_modules/`, …). `tools/worktree.py`'s `exclude_build_output` writes
+  them into the repo's `info/exclude` (a marked block, shared by every
+  worktree of the repo, never committed) when a worktree is made and at
+  every run start, so they are never staged even where the repo does not
+  ignore them — MKT2-866's `mkt-apiservice` has no .gitignore on main, and
+  168 files under `target/` were staged for the epic's pull request. For
+  an attached local folder that is the person's own repo's `info/exclude`.
+  The same list fixes the repo itself: at dispatch, under the epic's merge
+  lock and before the story branches, `daemon/main.py`'s
+  `_ignore_build_output_on_epic` commits the entries the repo's own
+  .gitignore files do not cover (`missing_gitignore_entries` —
+  `info/exclude` and global excludes do not count) to the root .gitignore
+  on the epic branch, so they reach the epic's PR. Off per project with
+  `manage_gitignore`; a failure never stops a run.
+- Vue's analyze also runs ESLint on what the story changed
+  (`vue_tools.lint_story_changes`), and its `after_dev_changes` runs
+  `eslint --fix` on those files — the repo's own lint/Prettier rules, which
+  vue-tsc does not check (MKT2-866 reached its PR with 22 prettier errors).
+  Measured against each file's committed version: a file the story created,
+  or one that was clean, is auto-formatted and must stay clean; an older
+  file that already had errors (the MKT portal has 17,000 in 82 files) is
+  never reformatted wholesale and fails only when the story added errors.
+- `environment_problem` — (worktree, failed step's result) → why the
+  failure is the environment, not the code. Java's: no compiler error in
+  the source and a javac crash / unsupported release / missing JDK in the
+  output, with `jdk.describe` saying which JDK was used or that the stated
+  one is not installed. The gate stops the run on it (above).
 
 ## Reconciler and daemon
 

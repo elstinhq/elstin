@@ -847,6 +847,73 @@ async def test_no_warning_without_an_idle_budget():
     assert not any("IDLE WARNING" in _trailing_text(r) for r in provider.calls)
 
 
+# --- turn warning --------------------------------------------------------
+
+
+async def test_the_last_turns_before_the_turn_cap_carry_a_warning():
+    """A capped run's last text is the narration beside its final tool call.
+    Warned in time, a role whose answer is that text answers instead."""
+    provider = FakeProvider(script=[
+        _tool_call_response("read_file_tool", {"path": f"f{i}"}, call_id=f"c{i}") for i in range(3)
+    ] + [_text_response("the answer")])
+    result = await run_agent_loop(
+        _config(provider, tool_fns={"read_file_tool": lambda path: "x"}, max_turns=4, turn_warning_window=2),
+        [text_message("user", "go")],
+    )
+
+    assert result.terminal_reason == TERMINAL_END_TURN and result.final_text == "the answer"
+    assert not any("TURN LIMIT" in _trailing_text(r) for r in provider.calls[:2])
+    assert "1 more turn(s) after this one" in _trailing_text(provider.calls[2])
+    assert "this is your last turn" in _trailing_text(provider.calls[3])
+    # Stored like any reminder: kept out of what the caller persists, but in
+    # what the provider saw.
+    assert "TURN LIMIT" not in str(result.history)
+    assert "TURN LIMIT" in str(result.sent_history)
+
+
+async def test_no_turn_warning_by_default_or_without_a_cap():
+    for overrides in ({"max_turns": 2}, {"turn_warning_window": 2}):
+        provider = FakeProvider(script=[
+            _tool_call_response("read_file_tool", {"path": "a"}, call_id="c1"),
+            _text_response("done"),
+        ])
+        await run_agent_loop(
+            _config(provider, tool_fns={"read_file_tool": lambda path: "x"}, **overrides),
+            [text_message("user", "go")],
+        )
+
+        assert not any("TURN LIMIT" in _trailing_text(r) for r in provider.calls)
+
+
+async def test_sent_history_is_what_the_last_request_sent_plus_its_answer():
+    """What a caller adds one more request on top of: it must extend the
+    last request exactly, reminders included, or it misses the cache."""
+    provider = FakeProvider(script=[
+        _tool_call_response("t", {"x": 1}, call_id="c1"),
+        _tool_call_response("t", {"x": 2}, call_id="c2"),
+    ])
+    result = await run_agent_loop(
+        _config(provider, tool_fns={"t": lambda x: "ok"}, trailing_reminder=lambda: "REMINDER", max_turns=2),
+        [text_message("user", "go")],
+    )
+
+    last = provider.calls[-1].messages
+    assert result.sent_history[: len(last)] == last
+    assert [m.role for m in result.sent_history[len(last):]] == ["assistant", "tool"]
+
+
+async def test_tool_choice_reaches_every_request():
+    provider = FakeProvider(script=[_text_response("done")])
+
+    await run_agent_loop(
+        _config(provider, tools=[ToolDef(name="t", description="d", parameters={"type": "object"})], tool_choice="none"),
+        [text_message("user", "go")],
+    )
+
+    assert provider.calls[0].tool_choice == "none"
+    assert provider.calls[0].tools
+
+
 # --- trailing reminder --------------------------------------------------
 
 

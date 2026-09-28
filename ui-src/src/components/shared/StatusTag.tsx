@@ -71,6 +71,9 @@ export const GATE_ACTION: Partial<Record<StoryStatus, GateAction>> = {
 export const PARKED_REASON_LABEL: Record<string, string> = {
   already_satisfied: "already satisfied — no changes needed",
   cancelled: "cancelled",
+  // forge/services/external_sync.py: set aside while the source has it On
+  // Hold (or another ticket_hold_statuses status), back to pending after.
+  on_hold_in_source: "on hold in the source — picked up once it is not",
 };
 
 export const ACTIVITY_TYPE_LABEL: Record<string, string> = {

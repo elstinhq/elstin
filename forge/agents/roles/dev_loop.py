@@ -67,8 +67,9 @@ from forge.services.run_activity import append_activity
 from forge.services.usage import effective_budget_usd, record_phase_usage, record_run_outcome, turn_usage_meta
 from forge.tools import language_hooks
 from forge.tools.dev_tools import BOOKKEEPING_TOOLS, PROGRESS_TOOLS, READ_ONLY_TOOLS, WEB_TOOLS, make_dev_tools
+from forge.tools.git_tools import list_changed_files
 from forge.tools.progress import render_progress, seed_progress_items
-from forge.tools.workspace import Workspace, labels_in_plan
+from forge.tools.workspace import REFERENCE_SIGIL, Workspace, labels_in_plan
 from forge.tools.worktree import create_worktree
 from forge.tools.worktree_sync import sync_planned_files_from_project
 
@@ -351,6 +352,21 @@ async def run_dev(
                 )
         write_roots.setdefault(default_label, worktree_path)
 
+        # This story's own work from an earlier run — a Retry keeps its
+        # worktrees (forge/daemon/main.py): writable, and its files editable,
+        # even where the new plan takes them as done and does not list them,
+        # so a fix the gate or the review asks for there is still possible.
+        for label, path in existing.items():
+            if label in (read_only_labels or ()):
+                continue
+            changed = await asyncio.to_thread(list_changed_files, path)
+            if not changed:
+                continue
+            write_roots.setdefault(label, path)
+            allowed_paths |= {
+                _norm_rel(rel if label == default_label else f"{REFERENCE_SIGIL}{label}/{rel}") for rel in changed
+            }
+
         # Readable everywhere: a repo with a worktree is read there (so dev
         # sees what it just wrote), any other repo at the epic branch's
         # worktree the daemon supplied, else at its own checkout.
@@ -381,7 +397,7 @@ async def run_dev(
         if gate_feedback:
             brief = gate_feedback
             if run_id:
-                append_activity(run_id, type="status", phase="dev", title="Fix mode: deterministic gate feedback carried into dev loop", detail=gate_feedback[:1000])
+                append_activity(run_id, type="status", phase="dev", title="Fix mode: deterministic gate feedback carried into dev loop", detail=gate_feedback[:8000])
         else:
             required_fixes, analyze_errors = _collect_required_fixes(verifier_report)
             brief = _build_iteration_brief(worktree_path, allowed_paths, required_fixes, analyze_errors, continuing=continuing)

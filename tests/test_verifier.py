@@ -440,3 +440,49 @@ def test_changes_left_to_a_person_are_not_the_reviewers_to_demand():
     assert payload["left_to_a_person"] == [{"path": "@contracts/orders.yaml", "purpose": "add the export path"}]
     assert "Never set passed=false because they are missing" in _VERIFIER_REVIEW_CORE
     assert "left_to_a_person" not in _build_llm_payload({"files_to_modify": []}, [], [], [], {})
+
+
+async def test_the_review_sees_every_repo_the_story_changed(git_repo, tmp_path, registered_fake_profiles, monkeypatch):
+    """MKT2-866: backend and portal changed, the review was shown only the
+    backend, and rejected the story for "no frontend diffs"."""
+    import json
+    import subprocess
+
+    portal = tmp_path / "portal"
+    subprocess.run(["git", "-C", git_repo, "worktree", "add", "-q", "-b", "feat/portal", str(portal)], check=True)
+    (portal / "export.ts").write_text("export const exportCustomers = () => {};\n")
+    with open(f"{git_repo}/Search.java", "w") as handle:
+        handle.write("class Search {}\n")
+    sent = {}
+
+    async def fake_review(**kwargs):
+        sent["payload"] = json.loads(kwargs["messages"][-1]["content"])
+        return {"passed": True, "issues": [], "required_fixes": []}, {"model": "fake"}
+
+    monkeypatch.setattr(verifier, "get_int_config", lambda key, default=0: 0)
+    monkeypatch.setattr(verifier, "chat_completion_json", fake_review)
+    gate = {"passed": True, "issues": [], "required_fixes": [], "profiles": {}, "changed_files": ["Search.java"], "dev_targets": []}
+
+    result = await verifier.run_verifier(
+        plan={"files_to_create": [{"path": "Search.java"}, {"path": "@portal/export.ts"}], "files_to_modify": []},
+        acceptance_criteria=["export works"], worktree_path=git_repo, file_changes=[], precomputed_gate=gate,
+        story_worktrees={"portal": {"worktree_path": str(portal)}}, default_label="api",
+    )
+
+    assert [d["path"] for d in result["diffs"]] == ["Search.java", "@portal/export.ts"]
+    assert [d["path"] for d in sent["payload"]["diffs"]] == ["Search.java", "@portal/export.ts"]
+    assert "exportCustomers" in sent["payload"]["diffs"][1]["diff"]
+
+
+def test_every_changed_file_is_shown_within_the_budget():
+    """No file dropped for coming 21st; small diffs whole, big ones share what is left."""
+    small = [{"path": f"s{i}.ts", "diff": "x" * 500} for i in range(20)]
+    big = [{"path": "big.java", "diff": "y" * 200_000}]
+
+    shown = verifier._budgeted_diffs(small + big)
+
+    assert [d["path"] for d in shown] == [d["path"] for d in small + big]
+    assert all(len(d["diff"]) == 500 for d in shown[:20])
+    assert len(shown[20]["diff"]) == verifier._MAX_DIFF_CHARS
+    many = verifier._budgeted_diffs([{"path": f"f{i}", "diff": "z" * 50_000} for i in range(30)])
+    assert len(many) == 30 and sum(len(d["diff"]) for d in many) <= verifier._DIFF_BUDGET_CHARS

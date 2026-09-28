@@ -441,3 +441,36 @@ async def test_a_retried_story_plans_with_the_answers_already_given(git_repo: st
     assert sm.get_story("ENG-2")["status"] == "awaiting_plan_approval"
     assert seen["clarification_answers"] == answers
     assert seen["answers_from_earlier_run"] is True
+
+
+async def test_retry_keeps_the_work_the_failed_run_left_and_the_planner_is_told(git_repo: str, tmp_path, project_id, monkeypatch: pytest.MonkeyPatch):
+    """MKT2-866: Retry recreated the story's main worktree — throwing away a
+    backend that compiled and passed its tests — while keeping its portal."""
+    import forge.orchestration.graph as graph
+    from forge.services.run_activity import list_activity
+    from tests.conftest import fake_run_planner
+
+    _configure(str(tmp_path / "worktrees"))
+    sm = StateManager()
+    _create_epic_with_repo(sm, "ENG-1", project_id=project_id, repo_path=git_repo, levels=[["ENG-2"]])
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0, summary="Export customers", depends_on=[])
+    await poll_once(sm, wait=True)
+    worktree = sm.get_story("ENG-2")["worktree_path"]
+    with open(os.path.join(worktree, "Export.java"), "w") as handle:
+        handle.write("class Export {}\n")
+    sm.set_story_status("ENG-2", "failed", failure_stage="run")
+    sm.retry_story("ENG-2")
+    briefs: list[str] = []
+
+    async def planner(**kwargs):
+        briefs.append(kwargs["user_request"])
+        return await fake_run_planner(**kwargs)
+
+    monkeypatch.setattr(graph, "run_planner", planner)
+
+    await poll_once(sm, wait=True)
+
+    assert sm.get_story("ENG-2")["worktree_path"] == worktree
+    assert open(os.path.join(worktree, "Export.java")).read() == "class Export {}\n"
+    assert "## Work from this story's earlier run" in briefs[0] and "- Export.java" in briefs[0]
+    assert any(e["title"].startswith("Kept this story's worktree") for e in list_activity("ENG-2"))

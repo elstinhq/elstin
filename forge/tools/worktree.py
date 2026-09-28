@@ -25,7 +25,7 @@ import subprocess
 import threading
 from contextlib import contextmanager
 
-from forge.tools.language_hooks import ensure_dependencies
+from forge.tools.language_hooks import build_output_patterns, ensure_dependencies
 
 logger = logging.getLogger("forge.worktree")
 
@@ -328,6 +328,7 @@ def create_worktree(
         else:
             resolved_base = _resolve_base_ref(project_path, base_ref)
             _git(project_path, "worktree", "add", "-b", branch, worktree_path, resolved_base)
+        exclude_build_output(project_path, (worktree_path,))
 
     dependency_result = ensure_dependencies(worktree_path)
     if not dependency_result.get("passed", True):
@@ -341,6 +342,80 @@ def create_worktree(
         "branch": branch,
         "dependencies": dependency_result,
     }
+
+
+_EXCLUDE_BEGIN = "# >>> code_forge: build output, never committed (forge/tools/worktree.py)"
+_EXCLUDE_END = "# <<< code_forge"
+
+
+def exclude_build_output(project_path: str, extra_paths: tuple[str, ...] = ()) -> list[str]:
+    """Keep the toolchains' output folders (`target/`, `node_modules/`, …)
+    out of every commit forge makes from `project_path`, whether or not the
+    repo ignores them: a block in the repo's `info/exclude`, which every
+    worktree of it shares and which is never committed or pushed. Rewritten
+    in place, so it stays one block. Returns the patterns.
+
+    MKT2-866: `mkt-apiservice`'s main branch has no .gitignore, the build
+    check left `target/` behind, and forge staged 168 build files for the
+    epic's pull request. Folders come from the profiles detected in the repo
+    and in `extra_paths` (its worktrees, whose branch may add a toolchain)."""
+    patterns: list[str] = []
+    for path in (project_path, *extra_paths):
+        patterns.extend(p for p in build_output_patterns(path) if p not in patterns)
+    common = _git(project_path, "rev-parse", "--git-common-dir", check=False).stdout.strip()
+    if not patterns or not common:
+        return patterns
+    exclude_path = os.path.join(project_path, common, "info", "exclude") if not os.path.isabs(common) else os.path.join(common, "info", "exclude")
+    try:
+        with open(exclude_path, encoding="utf-8") as handle:
+            current = handle.read()
+    except OSError:
+        current = ""
+    kept = re.sub(rf"\n?{re.escape(_EXCLUDE_BEGIN)}.*?{re.escape(_EXCLUDE_END)}\n?", "\n", current, flags=re.DOTALL)
+    block = "\n".join([_EXCLUDE_BEGIN, *patterns, _EXCLUDE_END]) + "\n"
+    updated = (kept.rstrip("\n") + "\n" if kept.strip() else "") + block
+    if updated != current:
+        os.makedirs(os.path.dirname(exclude_path), exist_ok=True)
+        with open(exclude_path, "w", encoding="utf-8") as handle:
+            handle.write(updated)
+    return patterns
+
+
+def missing_gitignore_entries(worktree_path: str) -> list[str]:
+    """The build-output folders of the toolchains in `worktree_path` that the
+    repo's own .gitignore files do not already ignore. `info/exclude` and a
+    global excludes file do not count: they are one machine's, and do
+    nothing for the next person to clone the repo."""
+    missing: list[str] = []
+    for pattern in build_output_patterns(worktree_path):
+        probe = f"{pattern.rstrip('/')}/.forge-probe" if pattern.endswith("/") else pattern
+        proc = _git(worktree_path, "check-ignore", "-v", "--no-index", probe, check=False)
+        source, _, rest = proc.stdout.strip().partition(":")
+        matched = rest.split(":", 1)[1].split("\t", 1)[0] if ":" in rest else ""
+        covered = (
+            proc.returncode == 0 and os.path.basename(source) == ".gitignore" and not os.path.isabs(source)
+            and not source.startswith(".git/") and not matched.startswith("!")
+        )
+        if not covered:
+            missing.append(pattern)
+    return missing
+
+
+def add_to_gitignore(worktree_path: str, entries: list[str]) -> str:
+    """Append `entries` to the root .gitignore under a comment saying who
+    added them, creating the file if the repo has none. Returns its path."""
+    path = os.path.join(worktree_path, ".gitignore")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            current = handle.read()
+    except FileNotFoundError:
+        current = ""
+    block = "# Build output (added by code_forge)\n" + "\n".join(entries) + "\n"
+    if current:
+        block = ("" if current.endswith("\n") else "\n") + "\n" + block
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(block)
+    return path
 
 
 def remove_worktree(project_path: str, worktree_path: str) -> None:

@@ -66,6 +66,24 @@ CODE_FORGE_EMAIL = "forge@localhost"
 CODE_FORGE_CO_AUTHOR = f"Co-authored-by: {CODE_FORGE_NAME} <{CODE_FORGE_EMAIL}>"
 
 
+def commit_paths(repo_path: str, paths: list[str], message: str, *, author: tuple[str, str] | None = None) -> str:
+    """Commit exactly `paths` — nothing else staged or changed in the
+    worktree goes with them — authored like commit_all. Returns the SHA."""
+    add = _run_git(["add", "--", *paths], cwd=repo_path)
+    if add.returncode != 0:
+        raise GitMergeError(add.stderr.strip() or "git add failed", code="commit_failed", stderr=add.stderr)
+    name, email = author or (CODE_FORGE_NAME, CODE_FORGE_EMAIL)
+    if author:
+        message = f"{message}\n\n{CODE_FORGE_CO_AUTHOR}"
+    commit = _run_git(
+        ["-c", f"user.name={name}", "-c", f"user.email={email}", "commit", "-m", message, "--only", "--", *paths],
+        cwd=repo_path,
+    )
+    if commit.returncode != 0:
+        raise GitMergeError(commit.stderr.strip() or "git commit failed", code="commit_failed", stderr=commit.stderr)
+    return _run_git(["rev-parse", "HEAD"], cwd=repo_path).stdout.strip()
+
+
 def commit_all(repo_path: str, message: str, *, author: tuple[str, str] | None = None) -> str | None:
     """Stage and commit all changes. Returns commit SHA or None if nothing to commit.
 
@@ -164,7 +182,13 @@ def get_file_diff(worktree_path: str, relative_path: str) -> str:
 
     abs_path = os.path.join(worktree_path, relative_path)
     if os.path.isfile(abs_path):
-        return "[new or modified file]"
+        # A new file nothing has staged yet: its whole content, as a diff
+        # against nothing, so a reviewer sees what was written.
+        untracked = subprocess.run(
+            ["git", "-C", worktree_path, "diff", "--no-index", "--", os.devnull, relative_path],
+            capture_output=True, text=True, check=False,
+        )
+        return untracked.stdout or "[new or modified file]"
     return proc.stdout
 
 

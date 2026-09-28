@@ -7,6 +7,7 @@ this repo's convention of faking at the service boundary (forge/llm/)
 rather than mocking run_dev itself."""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 import pytest
@@ -381,3 +382,39 @@ def test_changes_left_to_a_person_are_named_but_not_in_dev_s_plan():
     assert "read_only_changes" not in approved and "src/Search.java" in approved
     assert "Not yours to make" in rest
     assert "- @contracts/orders.yaml: add the columns to the contract" in rest
+
+
+async def test_files_the_story_already_changed_stay_writable_off_the_plan(git_repo: str, tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """A Retry keeps the story's worktrees, and the new plan may take their
+    work as done without listing it. A fix there must still be possible —
+    in the default repo and in another repo the plan does not even name."""
+    import subprocess
+
+    import forge.agents.roles.dev_loop as dev_loop_module
+    from forge.config.store import set_config
+
+    portal = tmp_path / "portal"
+    subprocess.run(["git", "-C", git_repo, "worktree", "add", "-q", "-b", "feat/p", str(portal)], check=True)
+    (portal / "export.ts").write_text("export const x = 1;\n")  # the earlier run's portal work
+    with open(f"{git_repo}/Search.java", "w") as handle:  # ...and its backend work
+        handle.write("class Search {}\n")
+    set_config("openai_api_key", "sk-test")
+    monkeypatch.setattr(
+        dev_loop_module, "get_provider",
+        lambda: FakeProvider(script=[
+            _tool_call_response("edit_file_tool", {"path": "@portal/export.ts", "target_content": "x = 1", "replacement_content": "x = 2"}, "c1"),
+            _tool_call_response("edit_file_tool", {"path": "Search.java", "target_content": "{}", "replacement_content": "{ int n; }"}, "c2"),
+            _tool_call_response("write_file_tool", {"path": "Other.java", "content": "class Other {}\n"}, "c3"),
+            _text_response("fixed"),
+        ]),
+    )
+
+    await run_dev(
+        plan={"files_to_modify": [{"path": "README.md"}]}, context_bundle={}, worktree_path=git_repo, project_path=git_repo,
+        default_label="api", repo_roots={"api": git_repo, "portal": str(portal)},
+        story_worktrees={"portal": {"repo_path": git_repo, "worktree_path": str(portal), "branch": "feat/p"}},
+    )
+
+    assert (portal / "export.ts").read_text() == "export const x = 2;\n"
+    assert open(f"{git_repo}/Search.java").read() == "class Search { int n; }\n"
+    assert not os.path.exists(f"{git_repo}/Other.java")  # neither planned nor the story's: still refused

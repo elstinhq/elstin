@@ -9,15 +9,20 @@ run_tests) — no codegen/DI step between install and typecheck.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import tempfile
 
 from forge.tools import language_hooks
+from forge.tools.git_tools import list_changed_files, read_file_at_head, stage_files
 from forge.tools.language_hooks import LanguageProfile
 
 NPM_DEPENDENCY_TIMEOUT_SECONDS = 300
 VUE_TSC_TIMEOUT_SECONDS = 180
 ESLINT_TIMEOUT_SECONDS = 180
+
+logger = logging.getLogger("forge.vue_tools")
 VITEST_TIMEOUT_SECONDS = 600
 
 _SOURCE_EXTENSIONS = (".vue", ".ts", ".tsx", ".js", ".jsx")
@@ -111,6 +116,135 @@ def _has_tsconfig(worktree_path: str) -> bool:
     )
 
 
+# --- ESLint on what the story changed ------------------------------------------
+#
+# A repo's lint rules (Prettier through ESLint, for MKT) are its standard, and
+# vue-tsc does not check them: MKT2-866 reached its pull request with 22
+# prettier/prettier errors. But a repo is not necessarily lint-clean — the MKT
+# portal has 17,000 errors in 82 older files — so a story is held to its own
+# changes, measured against each file's committed version (HEAD, the epic
+# branch the story started from): a file it creates, or one that was clean,
+# is auto-formatted and must stay clean; an older file is never reformatted
+# wholesale (the repo's guide forbids drive-by rewrites) and only fails when
+# the story added errors to it.
+
+_ESLINT_CONFIG_FILES = (
+    "eslint.config.js", "eslint.config.mjs", "eslint.config.cjs", "eslint.config.ts",
+    ".eslintrc", ".eslintrc.js", ".eslintrc.cjs", ".eslintrc.json", ".eslintrc.yml", ".eslintrc.yaml",
+)
+_LINTABLE_SUFFIXES = (".vue", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
+_MAX_LINT_ERROR_LINES = 25
+# {(worktree, HEAD sha, path): error count}: a HEAD version never changes.
+_baseline_cache: dict[tuple[str, str, str], int] = {}
+
+
+def _has_eslint(worktree_path: str) -> bool:
+    if any(os.path.isfile(os.path.join(worktree_path, name)) for name in _ESLINT_CONFIG_FILES):
+        return True
+    try:
+        with open(os.path.join(worktree_path, "package.json"), encoding="utf-8") as handle:
+            return "eslintConfig" in json.load(handle)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return False
+
+
+def _lintable(worktree_path: str, paths: list[str]) -> list[str]:
+    return sorted(
+        path for path in paths
+        if path.endswith(_LINTABLE_SUFFIXES) and os.path.isfile(os.path.join(worktree_path, path))
+    )
+
+
+def _eslint_errors(worktree_path: str, args: list[str], *, stdin: str | None = None) -> dict[str, list[dict]] | None:
+    """{relative path: [error message, ...]} from `eslint --format json`
+    (severity 2 only), or None when ESLint did not produce a report. The
+    report goes to a file: it carries every file's source, and the shared
+    runner keeps only the tail of stdout."""
+    fd, report_path = tempfile.mkstemp(prefix="forge-eslint-", suffix=".json")
+    os.close(fd)
+    try:
+        result = language_hooks.run(
+            ["npx", "eslint", "--format", "json", "--output-file", report_path, *args],
+            cwd=worktree_path, timeout=ESLINT_TIMEOUT_SECONDS, input=stdin,
+        )
+        with open(report_path, encoding="utf-8") as handle:
+            report = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        logger.warning("eslint produced no report in %s: %s", worktree_path, (locals().get("result") or {}).get("stderr", "")[-500:])
+        return None
+    finally:
+        try:
+            os.remove(report_path)
+        except OSError:
+            pass
+    errors: dict[str, list[dict]] = {}
+    for entry in report if isinstance(report, list) else []:
+        path = entry.get("filePath") or ""
+        rel = _norm(os.path.relpath(path, worktree_path)) if os.path.isabs(path) else _norm(path)
+        errors[rel] = [m for m in entry.get("messages") or [] if m.get("severity") == 2]
+    return errors
+
+
+def _baseline_errors(worktree_path: str, path: str) -> int | None:
+    """Lint errors in `path` as committed (HEAD), or None for a file the
+    story created."""
+    head = language_hooks.run(["git", "rev-parse", "HEAD"], cwd=worktree_path, timeout=30).get("stdout", "").strip()
+    key = (worktree_path, head, path)
+    if key in _baseline_cache:
+        return _baseline_cache[key]
+    content = read_file_at_head(worktree_path, path)
+    if content is None:
+        return None
+    report = _eslint_errors(worktree_path, ["--stdin", "--stdin-filename", path], stdin=content)
+    count = len((report or {}).get(path, [])) if report is not None else 0
+    _baseline_cache[key] = count
+    return count
+
+
+def vue_format_changed_files(worktree_path: str, changed_files: list[str]) -> dict:
+    """after_dev_changes: `eslint --fix` over the files the developer step
+    changed that it created or that were lint-clean before — formatting done
+    by the tool rather than spent on a fix round. Older files with existing
+    errors are left as they are."""
+    if not _has_eslint(worktree_path):
+        return {"passed": True, "skipped": True, "reason": "no_eslint_config"}
+    files = _lintable(worktree_path, changed_files)
+    fixable = [path for path in files if not _baseline_errors(worktree_path, path)]
+    if not fixable:
+        return {"passed": True, "skipped": True, "reason": "nothing_to_format"}
+    result = language_hooks.run(["npx", "eslint", "--fix", *fixable], cwd=worktree_path, timeout=ESLINT_TIMEOUT_SECONDS)
+    stage_files(worktree_path, fixable)
+    return {"passed": True, "skipped": False, "formatted": fixable, "eslint_exit": result.get("exit_code")}
+
+
+def lint_story_changes(worktree_path: str) -> tuple[int, list[str]]:
+    """(new error count, error lines) for the story's changed files: every
+    error in a file it created or that was clean, and — for an older file
+    that already had errors — the file's errors when the story added any."""
+    if not _has_eslint(worktree_path):
+        return 0, []
+    files = _lintable(worktree_path, list_changed_files(worktree_path))
+    if not files:
+        return 0, []
+    current = _eslint_errors(worktree_path, files)
+    if current is None:
+        return 0, []  # ESLint could not run; vue-tsc still gates the change
+    count, lines = 0, []
+    for path in files:
+        errors = current.get(path, [])
+        before = _baseline_errors(worktree_path, path) or 0
+        if len(errors) <= before:
+            continue
+        count += len(errors) - before
+        note = f" (the file had {before} before this change)" if before else ""
+        for message in errors:
+            lines.append(
+                f"{path}:{message.get('line')}:{message.get('column')}: {message.get('message')} "
+                f"({message.get('ruleId')}){note}"
+            )
+    return count, lines[:_MAX_LINT_ERROR_LINES]
+
+
 def ensure_npm_dependencies(worktree_path: str) -> dict:
     """Prefer `npm ci` when a lockfile is present — reproducible installs
     matching CI; fall back to `npm install` for repos without one."""
@@ -137,10 +271,11 @@ def parse_tsc_errors(output: str, worktree_path: str) -> tuple[int, list[str]]:
 
 
 def run_vue_analyze(worktree_path: str, targets: list[str]) -> dict:
-    """Typecheck with `vue-tsc` when a TS project is present; otherwise
-    fall back to `npm run lint` if that script exists. `targets` are
-    unused — both tools are project-wide — but kept for LanguageProfile
-    API compatibility with scoped analyze dispatch."""
+    """Typecheck with `vue-tsc` when a TS project is present, plus ESLint
+    over what the story changed (`lint_story_changes`); otherwise fall back
+    to `npm run lint` if that script exists. `targets` are unused — the
+    checkers are project-wide, and the lint scope is the story's changes —
+    but kept for LanguageProfile API compatibility."""
     del targets  # project-wide checkers; path list is for dispatch only
     if _has_tsconfig(worktree_path):
         result = language_hooks.run(
@@ -150,11 +285,15 @@ def run_vue_analyze(worktree_path: str, targets: list[str]) -> dict:
         )
         combined = "\n".join(part for part in (result.get("stdout"), result.get("stderr")) if part)
         error_count, error_lines = parse_tsc_errors(combined, worktree_path)
+        # The repo's lint rules too, on what the story changed (see
+        # lint_story_changes) — vue-tsc does not check them.
+        lint_count, lint_lines = lint_story_changes(worktree_path)
         return {
             **result,
-            "passed": result.get("passed", False) and error_count == 0,
-            "error_count": error_count,
-            "error_lines": error_lines,
+            "passed": result.get("passed", False) and error_count == 0 and lint_count == 0,
+            "error_count": error_count + lint_count,
+            "error_lines": (error_lines + lint_lines)[:_MAX_LINT_ERROR_LINES * 2],
+            "lint_error_count": lint_count,
         }
 
     if "lint" in _package_scripts(worktree_path):
@@ -335,4 +474,6 @@ def vue_vite_profile() -> LanguageProfile:
         planner_conventions=VUE_PLANNER_CONVENTIONS,
         dev_conventions=VUE_DEV_CONVENTIONS,
         verifier_review_conventions=VUE_VERIFIER_REVIEW_CONVENTIONS,
+        build_output=("node_modules/", "coverage/", "dist/"),
+        after_dev_changes=vue_format_changed_files,
     )

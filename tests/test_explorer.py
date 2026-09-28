@@ -151,6 +151,27 @@ async def test_explorer_prompt_is_self_contained(git_repo):
     assert provider.calls[0].system == EXPLORER_SYSTEM
 
 
+async def test_an_explorer_is_told_its_turn_budget_and_warned_before_it_runs_out(git_repo):
+    """Every explorer on one run read until the cap cut it off, so each
+    needed a wrap-up call to report at all. Told up front, and warned in its
+    last two turns, it answers inside its own loop."""
+    provider = FakeProvider(script=[
+        LlmResponse(content=[ToolCallBlock(id=f"c{i}", name="grep_tool", arguments={"pattern": f"p{i}"})], stop_reason="tool_calls", usage=Usage(), model="m")
+        for i in range(3)
+    ] + [_text("Rendered in `a.py:1`.")])
+
+    findings, complete = await run_explorer(provider=provider, model="m", project_path=git_repo, area=_area(), max_turns=4)
+
+    assert "You have 4 turn(s)" in provider.calls[0].messages[0].content[0].text
+    trailing = [r.messages[-1].content[0].text if r.messages[-1].role == "user" else "" for r in provider.calls]
+    assert not any("TURN LIMIT" in t for t in trailing[:2])
+    assert "1 more turn(s) after this one" in trailing[2]
+    assert "this is your last turn" in trailing[3]
+    # Answered on its last turn: no wrap-up call.
+    assert (findings, complete) == ("Rendered in `a.py:1`.", True)
+    assert len(provider.calls) == 4
+
+
 async def test_a_capped_explorer_is_asked_to_summarise_instead_of_shipping_its_narration(git_repo):
     """The bug this exists for. A capped explorer's final_text is the prose
     from the turn where it ALSO called a tool — an announcement of the read
@@ -173,22 +194,62 @@ async def test_a_capped_explorer_is_asked_to_summarise_instead_of_shipping_its_n
 
     assert findings == "`currency` is declared at `pricing-web/openapi.json:516`."
     assert complete is True
-    # The wrap-up turn offers NO tools, so the model cannot spend it
-    # announcing another read instead of answering.
+    wrap_up, last_turn = provider.calls[-1], provider.calls[-2]
+    # The wrap-up may not call a tool, so the model cannot spend it
+    # announcing another read instead of answering...
+    assert wrap_up.tool_choice == "none"
+    # ...but it still declares the same tools and extends the last request,
+    # so the reads it already paid for come from the provider's cache.
+    assert wrap_up.tools == last_turn.tools
+    assert wrap_up.messages[: len(last_turn.messages)] == last_turn.messages
+    assert len(wrap_up.messages) > len(last_turn.messages)
+
+
+def _capped_turn(text: str = "Let me check the schema.") -> LlmResponse:
+    return LlmResponse(
+        content=[TextBlock(text=text), ToolCallBlock(id="c1", name="grep_tool", arguments={"pattern": "x"})],
+        stop_reason="tool_calls", usage=Usage(), model="m",
+    )
+
+
+async def test_a_gateway_that_rejects_tool_choice_gets_the_tool_free_wrap_up(git_repo):
+    """tool_choice is standard, but forge runs against any OpenAI-compatible
+    endpoint. One that rejects it still gets a report: the old request with
+    no tools at all, uncached but certain to be prose."""
+    provider = FakeProvider(script=[
+        _capped_turn(),
+        LlmBadRequestError("tool_choice not supported"),
+        _text("The schema is at `openapi.json:1`."),
+    ])
+
+    findings, complete = await run_explorer(provider=provider, model="m", project_path=git_repo, area=_area(), max_turns=1)
+
+    assert (findings, complete) == ("The schema is at `openapi.json:1`.", True)
+    assert provider.calls[-1].tools == [] and provider.calls[-1].tool_choice is None
+
+
+async def test_a_gateway_that_ignores_tool_choice_gets_the_tool_free_wrap_up(git_repo):
+    """A tool call coming back despite tool_choice="none" carries another
+    announcement, not a report, so it is not shipped as one."""
+    provider = FakeProvider(script=[
+        _capped_turn(),
+        _capped_turn("Let me read one more file."),
+        _text("The schema is at `openapi.json:1`."),
+    ])
+
+    findings, complete = await run_explorer(provider=provider, model="m", project_path=git_repo, area=_area(), max_turns=1)
+
+    assert (findings, complete) == ("The schema is at `openapi.json:1`.", True)
     assert provider.calls[-1].tools == []
-    # It keeps the reads it already paid for rather than starting over.
-    assert len(provider.calls[-1].messages) > 1
 
 
 async def test_an_explorer_that_cannot_even_summarise_is_reported_incomplete(git_repo):
     """The wrap-up is best-effort. When it fails there is still no honest
     way to present the narration as a finding, so it travels labelled."""
     provider = FakeProvider(script=[
-        LlmResponse(
-            content=[TextBlock(text="Let me check the schema."), ToolCallBlock(id="c1", name="grep_tool", arguments={"pattern": "x"})],
-            stop_reason="tool_calls", usage=Usage(), model="m",
-        ),
+        _capped_turn(),
         LlmBadRequestError("wrap-up rejected"),
+        LlmBadRequestError("tool-free wrap-up rejected"),
     ])
 
     findings, complete = await run_explorer(provider=provider, model="m", project_path=git_repo, area=_area(), max_turns=1)
@@ -268,6 +329,7 @@ async def test_an_incomplete_report_is_labelled_in_the_block_the_planner_reads(g
             stop_reason="tool_calls", usage=Usage(), model="m",
         ),
         LlmBadRequestError("wrap-up rejected"),
+        LlmBadRequestError("tool-free wrap-up rejected"),
     ])
 
     block, _ = await gather_exploration(

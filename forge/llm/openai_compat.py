@@ -206,6 +206,7 @@ class OpenAiCompatProvider:
                 }
                 for t in request.tools
             ]
+            kwargs["tool_choice"] = request.tool_choice
         # No max_completion_tokens: forge deliberately never caps a single
         # response — see forge/llm/types.py's LlmRequest.
         reasoning_effort = resolve_reasoning_effort(request.model, request.effort)

@@ -122,8 +122,11 @@ def run_safe_command(worktree_path: str, command: str, timeout_seconds: int = 18
         )
 
     try:
+        # The same environment as the build check's (language_hooks.run): the
+        # JDK a Java project states, say.
         proc = subprocess.run(
-            shlex.split(command), cwd=worktree_path, capture_output=True, text=True, timeout=timeout_seconds
+            shlex.split(command), cwd=worktree_path, capture_output=True, text=True, timeout=timeout_seconds,
+            env=language_hooks.profile_command_env(worktree_path),
         )
         return SafeShellResult(returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
     except subprocess.TimeoutExpired:

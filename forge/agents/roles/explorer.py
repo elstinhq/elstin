@@ -51,6 +51,7 @@ import logging
 from typing import Any
 
 from forge.agents.loop import (
+    TERMINAL_END_TURN,
     TERMINAL_MAX_BUDGET,
     TERMINAL_MAX_TURNS,
     LoopConfig,
@@ -70,6 +71,12 @@ logger = logging.getLogger("forge.explorer")
 # change. The turn cap matches the recon agent this prompt came from.
 DEFAULT_MAX_AGENTS = 3
 DEFAULT_MAX_TURNS = 8
+
+# How many of an explorer's last turns carry forge/agents/loop.py's turn
+# warning. Without it every explorer on one 3-explorer run read until the cap
+# cut it off mid-read, so all three needed a wrap-up call to produce a report
+# at all; two turns' notice is enough to finish the read in hand and answer.
+_TURN_WARNING_WINDOW = 2
 
 # Per-explorer findings cap. An explorer that ignores "compact" and writes
 # an essay would otherwise defeat the whole purpose, which is to keep the
@@ -246,6 +253,10 @@ async def run_explorer(
     prompt = (
         f"Investigation task: {area['question']}\n\n"
         + (f"Possible starting points (verify before trusting them):\n{hints}\n\n" if hints else "")
+        + (
+            f"You have {max_turns} turn(s), each one response with as many tool calls as it needs, "
+            "and the last must be your report.\n\n" if max_turns else ""
+        )
         + "Investigate and report."
     )
 
@@ -258,6 +269,7 @@ async def run_explorer(
         effort=effort,
         max_turns=max_turns,
         max_budget_usd=max_budget_usd,
+        turn_warning_window=_TURN_WARNING_WINDOW,
         # Every planner tool is read-only, so a whole turn's calls run
         # concurrently. No progress_tools: an explorer never writes, so an
         # idle-turn budget would fire on correct behavior.
@@ -281,9 +293,10 @@ async def run_explorer(
         # that to the planner as one — under a heading promising `path:line`
         # citations — is how a planner ends up reasoning from a sentence
         # that was never finished. So the reads already paid for are
-        # salvaged with one tool-free turn instead: same history, no tools,
-        # "report what you have". Cheap, and the alternative is throwing the
-        # whole investigation away.
+        # salvaged with one turn that may not call a tool instead: same
+        # history, "report what you have". Cheap — mostly served from the
+        # cache, see _wrap_up — and the alternative is throwing the whole
+        # investigation away.
         salvaged = await _wrap_up(config, result, area=area, run_id=run_id)
         if salvaged:
             findings, complete = salvaged, True
@@ -313,30 +326,51 @@ async def run_explorer(
 
 
 async def _wrap_up(config: LoopConfig, result: Any, *, area: dict[str, Any], run_id: str | None) -> str:
-    """One tool-free turn asking a capped explorer to report what it has.
+    """One turn with no tool calls, asking a capped explorer to report what
+    it has.
 
-    Safe to build on `result.history`: forge/agents/loop.py appends the
+    Safe to build on the run's history: forge/agents/loop.py appends the
     turn's tool results before it checks either cap, so a capped run's
     history ends on an answered tool message and every call in it has its
-    result. `tools=[]` is what forces prose — the adapter omits the tools
-    field entirely when the list is empty, so the model cannot spend this
-    turn announcing another read."""
-    wrap_config = LoopConfig(
-        provider=config.provider,
-        model=config.model,
-        system=config.system,
-        effort=config.effort,
-        max_turns=1,
-        on_turn=config.on_turn,
+    result.
+
+    Two tries, cheapest first. The first extends the capped run's last
+    request byte for byte — its `sent_history`, reminders included, and the
+    same tools — adding only the wrap-up prompt, with tool_choice="none" so
+    the tools are declared but cannot be called. The provider then serves
+    the whole investigation from its prefix cache. The wrap-up used to omit
+    the tools instead, which changes the prompt from its first byte: on one
+    run its three wrap-ups sent 113k input tokens and none came from the
+    cache, 40% of the whole planner phase's uncached input.
+
+    The second is that old tool-free request, kept for a gateway that
+    rejects tool_choice or ignores it (a tool call comes back, not a
+    report): with `tools=[]` the adapter omits the field entirely, so the
+    model cannot spend the turn announcing another read."""
+    messages = [*result.sent_history, text_message("user", _WRAP_UP_PROMPT)]
+    attempts = (
+        ("cached", LoopConfig(
+            provider=config.provider, model=config.model, system=config.system, effort=config.effort,
+            tools=config.tools, tool_choice="none", max_turns=1, on_turn=config.on_turn,
+        )),
+        ("tool-free", LoopConfig(
+            provider=config.provider, model=config.model, system=config.system, effort=config.effort,
+            max_turns=1, on_turn=config.on_turn,
+        )),
     )
-    try:
-        wrapped = await run_agent_loop(wrap_config, [*result.history, text_message("user", _WRAP_UP_PROMPT)])
-    except Exception as exc:  # noqa: BLE001 — same rule as the explorer itself
-        logger.warning("Explorer %r wrap-up raised: %s", area["name"], exc)
-        return ""
-    text = (wrapped.final_text or "").strip()
-    logger.info("Explorer %r wrap-up chars=%d terminal_reason=%s", area["name"], len(text), wrapped.terminal_reason)
-    return text
+    for label, wrap_config in attempts:
+        try:
+            wrapped = await run_agent_loop(wrap_config, messages)
+        except Exception as exc:  # noqa: BLE001 — same rule as the explorer itself
+            logger.warning("Explorer %r %s wrap-up raised: %s", area["name"], label, exc)
+            continue
+        text = (wrapped.final_text or "").strip()
+        logger.info("Explorer %r %s wrap-up chars=%d terminal_reason=%s", area["name"], label, len(text), wrapped.terminal_reason)
+        # Anything but a clean end is not a report: an error, or the text
+        # beside a tool call the provider let through despite tool_choice.
+        if wrapped.terminal_reason == TERMINAL_END_TURN and text:
+            return text
+    return ""
 
 
 async def gather_exploration(

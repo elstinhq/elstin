@@ -198,8 +198,12 @@ def compare_to_plan(
     }
 
 
-_MAX_DIFF_FILES = 20
-_MAX_DIFF_CHARS = 6_000
+# What the review is shown of the change: every changed file, sharing
+# _DIFF_BUDGET_CHARS (the payload is cut at 120,000), none over
+# _MAX_DIFF_CHARS. A file count cap used to drop whatever came 21st —
+# MKT2-866 changed 21 files.
+_DIFF_BUDGET_CHARS = 90_000
+_MAX_DIFF_CHARS = 12_000
 _FAILED_OUTPUT_TAIL = 1_500
 
 # Per-issue detail carried into the Tier 1 fix message. The analyzer's
@@ -292,6 +296,32 @@ def _merge_gate_reports(reports: dict[str, dict[str, Any]], workspace: Workspace
         "assumed_satisfied": assumed_satisfied,
         "repos": sorted(reports),
     }
+
+
+def _budgeted_diffs(diffs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every diff, cut to its share of _DIFF_BUDGET_CHARS: smaller diffs are
+    shown whole and what they leave goes to the larger ones."""
+    shares: dict[int, int] = {}
+    remaining = _DIFF_BUDGET_CHARS
+    order = sorted(range(len(diffs)), key=lambda i: len(diffs[i].get("diff") or ""))
+    for position, index in enumerate(order):
+        share = min(len(diffs[index].get("diff") or ""), remaining // (len(order) - position), _MAX_DIFF_CHARS)
+        shares[index] = share
+        remaining -= share
+    return [{"path": d.get("path"), "diff": (d.get("diff") or "")[:shares[i]]} for i, d in enumerate(diffs)]
+
+
+def _story_diffs(worktree_path: str, story_worktrees: dict[str, Any] | None, default_label: str) -> list[dict[str, Any]]:
+    """What the story changed, in every repo it wrote — the repos the gate
+    checks (`_gate_workspace`), another repo's paths `@label/`-prefixed.
+    Reading only `worktree_path` showed MKT2-866's review the backend and
+    none of the portal, and it rejected the story for the missing half."""
+    workspace = _gate_workspace(worktree_path, story_worktrees, default_label)
+    return [
+        {**diff, "path": workspace.display_path(label, diff["path"])}
+        for label in workspace.labels()
+        for diff in get_all_diffs(workspace.roots[label])
+    ]
 
 
 def _gate_workspace(worktree_path: str, story_worktrees: dict[str, Any] | None, default_label: str) -> Workspace:
@@ -530,7 +560,7 @@ def _build_llm_payload(plan: dict[str, Any], acceptance_criteria: list[str], fil
         "acceptance_criteria": acceptance_criteria,
         **({"left_to_a_person": left_to_a_person} if left_to_a_person else {}),
         "file_changes": file_changes,
-        "diffs": [{"path": d.get("path"), "diff": (d.get("diff") or "")[:_MAX_DIFF_CHARS]} for d in diffs[:_MAX_DIFF_FILES]],
+        "diffs": _budgeted_diffs(diffs),
         "deterministic_gate": gate_summary,
     }
 
@@ -686,7 +716,7 @@ async def run_verifier(
                 project_path=project_path, run_id=run_id, prior_build_runner=prior_build_runner,
                 story_worktrees=story_worktrees, default_label=default_label, declared_unchanged=declared_unchanged,
             )
-        diffs = await asyncio.to_thread(get_all_diffs, worktree_path)
+        diffs = await asyncio.to_thread(_story_diffs, worktree_path, story_worktrees, default_label)
 
         if not gate["passed"]:
             blockers = gate.get("required_fixes") or [issue.get("reason", "") for issue in gate.get("issues", []) if issue.get("severity") == "blocker"]
