@@ -194,13 +194,17 @@ project create (`repo_url` / `repo_path`):
   every run, never changed. `Workspace.read_only` carries them: the tools
   tell the planner, and dev never gets a worktree in one. A change the
   ticket needs there is not a reason to fail the plan: `plan_gate.
-  normalize_plan` moves it to the plan's `read_only_changes` (a
-  `read_only_changes` entry in a writable repo is moved back), and the
-  story plans and runs on the rest. The list is copied to
+  normalize_plan` moves it to the plan's `read_only_changes`, and the
+  story plans and runs on the rest. That list means "left to a person": the
+  planner may also put there a file in a writable repo that the project's
+  guide says agents must not change (MKT2-866: `orders-oas.yaml`,
+  an untracked copy of the contract). Such an entry stays — dev can only
+  write the plan's own files, so it is never touched — and is noted in the
+  activity feed for whoever approves the plan; one also listed as a file to
+  change is planned work and leaves the list. The list is copied to
   `stories.read_only_changes` on every run that plans, shown on the board
-  and in the story details, left out of dev's plan, and listed in the
-  epic's pull request under "Changes needed in read-only repos" — a
-  person's job. A plan whose only changes are there is sent back
+  ("left to a person") and in the story details, left out of dev's plan,
+  and listed in the epic's pull request under "Changes left to a person". A plan whose only changes are there is sent back
   (`KIND_NO_FILES`); `check_plan`'s `KIND_READ_ONLY_REPO` is the backstop.
   The verifier's review gets them apart from the plan (`left_to_a_person`)
   and is told never to fail a run over them — an acceptance criterion that

@@ -301,8 +301,8 @@ class _StoryMixin:
                 story.coverage_gap_detail = detail
 
     def set_story_read_only_changes(self, jira_key: str, changes: list[dict] | None) -> None:
-        """From the story's latest plan: changes it needs in a read-only repo,
-        for a person. None clears what an earlier plan listed."""
+        """From the story's latest plan: changes it needs that forge may not
+        make, for a person. None clears what an earlier plan listed."""
         with session_scope() as session:
             story = session.get(Story, jira_key)
             if story is not None:

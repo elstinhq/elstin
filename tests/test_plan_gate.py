@@ -385,23 +385,37 @@ def test_a_folder_of_the_default_repo_named_like_another_repo_is_left_alone(tmp_
     assert fixed["files_to_modify"] == [{"path": "mkt-adminportal/config.json"}] and notes == []
 
 
-def test_read_only_changes_in_a_repo_forge_can_write_are_planned_after_all(tmp_path):
-    """Not a way to leave work undone."""
+def test_a_file_in_a_writable_repo_left_to_a_person_stays_left_to_a_person(tmp_path):
+    """MKT2-866: the workspace's CLAUDE.md says `orders-oas.yaml`
+    (an untracked copy of the contract) is not source, and the planner left
+    it to a person. Moving it back into the plan had dev hand-write it. It
+    stays, flagged for whoever approves the plan."""
+    workspace = _mkt(tmp_path)
+    oas = {"path": "@mkt-adminportal/orders-oas.yaml", "purpose": "regenerate from the contract, publish"}
+    plan = _plan(files_to_modify=[{"path": "src/Search.java", "purpose": "export"}], read_only_changes=[oas])
+
+    fixed, notes = normalize_plan(plan, workspace)
+
+    assert fixed["read_only_changes"] == [oas]
+    assert fixed["files_to_create"] == [] and fixed["files_to_modify"] == [{"path": "src/Search.java", "purpose": "export"}]
+    assert notes == [
+        "@mkt-adminportal/orders-oas.yaml is in a repo forge can change, but the plan leaves it to a "
+        "person — check that at approval"
+    ]
+    assert blocking(check_plan(fixed, workspace)) == []
+
+
+def test_a_file_both_planned_and_left_to_a_person_is_planned(tmp_path):
     workspace = _mkt(tmp_path)
     plan = _plan(
-        files_to_modify=[],
-        read_only_changes=[
-            {"path": "@mkt-adminportal/src/app/search.ts", "purpose": "columns"},
-            {"path": "@mkt-adminportal/src/app/new.ts", "purpose": "new"},
-        ],
+        files_to_modify=[{"path": "@mkt-adminportal/src/app/search.ts", "purpose": "columns"}],
+        read_only_changes=[{"path": "@mkt-adminportal/src/app/search.ts", "purpose": "columns"}],
     )
 
     fixed, notes = normalize_plan(plan, workspace)
 
-    assert fixed["read_only_changes"] == []
+    assert fixed["read_only_changes"] == [] and notes == []
     assert fixed["files_to_modify"] == [{"path": "@mkt-adminportal/src/app/search.ts", "purpose": "columns"}]
-    assert fixed["files_to_create"] == [{"path": "@mkt-adminportal/src/app/new.ts", "purpose": "new"}]
-    assert len(notes) == 2
 
 
 def test_a_plan_whose_only_changes_are_read_only_is_sent_back_saying_so(tmp_path):

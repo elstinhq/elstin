@@ -39,7 +39,10 @@ Two things are fixed rather than sent back (`normalize_plan`), because a
 retry spends a whole planner run on what the gate can settle itself: a
 path naming another repo without its `@`, and a change in a read-only repo
 — moved to `read_only_changes`, for a person to make, so the rest of the
-ticket goes ahead instead of the run failing on it.
+ticket goes ahead instead of the run failing on it. `read_only_changes` is
+"left to a person": besides read-only repos it may name a file in a
+writable repo the project says agents must not change (a generated,
+untracked artifact), which is kept there and flagged, not planned.
 """
 from __future__ import annotations
 
@@ -225,8 +228,14 @@ def normalize_plan(plan: dict[str, Any], workspace: Workspace) -> tuple[dict[str
       change in a contract repo marked read-only — three rejected plans,
       and the rest of the work never started.
 
-    And the reverse: a `read_only_changes` entry in a repo forge CAN write is
-    moved back into the files to change — not a way to leave work undone."""
+    A `read_only_changes` entry in a repo forge CAN write stays there — the
+    planner is only to do that for a file the project says agents must not
+    change — and is noted, for the person approving the plan to check.
+    Moving it back into the plan undid exactly that: MKT2-866's planner left
+    `orders-oas.yaml`, an untracked copy of the contract, to a
+    person as the workspace's CLAUDE.md says, and was overruled into
+    hand-writing it. A path the plan also lists as a file to change is
+    planned work, and leaves this list."""
     plan = dict(plan)
     notes: list[str] = []
 
@@ -261,15 +270,18 @@ def normalize_plan(plan: dict[str, Any], workspace: Workspace) -> tuple[dict[str
             return None
 
     read_only = [dict(e) if isinstance(e, dict) else {"path": e, "purpose": None} for e in plan.get("read_only_changes") or []]
+    planned = {entry.get("path") if isinstance(entry, dict) else entry
+               for key in ("files_to_create", "files_to_modify") for entry in plan.get(key) or []}
     kept_read_only = []
     for entry in read_only:
-        if label_of(entry["path"]) in workspace.read_only:
-            kept_read_only.append(entry)
+        if entry["path"] in planned:
             continue
-        resolved = _resolve(workspace, entry["path"])[0]
-        key = "files_to_modify" if resolved and os.path.isfile(resolved) else "files_to_create"
-        plan[key] = [*plan.get(key, []), {"path": entry["path"], "purpose": entry.get("purpose")}]
-        notes.append(f"{entry['path']} is in a repo forge can change: planned as a file to {key.split('_')[-1]}")
+        if label_of(entry["path"]) not in workspace.read_only:
+            notes.append(
+                f"{entry['path']} is in a repo forge can change, but the plan leaves it to a person — check that "
+                "at approval"
+            )
+        kept_read_only.append(entry)
     for key, action in (("files_to_create", "create"), ("files_to_modify", "modify")):
         kept = []
         for entry in plan.get(key) or []:

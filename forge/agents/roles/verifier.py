@@ -597,8 +597,8 @@ criteria and the code you can see: if a declared file does not actually contain 
 set passed=false and name it in required_fixes. Do not fail a run merely because it made few or no
 changes — a file that already does the job needs none.
 
-`left_to_a_person` lists changes in read-only repos (a shared API contract, say) that this story may
-not make: a person makes them, outside this change. Never set passed=false because they are missing
+`left_to_a_person` lists changes this story may not make — in read-only repos (a shared API contract,
+say), or files the project says agents must not change: a person makes them, outside this change. Never set passed=false because they are missing
 from the diffs, and never ask for them in required_fixes. An acceptance criterion that depends on
 them is judged only on the part this change can deliver."""
 

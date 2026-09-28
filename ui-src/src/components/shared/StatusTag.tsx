@@ -148,8 +148,9 @@ export function CoverageGapTag({ story }: { story: Story }) {
   return <Tag label="Coverage gap" appearance="warning" />;
 }
 
-// The plan needs changes in a read-only repo that forge will not make — the
-// rest of the story runs; these are for a person.
+// The plan needs changes forge will not make — in a read-only repo, or a file
+// the project says agents must not change. The rest of the story runs; these
+// are for a person.
 export function ReadOnlyChangesTag({ story }: { story: Story }) {
   const changes = story.read_only_changes ?? [];
   if (!changes.length) return null;
@@ -157,7 +158,7 @@ export function ReadOnlyChangesTag({ story }: { story: Story }) {
   // does not wrap. The paths are in the title and the story's details.
   return (
     <Tag
-      label="read-only change needed"
+      label="left to a person"
       appearance="warning"
       title={`forge won't make these; someone has to:\n${changes.map((c) => c.path).join("\n")}`}
     />

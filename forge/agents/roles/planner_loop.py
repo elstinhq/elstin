@@ -455,7 +455,7 @@ async def run_planner(
                     candidate, fixes = normalize_plan(candidate, gate_workspace)
                     if fixes and run_id:
                         append_activity(
-                            run_id, type="status", phase="planner", title=f"Plan adjusted: {len(fixes)} path(s)",
+                            run_id, type="status", phase="planner", title=f"Plan paths: {len(fixes)} note(s)",
                             detail="\n".join(f"- {fix}" for fix in fixes)[:4000],
                         )
                 # A clarification round-trip's plan fields (files, criteria)

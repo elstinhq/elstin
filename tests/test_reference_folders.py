@@ -278,11 +278,11 @@ async def test_changes_a_plan_needs_in_a_read_only_repo_are_kept_for_a_person(gi
     story = sm.get_story("ENG-2")
     assert story["status"] == "awaiting_plan_approval" and story["read_only_changes"] == needed
     body = daemon._epic_pr_body(sm, sm.get_epic("ENG-1"))
-    assert "## Changes needed in read-only repos" in body
+    assert "## Changes left to a person" in body
     assert "- `@contracts/orders.yaml` (ENG-2): add the columns to the contract" in body
 
     assert sm.send_back_to_planning("ENG-2")  # as a changed ticket or newly merged work does
     await daemon.poll_once(sm, wait=True)
 
     assert sm.get_story("ENG-2")["read_only_changes"] == []
-    assert "read-only repos" not in daemon._epic_pr_body(sm, sm.get_epic("ENG-1"))
+    assert "left to a person" not in daemon._epic_pr_body(sm, sm.get_epic("ENG-1"))

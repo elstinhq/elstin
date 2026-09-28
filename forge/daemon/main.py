@@ -1430,9 +1430,9 @@ def _epic_pr_body(sm: StateManager, epic: dict) -> str:
     needed = [(story["jira_key"], change) for story in stories for change in story.get("read_only_changes") or []]
     if needed:
         lines += [
-            "", "## Changes needed in read-only repos",
-            "forge may not change these repos, so this pull request does not include these changes. Someone has to "
-            "make them:",
+            "", "## Changes left to a person",
+            "forge may not make these changes — they are in read-only repos, or files the project says agents must "
+            "not change — so this pull request does not include them. Someone has to make them:",
         ]
         for key, change in needed:
             purpose = f": {change['purpose']}" if change.get("purpose") else ""

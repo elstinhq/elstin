@@ -265,7 +265,7 @@ async def test_a_change_in_a_read_only_repo_is_set_aside_not_rejected(monkeypatc
     assert len(provider.calls) == 1
     assert [e["path"] for e in result["plan"]["files_to_modify"]] == ["widget.py", "@portal/src/search.ts"]
     assert result["plan"]["read_only_changes"] == [{"path": "@contracts/orders.yaml", "purpose": "the contract"}]
-    adjusted = [e for e in list_activity("ENG-9") if e["title"].startswith("Plan adjusted")]
+    adjusted = [e for e in list_activity("ENG-9") if e["title"].startswith("Plan paths")]
     assert len(adjusted) == 1 and "@contracts/orders.yaml is in a read-only repo" in adjusted[0]["detail"]
 
 

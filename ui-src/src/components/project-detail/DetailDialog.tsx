@@ -356,7 +356,8 @@ function ReadOnlyChangesRow({ story }: { story: Story }) {
   return (
     <DetailRow label="Needs a person">
       <div className="text-muted-foreground text-xs">
-        Changes this ticket needs in read-only repos. forge won't make them — the rest of the plan runs without them.
+        Changes this ticket needs that forge won't make — in read-only repos, or files the project says agents must
+        not change. The rest of the plan runs without them.
       </div>
       <ul className="mt-1 flex flex-col gap-1">
         {changes.map((change) => (

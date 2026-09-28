@@ -131,12 +131,13 @@ def _build_prompt(*, continuing: bool, plan: dict[str, Any], context_bundle: dic
         if prior_work.get("found") else ""
     )
     dev_plan = {k: v for k, v in plan.items() if k not in ("plan_markdown", "read_only_changes")}
-    # Changes in read-only repos are a person's (plan_gate.normalize_plan):
+    # Changes left to a person — read-only repos, or files the project says
+    # agents must not change (plan_gate.normalize_plan):
     # named so dev neither attempts them nor re-creates them where it can write.
     read_only_changes = plan.get("read_only_changes") or []
     read_only_text = (
-        "Not yours to make — a person makes these changes in read-only repos; code against them as "
-        "described, don't copy them into a repo you can write:\n"
+        "Not yours to make — a person makes these changes; code against them as described, and don't "
+        "make or copy them in a repo you can write:\n"
         + "\n".join(f"- {e.get('path')}: {e.get('purpose') or ''}".rstrip(": ") for e in read_only_changes if isinstance(e, dict))
         + "\n\n"
         if read_only_changes else ""

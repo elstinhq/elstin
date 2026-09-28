@@ -253,9 +253,9 @@ export interface EpicMergeResult {
   at?: string;
 }
 
-// A change the ticket needs in a read-only repo or reference folder: forge may
-// not make it, so a person has to (forge/agents/roles/plan_gate.py's
-// normalize_plan). `path` is `@label/...`.
+// A change the ticket needs that forge may not make, so a person has to: in a
+// read-only repo or reference folder, or a file the project says agents must
+// not change (forge/agents/roles/plan_gate.py's normalize_plan).
 export interface ReadOnlyChange {
   path: string;
   purpose: string | null;
