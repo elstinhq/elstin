@@ -154,6 +154,7 @@ def _build_prompt_text(
     prior_work: dict[str, Any],
     clarification_answers: list[dict[str, Any]] | None,
     exploration: str = "",
+    answers_from_earlier_run: bool = False,
 ) -> str:
     guide = context_bundle.get("project_guide") or {}
     text = f"User request:\n{user_request}\n\nProject path: {project_path}\n\n"
@@ -197,7 +198,19 @@ def _build_prompt_text(
 
     text += _format_prior_work_block(prior_work)
 
-    if clarification_answers:
+    if clarification_answers and answers_from_earlier_run:
+        # A fresh plan (a retry, a re-plan) for a ticket a person already
+        # answered questions on: the decisions stand, but this is not the
+        # round trip — a question about something they do not settle is
+        # still allowed.
+        text += "Decisions a person already made on this ticket (follow them; do not ask these again):\n"
+        for ans in clarification_answers:
+            text += f"- Q: {ans.get('question', '')}\n  A: {ans.get('option_label', '')}"
+            if ans.get("option_description"):
+                text += f" — {ans['option_description']}"
+            text += "\n"
+        text += "\nExplore the codebase yourself using your read/grep/find tools, then produce an implementation plan JSON.\n"
+    elif clarification_answers:
         text += "Clarification answers from the developer (incorporate these into the plan, do NOT emit questions):\n"
         for ans in clarification_answers:
             q = ans.get("question", "")
@@ -242,6 +255,7 @@ async def run_planner(
     read_only_labels: list[str] | None = None,
     sdk_model: str | None = None,
     sdk_effort: str | None = None,
+    answers_from_earlier_run: bool = False,
 ) -> dict[str, Any]:
     if run_id:
         append_activity(run_id, type="status", phase="planner", title="Planning started", detail=user_request[:200])
@@ -333,7 +347,10 @@ async def run_planner(
         # erring conservative is the right direction for a spend cap.
         explored = False
         max_agents = get_int_config("planner_explorer_max_agents", explorer_defaults.DEFAULT_MAX_AGENTS)
-        if not clarification_answers and get_bool_config("planner_explorers_enabled") and max_agents > 0:
+        # The round trip after a question skips it: this run explored before
+        # asking. Answers carried into a fresh run (a retry) do not.
+        round_trip = bool(clarification_answers) and not answers_from_earlier_run
+        if not round_trip and get_bool_config("planner_explorers_enabled") and max_agents > 0:
             explored = True
             exploration, explore_api_ms = await gather_exploration(
                 provider=provider,
@@ -361,7 +378,7 @@ async def run_planner(
             user_request=user_request, project_path=project_path, context_bundle=context_bundle,
             linked_issues_context=linked_issues_context, acceptance_criteria_hint=acceptance_criteria_hint,
             prior_work=prior_work, clarification_answers=clarification_answers,
-            exploration=exploration,
+            exploration=exploration, answers_from_earlier_run=answers_from_earlier_run,
         )
 
         content_blocks: list[Any] = [TextBlock(text=text)]

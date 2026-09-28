@@ -204,12 +204,16 @@ class _StoryMixin:
             if story is not None:
                 story.prior_work = dict(prior_work) if prior_work is not None else None
 
-    def send_back_to_planning(self, jira_key: str) -> bool:
+    def send_back_to_planning(self, jira_key: str, *, keep_answers: bool = False) -> bool:
         """A plan waiting for approval that no longer fits the code — the
         epic branch gained work it was made without — goes back to `pending`
         to be planned again, its questions and answers with it. Only from
         "awaiting_plan_approval": anything later has work to keep. False,
-        changing nothing, otherwise."""
+        changing nothing, otherwise.
+
+        `keep_answers`: a person asked for the new plan (POST /{key}/replan)
+        — the code has not changed under their answers, which stand as
+        decisions for the fresh run."""
         with session_scope() as session:
             story = session.get(Story, jira_key)
             if story is None or story.status != "awaiting_plan_approval":
@@ -218,7 +222,8 @@ class _StoryMixin:
             story.parked_reason = None
             story.gate_approved = False
             story.clarification_questions = None
-            story.clarification_answers = None
+            if not keep_answers:
+                story.clarification_answers = None
             return True
 
     def pick_story_prior_branch(self, jira_key: str, repo_label: str, branch: str | None) -> bool:

@@ -6,6 +6,7 @@ import { StoryPlanPanel } from "./PlanPanel";
 import { EpicUsagePanel, StoryUsagePanel } from "./UsagePanel";
 import {
   useAnswerStoryQuestions,
+  useReplanStory,
   useResolveExternalChange,
   useSetStoryKind,
   useSyncStory,
@@ -318,6 +319,35 @@ function RunOutcomeRow({ story }: { story: Story }) {
   );
 }
 
+// "Not this plan", short of approving it: the story is planned again from
+// scratch. Answers already given are kept — they are decisions — and the new
+// run is given them.
+function ReplanRow({ projectId, story }: { projectId: number; story: Story }) {
+  const replan = useReplanStory(projectId);
+  const { showToast } = useToast();
+  if (story.status !== "awaiting_plan_approval" || story.clarification_questions.length) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <Button
+        variant="outline"
+        size="sm"
+        loading={replan.isPending}
+        onClick={() =>
+          replan.mutate(story.jira_key, {
+            onSuccess: () => showToast(`${story.jira_key} will be planned again`, "success"),
+            onError: (err) => showToast(err.message || "Could not re-plan this story.", "error"),
+          })
+        }
+      >
+        Re-plan
+      </Button>
+      <span className="text-muted-foreground text-xs">
+        Discard this plan and make a new one{story.clarification_answers.length ? ", keeping your answers" : ""}.
+      </span>
+    </div>
+  );
+}
+
 // Beside the plan, since approving it means accepting that these are left to
 // a person: the epic's pull request lists them too.
 function ReadOnlyChangesRow({ story }: { story: Story }) {
@@ -350,6 +380,7 @@ function StoryDetailBody({ projectId, story, activityEnabled }: { projectId: num
       {story.description ? <DescriptionRow text={story.description} /> : null}
       <StoryPlanPanel storyKey={story.jira_key} open={activityEnabled} />
       <ReadOnlyChangesRow story={story} />
+      <ReplanRow projectId={projectId} story={story} />
       <DetailRow label="Status">
         <StatusTagFor status={story.status} />
       </DetailRow>

@@ -21,7 +21,7 @@ Return JSON only with keys:
 - questions (list, default []) — clarification questions when a design decision is genuinely ambiguous (see rules below)
 - files_to_create (list of {path, purpose}) — new files the dev agent must write
 - files_to_modify (list of {path, purpose}) — existing files the dev agent must edit
-- read_only_changes (list of {path, purpose}, default []) — changes the ticket needs in a READ-ONLY repo or reference folder (your prompt lists them). forge does not make these; a person does, and the plan's reader is told. Never put such a file under files_to_create/files_to_modify, and keep acceptance_criteria to what the other files deliver
+- read_only_changes (list of {path, purpose}, default []) — changes the ticket needs in a READ-ONLY repo or reference folder (your prompt lists them). forge does not make these; a person does, and the plan's reader is told. Never put such a file under files_to_create/files_to_modify. acceptance_criteria are what the other files deliver: none may require a read_only_changes file to change (say what it needs in that entry's purpose instead)
 - context_files (list of relative paths to read for reference; do not list these under files_to_modify unless they must change)
 - architecture (object with layers, state_management, routing notes)
 - acceptance_criteria (list of testable strings)

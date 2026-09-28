@@ -47,6 +47,11 @@ carry diverged work and none contains the others, forge does not guess which
 to build on: the story waits. POST /{key}/prior-work is the answer — a
 branch the lookup offered for that repo, or `null` to start fresh.
 
+Re-plan: POST /{key}/replan throws away a plan waiting for approval and
+plans the story again from scratch — the way to say "not this plan" short
+of approving it. The person's answers to earlier questions are kept: they
+are decisions, and the fresh run is given them (forge/daemon/main.py).
+
 Plan: the planner's structured plan (feature_summary, plan_markdown,
 files_to_create/modify, acceptance_criteria, ...) lives only inside the
 story's LangGraph checkpoint (forge/db/models/gameplan.py's docstring on
@@ -69,13 +74,13 @@ from jira import JIRAError
 from pydantic import BaseModel
 
 from forge.config.store import resolve_bool_config
-from forge.daemon.main import cancel_run, check_story_action, execute_story_action
+from forge.daemon.main import cancel_run, check_story_action, execute_story_action, live_run_keys
 from forge.db.engine import get_database_url
 from forge.orchestration.graph import checkpointer_from_url, compile_graph
 from forge.orchestration.reconciler import Blocked
 from forge.services.activity_stream import iter_events
 from forge.services.epic_sync import relevel_epic, sync_story_from_jira
-from forge.services.run_activity import list_activity
+from forge.services.run_activity import append_activity, list_activity
 from forge.services.usage import get_run_outcome, get_story_usage
 from forge.state.manager import StateManager
 
@@ -198,6 +203,24 @@ def approve_story(story_key: str, background_tasks: BackgroundTasks) -> dict:
     sm.set_story_gate_approved(story_key, True)
     _maybe_trigger_manual_run(sm, story_key, background_tasks)
     return {"story_key": story_key, "gate_approved": True}
+
+
+@router.post("/{story_key}/replan")
+def replan_story(story_key: str, background_tasks: BackgroundTasks) -> dict:
+    """Plan a story waiting for approval again, keeping its answers — see
+    this module's docstring."""
+    sm = StateManager()
+    story = sm.get_story(story_key)
+    if story is None:
+        raise HTTPException(status_code=404, detail=f"No such story: {story_key}")
+    if story_key in live_run_keys() or not sm.send_back_to_planning(story_key, keep_answers=True):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{story_key} is {story['status']} — only a story waiting on plan approval can be re-planned",
+        )
+    append_activity(story_key, type="status", phase="system", title="Re-plan requested: the plan is made again")
+    _maybe_trigger_manual_run(sm, story_key, background_tasks)
+    return _story_with_pr(sm, story_key)
 
 
 @router.post("/{story_key}/answer")

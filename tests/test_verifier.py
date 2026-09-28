@@ -420,3 +420,23 @@ def test_feedback_with_no_unwritten_files_is_the_fix_these_failures_message_it_a
     assert "Fix these specific failures — nothing else:" in text
     assert "do not rewrite files from scratch" in text
     assert "PLANNED FILES STILL NOT WRITTEN" not in text and "wrote NO files" not in text
+
+
+def test_changes_left_to_a_person_are_not_the_reviewers_to_demand():
+    """A plan's read_only_changes (a contract repo's YAML, for MKT2-866) are
+    made by a person outside the story: the reviewer is shown them apart
+    from the plan and told not to fail the run over them."""
+    from forge.agents.roles.verifier import _VERIFIER_REVIEW_CORE, _build_llm_payload
+
+    plan = {
+        "files_to_modify": [{"path": "src/Search.java", "purpose": "export"}],
+        "read_only_changes": [{"path": "@contracts/orders.yaml", "purpose": "add the export path"}],
+        "plan_markdown": "# Plan",
+    }
+
+    payload = _build_llm_payload(plan, ["the export works"], [], [], {})
+
+    assert "read_only_changes" not in payload["plan"]
+    assert payload["left_to_a_person"] == [{"path": "@contracts/orders.yaml", "purpose": "add the export path"}]
+    assert "Never set passed=false because they are missing" in _VERIFIER_REVIEW_CORE
+    assert "left_to_a_person" not in _build_llm_payload({"files_to_modify": []}, [], [], [], {})

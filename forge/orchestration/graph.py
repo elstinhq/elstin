@@ -93,6 +93,11 @@ async def planner_node(state: FeatureRunState) -> dict:
             linked_issues_context=state.get("linked_issues_context"),
             acceptance_criteria_hint=state.get("acceptance_criteria_hint") or None,
             clarification_answers=state.get("clarification_answers") or None,
+            # Answers are either this run's round trip (the planner asked and
+            # is resumed) or a person's earlier decisions carried into a
+            # fresh run (forge/daemon/main.py) — which re-explores and may
+            # still ask about something they do not settle.
+            answers_from_earlier_run=state.get("status") != "awaiting_clarification",
             repo_roots=read_roots or state.get("repo_roots") or None,
             default_label=default_label,
             project_guide=state.get("project_guide") or None,

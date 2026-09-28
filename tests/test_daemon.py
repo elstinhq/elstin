@@ -411,3 +411,33 @@ async def test_a_bad_verifier_reply_fails_one_story_without_abandoning_the_poll_
     assert sm.get_story("ENG-11")["status"] == "ready_to_merge"
 
 
+
+
+async def test_a_retried_story_plans_with_the_answers_already_given(git_repo: str, tmp_path, project_id, monkeypatch: pytest.MonkeyPatch):
+    """MKT2-866: a person answered the planner's question, the run then
+    failed, and Retry — a fresh run, not a resume — planned without the
+    answer, exporting the column it had said to leave out."""
+    import forge.orchestration.graph as graph
+    from tests.conftest import fake_run_planner
+
+    _configure(str(tmp_path / "worktrees"))
+    sm = StateManager()
+    _create_epic_with_repo(sm, "ENG-1", project_id=project_id, repo_path=git_repo, levels=[["ENG-2"]])
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0, summary="Export customers", depends_on=[])
+    answers = [{"question": "Include Webshop ID?", "option_label": "No", "option_description": None}]
+    sm.set_story_clarification_answers("ENG-2", answers)
+    sm.set_story_status("ENG-2", "failed", failure_stage="run")
+    sm.retry_story("ENG-2")
+    seen: dict = {}
+
+    async def planner(**kwargs):
+        seen.update(kwargs)
+        return await fake_run_planner(**kwargs)
+
+    monkeypatch.setattr(graph, "run_planner", planner)
+
+    await poll_once(sm, wait=True)
+
+    assert sm.get_story("ENG-2")["status"] == "awaiting_plan_approval"
+    assert seen["clarification_answers"] == answers
+    assert seen["answers_from_earlier_run"] is True

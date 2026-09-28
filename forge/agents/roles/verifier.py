@@ -506,7 +506,8 @@ def format_gate_feedback(gate: dict[str, Any], *, attempt: int, max_attempts: in
 
 
 def _build_llm_payload(plan: dict[str, Any], acceptance_criteria: list[str], file_changes: list[dict[str, Any]], diffs: list[dict[str, Any]], gate: dict[str, Any]) -> dict[str, Any]:
-    plan = {k: v for k, v in plan.items() if k != "plan_markdown"}
+    left_to_a_person = plan.get("read_only_changes") or []
+    plan = {k: v for k, v in plan.items() if k not in ("plan_markdown", "read_only_changes")}
     gate_summary = dict(gate)
     profiles_summary: dict[str, Any] = {}
     for profile_key, report in (gate.get("profiles") or {}).items():
@@ -527,6 +528,7 @@ def _build_llm_payload(plan: dict[str, Any], acceptance_criteria: list[str], fil
     return {
         "plan": plan,
         "acceptance_criteria": acceptance_criteria,
+        **({"left_to_a_person": left_to_a_person} if left_to_a_person else {}),
         "file_changes": file_changes,
         "diffs": [{"path": d.get("path"), "diff": (d.get("diff") or "")[:_MAX_DIFF_CHARS]} for d in diffs[:_MAX_DIFF_FILES]],
         "deterministic_gate": gate_summary,
@@ -593,7 +595,12 @@ see code in the diffs that implements it.
 ticket needs, each with its reason, and left unchanged. Check every such claim against the acceptance
 criteria and the code you can see: if a declared file does not actually contain what the ticket requires,
 set passed=false and name it in required_fixes. Do not fail a run merely because it made few or no
-changes — a file that already does the job needs none."""
+changes — a file that already does the job needs none.
+
+`left_to_a_person` lists changes in read-only repos (a shared API contract, say) that this story may
+not make: a person makes them, outside this change. Never set passed=false because they are missing
+from the diffs, and never ask for them in required_fixes. An acceptance criterion that depends on
+them is judged only on the part this change can deliver."""
 
 
 _NOTHING_TO_VERIFY = (

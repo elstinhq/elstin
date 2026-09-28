@@ -1037,6 +1037,11 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
             )
             state["story_worktrees"] = known_worktrees
             state["story_kind"] = story_kind
+            # Decisions a person already made survive a fresh run — Retry
+            # after a failure starts one, and MKT2-866's re-plan otherwise
+            # exported the column its answer had left out. A re-plan that
+            # should reconsider them clears them first (send_back_to_planning).
+            state["clarification_answers"] = story.get("clarification_answers") or []
             if story_kind == "qa":
                 state["qa_context"] = await asyncio.to_thread(_build_qa_context, sm, epic, story)
             result = await graph.ainvoke(state, config)

@@ -467,6 +467,29 @@ async def test_clarification_round_trip_skips_exploration(monkeypatch, git_repo)
     assert len(provider.calls) == 1
 
 
+async def test_answers_from_an_earlier_run_are_followed_in_a_fresh_plan(monkeypatch, git_repo):
+    """MKT2-866: a person answered "leave out Webshop ID", the run then
+    failed, and Retry's fresh plan never saw the answer. Carried into a new
+    run, the answer is a decision to follow — but this run has not explored
+    yet, and may still ask about something the answer does not settle."""
+    provider = FakeProvider(script=[_scope_response(), _plan_response()])
+    _configure(monkeypatch, provider, explorers=True)
+
+    await run_planner(
+        user_request="Export customers", project_path=git_repo, answers_from_earlier_run=True,
+        clarification_answers=[{
+            "question": "Include Webshop ID?", "option_label": "Use the proposed columns except Webshop ID",
+            "option_description": "Export the first 24 columns",
+        }],
+    )
+
+    assert len(provider.calls) == 2  # scoping ran
+    prompt = provider.calls[1].messages[0].content[0].text
+    assert "Decisions a person already made on this ticket (follow them; do not ask these again):" in prompt
+    assert "- Q: Include Webshop ID?\n  A: Use the proposed columns except Webshop ID — Export the first 24 columns" in prompt
+    assert "do NOT emit questions" not in prompt
+
+
 async def test_exploration_and_the_plan_loop_split_one_planner_cap(monkeypatch, git_repo):
     """Regression: explorers were funded from half the cap and the plan
     loop was then handed the full cap again, so the phase could spend

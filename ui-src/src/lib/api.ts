@@ -165,6 +165,8 @@ export const api = {
   pickPriorBranch: (storyKey: string, repoLabel: string, branch: string | null) =>
     request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/prior-work`, json({ repo_label: repoLabel, branch })),
   retryStory: (storyKey: string) => request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/retry`, { method: "POST" }),
+  // Plans a story waiting for approval again; its answers are kept.
+  replanStory: (storyKey: string) => request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/replan`, { method: "POST" }),
   // Stops a run in flight; the story is left failed ("cancelled") so Retry starts it over.
   cancelStory: (storyKey: string) => request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/cancel`, { method: "POST" }),
   setStoryKind: (storyKey: string, kind: string) =>

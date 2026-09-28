@@ -83,10 +83,12 @@ async def test_answering_a_clarification_resumes_into_planner_not_dev(
     import forge.orchestration.graph as graph_module
 
     calls: list[list[dict] | None] = []
+    earlier: list[bool] = []
 
     async def planner_needs_one_answer(**kwargs) -> dict:
         answers = kwargs.get("clarification_answers")
         calls.append(answers)
+        earlier.append(kwargs.get("answers_from_earlier_run"))
         if not answers:
             return {
                 "questions": [{
@@ -127,6 +129,7 @@ async def test_answering_a_clarification_resumes_into_planner_not_dev(
 
     assert len(calls) == 2
     assert calls[1] == answer  # the second planner call actually saw it
+    assert earlier[1] is False  # as this run's round trip, not a decision from an earlier run
     assert final["status"] == "awaiting_approval"  # a real plan now, parked for its own review
 
 

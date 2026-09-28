@@ -50,6 +50,14 @@ export function useRetryStory(projectId: number) {
   });
 }
 
+export function useReplanStory(projectId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (storyKey: string) => api.replanStory(storyKey),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.projectEpics(projectId) }),
+  });
+}
+
 export function useCancelStory(projectId: number) {
   const queryClient = useQueryClient();
   return useMutation({

@@ -202,6 +202,9 @@ project create (`repo_url` / `repo_path`):
   epic's pull request under "Changes needed in read-only repos" — a
   person's job. A plan whose only changes are there is sent back
   (`KIND_NO_FILES`); `check_plan`'s `KIND_READ_ONLY_REPO` is the backstop.
+  The verifier's review gets them apart from the plan (`left_to_a_person`)
+  and is told never to fail a run over them — an acceptance criterion that
+  leans on one is judged on what the story itself delivers.
   `normalize_plan` also gives an unprefixed path whose first folder is
   another repo's label (`mkt-adminportal/src/…`, and no such folder in the
   default repo) its `@`, rather than sending the plan back over it.
@@ -548,7 +551,15 @@ reads die with its throwaway context and only a short report comes back.
 Everything about it is best-effort — an empty scope, a failed scope, or
 every explorer returning nothing all degrade to "plan without a head
 start". Sub-agents get the read-only tools only, so there is no write path
-and no way to spawn another one. Skipped on a clarification round-trip.
+and no way to spawn another one. Skipped on a clarification round-trip
+(the run explored before it asked), not on a fresh run that carries a
+person's earlier answers: the daemon passes `stories.clarification_answers`
+into every run, Retry's included, and `planner_node` flags them
+`answers_from_earlier_run` unless the run is resuming from its own
+question — the planner then follows them as decisions but may still ask
+about something they do not settle. `send_back_to_planning` clears them
+when a re-plan should reconsider (new work merged under the plan), and
+keeps them for a person's Re-plan (`POST /api/stories/{key}/replan`).
 Their tokens roll up into the planner's `story_usage` row via the same
 `on_turn` hook, and their spend caps are carved out of
 `planner_sdk_max_budget_usd` rather than each inheriting the whole cap.
@@ -848,7 +859,7 @@ LangGraph checkpointer creates its own tables on first use
 | Config | `/api/config` | Global settings CRUD |
 | Projects | `/api/projects` | Projects (DELETE removes one and everything forge holds for it), repos (cloned from a URL or attached from a local folder — `forge/services/repo_clone.py`), overrides, ticket filter (+ `/preview`, `/sync`) |
 | Epics | `/api/epics` | Sync from JIRA, assign repo, manual gate |
-| Stories | `/api/stories` | Approve gate, set kind, get story, get plan |
+| Stories | `/api/stories` | Approve gate, re-plan a plan waiting for approval (`/replan`, answers kept), set kind, get story, get plan |
 
 There is no “start run” endpoint: sync epic (by key, or by the project's
 ticket filter) → assign repo → daemon dispatches when reconciler says ready
