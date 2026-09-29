@@ -320,8 +320,14 @@ into the project guide; accepted ones are handed to the planner and dev.
   most-confirmed first, so the budget cuts what only one story saw. Resolved
   once at first dispatch, like the guide: a lesson accepted mid-run applies
   to the next story.
-- **Not built yet:** the UI panel for the API above, staleness, and
-  exporting accepted lessons into the epic PR body.
+- **UI:** `LessonsPanel` on the project page (`ui-src/src/components/
+  project-detail/LessonsPanel.tsx`, `hooks/useLessons.ts`), under Folders:
+  "To review" / "In use" / a collapsed "Rejected". Each row shows the
+  evidence quote and story keys so a lesson can be checked against what
+  happened; Accept, Reject/Stop using, Reconsider, Edit (saving an edit on
+  a proposed lesson also accepts it), Delete.
+- **Not built yet:** staleness tracking, and exporting accepted lessons
+  into the epic PR body.
 
 ## Work that already exists for a ticket
 

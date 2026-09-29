@@ -486,3 +486,22 @@ export interface EpicUsage {
   stories: { story_key: string; wave: number; totals: UsageTotals }[];
   totals: UsageTotals;
 }
+
+// A lesson forge proposed from its own runs (forge/services/lessons.py,
+// forge/state/manager_lesson.py). Only "accepted" ones reach an agent.
+export type LessonStatus = "proposed" | "accepted" | "rejected";
+
+export interface ProjectLesson {
+  id: number;
+  project_id: number;
+  project_repo_id: number | null;
+  text: string;
+  kind: string;
+  scope_globs: string[];
+  status: LessonStatus;
+  occurrences: number;
+  evidence_story_keys: string[];
+  evidence_quote: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
