@@ -232,3 +232,48 @@ async def test_an_attached_repo_without_origin_runs_merges_and_ends_ready_locall
     # The attached folder's own checkout was never touched.
     assert subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True).stdout == ""
     assert subprocess.run(["git", "-C", str(repo), "branch", "--show-current"], capture_output=True, text=True).stdout.strip() == "master"
+
+
+async def test_the_body_carries_this_epics_accepted_lessons(git_repo, tmp_path, project_id, monkeypatch, github):
+    import forge.daemon.main as daemon
+
+    sm = _setup(tmp_path, project_id, git_repo, monkeypatch, stories=("ENG-2",))
+    await _run_to_merged(sm)
+    accepted = sm.add_lesson_candidate(project_id, "Build with JDK 21; 26 crashes javac.", story_key="ENG-2")
+    sm.set_lesson_status(accepted["id"], "accepted")
+    sm.add_lesson_candidate(project_id, "Not yet reviewed by anyone.", story_key="ENG-2")
+    other = sm.add_lesson_candidate(project_id, "Learned on some other epic.", story_key="OTHER-1")
+    sm.set_lesson_status(other["id"], "accepted")
+
+    body = daemon._epic_pr_body(sm, sm.get_epic("ENG-1"))
+
+    assert "## Lessons from building this" in body
+    assert "- Build with JDK 21; 26 crashes javac." in body
+    assert "Learned on some other epic." not in body and "Not yet reviewed by anyone." not in body
+    assert "1 more from this epic is still waiting for review in forge." in body
+    assert body.index("## Lessons from building this") < body.index("## How this was built")
+
+
+async def test_a_body_without_lessons_is_unchanged(git_repo, tmp_path, project_id, monkeypatch, github):
+    import forge.daemon.main as daemon
+
+    sm = _setup(tmp_path, project_id, git_repo, monkeypatch, stories=("ENG-2",))
+    await _run_to_merged(sm)
+
+    assert "Lessons" not in daemon._epic_pr_body(sm, sm.get_epic("ENG-1"))
+
+
+async def test_a_lessons_read_failure_never_costs_the_pull_request(git_repo, tmp_path, project_id, monkeypatch, github):
+    import forge.daemon.main as daemon
+
+    sm = _setup(tmp_path, project_id, git_repo, monkeypatch, stories=("ENG-2",))
+    await _run_to_merged(sm)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("database gone")
+
+    monkeypatch.setattr(sm, "list_project_lessons", boom)
+
+    body = daemon._epic_pr_body(sm, sm.get_epic("ENG-1"))
+
+    assert "## How this was built" in body and "Lessons" not in body

@@ -298,3 +298,53 @@ def plan_paths(plan: dict | None) -> list[str]:
             if raw and str(raw).strip():
                 paths.append(str(raw).strip())
     return paths
+
+
+# --- the epic's pull request --------------------------------------------
+# Lessons live in forge's database and forge never edits a repo it does not
+# own, so the people who own the repo would otherwise never see what forge
+# learned about it. The epic's PR body carries the accepted ones as a block
+# ready to paste into the repo's own AGENTS.md — a suggestion for whoever
+# reviews the PR, nothing forge writes itself.
+
+
+def pr_lessons_section(lessons: list[dict], epic_story_keys: set[str] | list[str]) -> list[str]:
+    """Markdown lines for the "Lessons" section of an epic's pull request, or
+    [] when there is nothing to show.
+
+    Only accepted lessons whose evidence includes a story of *this* epic: they
+    were learned building it, so the reviewer can see where each came from,
+    and an old lesson is not repeated in every later PR. The PR opens right
+    after the epic's last story merges, so a lesson learned late may still be
+    waiting for review; those are counted, not shown — a person has not yet
+    vouched for them."""
+    keys = set(epic_story_keys)
+    from_epic = [row for row in lessons if keys & set(row.get("evidence_story_keys") or [])]
+    shown = sorted(
+        (row for row in from_epic if row.get("status") == "accepted"),
+        key=lambda row: (-(row.get("occurrences") or 1), row.get("id") or 0),
+    )
+    if not shown:
+        return []
+    waiting = sum(1 for row in from_epic if row.get("status") == "proposed")
+
+    bullets = []
+    for row in shown:
+        scope = row.get("scope_globs") or []
+        suffix = f" (applies to {', '.join(f'`{g}`' for g in scope)})" if scope else ""
+        bullets.append(f"- {' '.join(str(row['text']).split())}{suffix}")
+    block = "## Learned by code_forge\n" + "\n".join(bullets)
+    # A lesson may itself contain a code fence; the block's fence must be longer.
+    longest = max((len(run) for run in re.findall(r"`+", block)), default=0)
+    fence = "`" * max(3, longest + 1)
+
+    lines = [
+        "", "## Lessons from building this",
+        "code_forge ran into these on this epic's stories, and a person accepted each as reusable knowledge about "
+        "this project. If they hold for this repo, consider adding them to its `AGENTS.md` — forge does not "
+        "change the repo's own guide:",
+        "", f"{fence}markdown", block, fence,
+    ]
+    if waiting:
+        lines += ["", f"{waiting} more from this epic {'is' if waiting == 1 else 'are'} still waiting for review in forge."]
+    return lines

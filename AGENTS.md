@@ -326,8 +326,18 @@ into the project guide; accepted ones are handed to the planner and dev.
   evidence quote and story keys so a lesson can be checked against what
   happened; Accept, Reject/Stop using, Reconsider, Edit (saving an edit on
   a proposed lesson also accepts it), Delete.
-- **Not built yet:** staleness tracking, and exporting accepted lessons
-  into the epic PR body.
+- **PR export:** `_epic_pr_body` adds a "Lessons from building this" section
+  (`services/lessons.py`'s `pr_lessons_section`, via `_lessons_for_pr`): the
+  epic's **accepted** lessons whose evidence includes one of the epic's own
+  stories, as a markdown block ready to paste into the repo's `AGENTS.md`
+  (forge writes nothing into the repo; the reviewer decides). Older lessons
+  are not repeated in every PR. The PR opens right after the last story
+  merges, so a late lesson may not be accepted yet — those are counted
+  ("N more … still waiting for review"), never shown, and the body is not
+  updated afterwards. No accepted lessons → no section. A failure reading
+  them costs the section, never the PR.
+- **Not built yet:** staleness tracking, and a "promoted" state for a lesson
+  the repo's own guide has since adopted (it is still injected).
 
 ## Work that already exists for a ticket
 

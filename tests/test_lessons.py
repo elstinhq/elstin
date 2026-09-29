@@ -435,3 +435,58 @@ def test_delete_forgets_a_lesson_so_it_can_be_proposed_again(api):
     assert client.delete(f"/api/projects/{project_id}/lessons/{row['id']}").json()["deleted"] is True
     assert sm.list_project_lessons(project_id) == []
     assert sm.add_lesson_candidate(project_id, "Build with JDK 21 always.")["created"] is True
+
+
+# --- the epic's pull request ---------------------------------------------
+
+
+def _pr_row(id, text, *, status="accepted", stories=("ENG-2",), globs=(), occurrences=1):
+    return {
+        "id": id, "text": text, "status": status, "evidence_story_keys": list(stories),
+        "scope_globs": list(globs), "occurrences": occurrences,
+    }
+
+
+def test_the_pr_section_is_a_paste_ready_block_of_this_epics_accepted_lessons():
+    rows = [
+        _pr_row(1, "Build with JDK 21; 26 crashes javac.", occurrences=2),
+        _pr_row(2, "Run eslint --fix on Vue files.", globs=["src/**/*.vue"]),
+    ]
+
+    text = "\n".join(lessons.pr_lessons_section(rows, {"ENG-2", "ENG-3"}))
+
+    assert "## Lessons from building this" in text
+    assert "```markdown\n## Learned by code_forge\n- Build with JDK 21; 26 crashes javac.\n" in text
+    assert "- Run eslint --fix on Vue files. (applies to `src/**/*.vue`)" in text
+    assert text.index("JDK 21") < text.index("eslint")  # most-confirmed first
+
+
+def test_the_pr_section_leaves_out_other_epics_and_unaccepted_lessons():
+    rows = [
+        _pr_row(1, "From another epic entirely.", stories=("OTHER-9",)),
+        _pr_row(2, "Only proposed, no person vouched yet.", status="proposed"),
+        _pr_row(3, "Rejected by a person for good reason.", status="rejected"),
+    ]
+
+    assert lessons.pr_lessons_section(rows, {"ENG-2"}) == []
+    assert lessons.pr_lessons_section([], {"ENG-2"}) == []
+
+
+def test_the_pr_section_counts_lessons_still_waiting_for_review_without_showing_them():
+    rows = [_pr_row(1, "Build with JDK 21 always."), _pr_row(2, "A guess nobody has reviewed.", status="proposed")]
+
+    text = "\n".join(lessons.pr_lessons_section(rows, {"ENG-2"}))
+
+    assert "1 more from this epic is still waiting for review in forge." in text
+    assert "A guess nobody has reviewed." not in text
+
+
+def test_no_accepted_lessons_means_no_mention_of_waiting_ones():
+    assert lessons.pr_lessons_section([_pr_row(1, "Only proposed here.", status="proposed")], {"ENG-2"}) == []
+
+
+def test_a_lesson_containing_a_code_fence_cannot_break_out_of_the_block():
+    text = "\n".join(lessons.pr_lessons_section([_pr_row(1, "Run ```make gen``` before the gate.")], {"ENG-2"}))
+
+    assert text.count("````markdown") == 1  # the outer fence is longer than the one inside
+    assert text.rstrip().splitlines()[-1] == "````"

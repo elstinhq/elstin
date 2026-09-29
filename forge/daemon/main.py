@@ -66,7 +66,7 @@ from forge.services.epic_sync import stored_dependencies
 from forge.services.prior_work import closed_as_done, lookup_due, needs_choice, start_candidate
 from forge.services.github_service import GitHubService, parse_github_remote, push_branch
 from forge.services.jira_service import issue_key_sort_key
-from forge.services.lessons import capture_story_lessons
+from forge.services.lessons import capture_story_lessons, pr_lessons_section
 from forge.services.project_guide import project_guide_for_run
 from forge.services.run_activity import append_activity, last_event_at
 from forge.services.ticket_source import get_ticket_source, ticket_source_configured
@@ -1544,6 +1544,7 @@ def _epic_pr_body(sm: StateManager, epic: dict) -> str:
         for key, change in needed:
             purpose = f": {change['purpose']}" if change.get("purpose") else ""
             lines.append(f"- `{change.get('path')}` ({key}){purpose}")
+    lines += _lessons_for_pr(sm, epic)
     lines += [
         "",
         "## How this was built",
@@ -1554,6 +1555,18 @@ def _epic_pr_body(sm: StateManager, epic: dict) -> str:
     if _commit_author():
         lines += ["", CODE_FORGE_CO_AUTHOR]
     return "\n".join(lines)
+
+
+def _lessons_for_pr(sm: StateManager, epic: dict) -> list[str]:
+    """The pull request's lessons section (forge/services/lessons.py). Context
+    for the reviewer, so a failure to read it costs the section, never the
+    pull request."""
+    try:
+        keys = {s["jira_key"] for s in sm.list_stories_for_epic(epic["jira_key"])}
+        return pr_lessons_section(sm.list_project_lessons(epic["project_id"]), keys)
+    except Exception:  # noqa: BLE001
+        logger.exception("epic %s: could not add lessons to the pull request body", epic["jira_key"])
+        return []
 
 
 def _continued_branches(prior_work: dict | None) -> list[tuple[str, str]]:
