@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { Cog, Filter, Plus } from "lucide-react";
 import { AppShell } from "../shared/AppShell";
 import { FoldersPanel } from "./FoldersPanel";
+import { LessonsPanel } from "./LessonsPanel";
 import { EpicList } from "./EpicList";
 import { DetailDialog, type DetailTarget } from "./DetailDialog";
 import { SyncTicketDialog } from "./SyncTicketDialog";
@@ -120,6 +121,8 @@ export function ProjectDetailPage({ projectId }: { projectId: number }) {
             </div>
 
             <FoldersPanel projectId={projectId} />
+
+            <LessonsPanel projectId={projectId} />
 
             <Button variant="outline" onClick={() => setSettingsDialogOpen(true)}>
               <Cog />

@@ -4,7 +4,9 @@ import type {
   EpicUsage,
   ExternalChangeAction,
   Project,
+  ProjectLesson,
   ProjectRepo,
+  LessonStatus,
   DeleteProjectReport,
   FolderListing,
   ScanFolderResult,
@@ -101,6 +103,15 @@ export const api = {
   // Empty content discards the generated guide.
   saveRepoGuide: (projectId: number, repoId: number, content: string) =>
     request<RepoGuide>(`/api/projects/${projectId}/repos/${repoId}/guide`, put({ content })),
+
+  // -- lessons forge proposed from its runs -------------------------------
+  // Only "accepted" ones are shown to the planner and dev. `text` is a
+  // person's edit before accepting; both fields are optional but not both absent.
+  listLessons: (projectId: number) => request<ProjectLesson[]>(`/api/projects/${projectId}/lessons`),
+  updateLesson: (projectId: number, lessonId: number, body: { text?: string; status?: LessonStatus }) =>
+    request<ProjectLesson>(`/api/projects/${projectId}/lessons/${lessonId}`, put(body)),
+  deleteLesson: (projectId: number, lessonId: number) =>
+    request<{ lesson_id: number; deleted: boolean }>(`/api/projects/${projectId}/lessons/${lessonId}`, { method: "DELETE" }),
 
   // -- project-scoped config --------------------------------------------
   getProjectConfig: (projectId: number) => request<ConfigField[]>(`/api/projects/${projectId}/config`),
