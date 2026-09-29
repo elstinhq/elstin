@@ -304,7 +304,29 @@ async def project_guide_for_run(sm, project_id: int, repo_roots: dict[str, str])
                 logger.info("project guide: generated for %s (%d chars)", label, len(guide))
 
         generated = {path: repo["generated_guide"] for path, repo in by_path.items() if repo.get("generated_guide")}
-        return await asyncio.to_thread(resolve_project_guide, repo_roots, generated)
+        guide = await asyncio.to_thread(resolve_project_guide, repo_roots, generated)
     except Exception:  # noqa: BLE001 — see the docstring
         logger.exception("project guide: could not resolve a guide for project %s", project_id)
-        return {"found": False}
+        guide = {"found": False}
+    return await _with_accepted_lessons(sm, project_id, guide)
+
+
+async def _with_accepted_lessons(sm, project_id: int, guide: dict[str, Any]) -> dict[str, Any]:
+    """`guide` plus the project's accepted lessons under `lessons`, when it has
+    any (forge/services/lessons.py). Separate from the guide's own text — the
+    prompts say which is which — and independent of it: a project with no
+    guide still gets its lessons. Only `accepted` ones: a proposed lesson is
+    a model's guess and never reaches an agent. A failure costs the lessons,
+    never the run or the guide."""
+    try:
+        rows = await asyncio.to_thread(sm.list_project_lessons, project_id, status="accepted")
+    except Exception:  # noqa: BLE001
+        logger.exception("project guide: could not read lessons for project %s", project_id)
+        return guide
+    if not rows:
+        return guide
+    lessons = [
+        {"id": r["id"], "text": r["text"], "scope_globs": r["scope_globs"], "occurrences": r["occurrences"]}
+        for r in rows
+    ]
+    return {**guide, "lessons": lessons}

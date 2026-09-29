@@ -96,6 +96,16 @@ class _LessonMixin:
             row.status = status
             return True
 
+    def delete_lesson(self, lesson_id: int) -> bool:
+        """Forgets a lesson outright. Unlike rejecting, this lets the same
+        line be proposed again later. False for an unknown lesson."""
+        with session_scope() as session:
+            row = session.get(ProjectLesson, lesson_id)
+            if row is None:
+                return False
+            session.delete(row)
+            return True
+
     def update_lesson_text(self, lesson_id: int, text: str) -> bool:
         """A person's edit before accepting. False for an unknown lesson."""
         text = text.strip()

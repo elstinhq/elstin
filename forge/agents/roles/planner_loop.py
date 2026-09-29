@@ -56,6 +56,7 @@ from forge.config.store import get_bool_config, get_config, get_float_config, ge
 from forge.llm.errors import LlmError
 from forge.llm.registry import LlmNotConfiguredError, get_provider
 from forge.llm.types import ImageBlock, LlmResponse, Message, ResponseFormat, TextBlock
+from forge.services.lessons import format_lessons_block
 from forge.services.run_activity import append_activity
 from forge.services.usage import effective_budget_usd, record_phase_usage, record_run_outcome, turn_usage_meta
 from forge.tools.planner_tools import READ_ONLY_TOOLS, make_planner_tools
@@ -175,6 +176,9 @@ def _build_prompt_text(
             + guide["content"]
             + "\n=== END AGENTS.md ===\n\n"
         )
+    # The planner does not yet know which files it will touch, so it gets
+    # every accepted lesson; dev is shown only the ones its plan's files match.
+    text += format_lessons_block(guide.get("lessons"))
 
     if linked_issues_context:
         text += f"Linked Jira issues:\n{linked_issues_context}\n\n"

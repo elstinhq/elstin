@@ -280,13 +280,12 @@ then a guide forge generated and stored, then nothing.
 - The guide is read as authoritative, so a wrong line gets followed: the API
   and UI let a person read, edit (`PUT .../guide`), regenerate or discard it.
 
-## Lessons from runs (capture only so far)
+## Lessons from runs
 
 Every run starts cold, so a mistake forge made on one story (the wrong JDK,
 build output staged in a PR) is made again on the next. `services/lessons.py`
 mines a finished story's own evidence for short lessons a person can accept
-into the project guide. Only the capture half exists; nothing is injected
-into a prompt yet.
+into the project guide; accepted ones are handed to the planner and dev.
 
 - **Opt-in:** `capture_lessons` (off by default, project-overridable) — one
   extra model call per story that needed a retry.
@@ -305,9 +304,24 @@ into a prompt yet.
 - **Storage:** `project_lessons` (`db/models/lesson.py`,
   `state/manager_lesson.py`; migration `20260929_0031`). Status `proposed` →
   `accepted` | `rejected`. Kept in forge, never written into a repo.
-- **Not built yet:** the accept/reject UI and API, injecting accepted lessons
-  into the guide slot (`services/project_guide.py`, scoped by `scope_globs`),
-  staleness, and exporting them into the epic PR body.
+- **Review (API):** `GET /api/projects/{id}/lessons[?status=]`,
+  `PUT .../lessons/{lesson_id}` (`{text?, status?}` — a person may reword
+  before accepting; an edit is held to the same 300-char cap),
+  `DELETE .../lessons/{lesson_id}` (forgets it, unlike `rejected`, which
+  blocks re-proposal). A lesson of another project is a 404.
+- **Injection:** `project_guide_for_run` adds `lessons` to the guide dict —
+  **`accepted` only**, so a proposed lesson never reaches an agent, and even
+  for a project with no guide (`{"found": False, "lessons": [...]}`; with
+  none accepted the dict is byte-identical to before). The planner prompt
+  shows all of them; dev's shows the unscoped ones plus those whose
+  `scope_globs` match the plan's files (`select_lessons`, `plan_paths`; `**/`
+  may match no directory, a `@label/` prefix is ignored). Rendered after,
+  and apart from, the guide's own text, under `MAX_LESSONS_CHARS` (2 000) —
+  most-confirmed first, so the budget cuts what only one story saw. Resolved
+  once at first dispatch, like the guide: a lesson accepted mid-run applies
+  to the next story.
+- **Not built yet:** the UI panel for the API above, staleness, and
+  exporting accepted lessons into the epic PR body.
 
 ## Work that already exists for a ticket
 

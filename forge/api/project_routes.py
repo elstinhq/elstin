@@ -35,6 +35,7 @@ from forge.config.store import (
 )
 from forge.api.epic_routes import _with_stories
 from forge.services.jira_filter import build_jql, preview_filter, sync_project_filter
+from forge.services.lessons import MAX_LESSON_CHARS
 from forge.services.project_guide import MAX_GUIDE_CHARS, GuideError, generate_project_guide, read_repo_guide
 from forge.services.repo_clone import (
     RepoAttachError, RepoCloneError, attach_local_repository, attach_reference_folder, browse_folder, clone_repository,
@@ -406,6 +407,58 @@ def put_repo_guide(project_id: int, repo_id: int, body: RepoGuideRequest) -> dic
         raise HTTPException(status_code=422, detail=f"A guide is capped at {MAX_GUIDE_CHARS} characters; this is {len(content)}")
     sm.set_project_repo_guide(repo_id, content or None)
     return _guide_view(_repo_of(sm, project_id, repo_id))
+
+
+class LessonUpdateRequest(BaseModel):
+    # Either or both. `text` is a person's edit; `status` is their verdict.
+    text: str | None = None
+    status: Literal["proposed", "accepted", "rejected"] | None = None
+
+
+def _lesson_of(sm: StateManager, project_id: int, lesson_id: int) -> dict:
+    lesson = sm.get_project_lesson(lesson_id)
+    if lesson is None or lesson["project_id"] != project_id:
+        raise HTTPException(status_code=404, detail=f"No such lesson: {lesson_id}")
+    return lesson
+
+
+@router.get("/{project_id}/lessons")
+def list_lessons(project_id: int, status: Literal["proposed", "accepted", "rejected"] | None = None) -> list[dict]:
+    """The lessons forge proposed from its own runs (forge/services/lessons.py),
+    oldest first; `status` narrows. Only `accepted` ones reach an agent."""
+    sm = StateManager()
+    if sm.get_project(project_id) is None:
+        raise HTTPException(status_code=404, detail=f"No such project: {project_id}")
+    return sm.list_project_lessons(project_id, status=status)
+
+
+@router.put("/{project_id}/lessons/{lesson_id}")
+def update_lesson(project_id: int, lesson_id: int, body: LessonUpdateRequest) -> dict:
+    """Accept, reject or reword a lesson. A lesson is read as authoritative
+    once accepted, so it can be edited first — and the edit is checked the
+    way a proposed one is (size), not trusted because a person typed it."""
+    sm = StateManager()
+    _lesson_of(sm, project_id, lesson_id)
+    if body.text is None and body.status is None:
+        raise HTTPException(status_code=422, detail="Send `text`, `status`, or both")
+    if body.text is not None:
+        text = body.text.strip()
+        if not text:
+            raise HTTPException(status_code=422, detail="A lesson cannot be empty")
+        if len(text) > MAX_LESSON_CHARS:
+            raise HTTPException(status_code=422, detail=f"A lesson is capped at {MAX_LESSON_CHARS} characters; this is {len(text)}")
+        sm.update_lesson_text(lesson_id, text)
+    if body.status is not None:
+        sm.set_lesson_status(lesson_id, body.status)
+    return _lesson_of(sm, project_id, lesson_id)
+
+
+@router.delete("/{project_id}/lessons/{lesson_id}")
+def delete_lesson(project_id: int, lesson_id: int) -> dict:
+    sm = StateManager()
+    _lesson_of(sm, project_id, lesson_id)
+    sm.delete_lesson(lesson_id)
+    return {"lesson_id": lesson_id, "deleted": True}
 
 
 @router.get("/{project_id}/config")

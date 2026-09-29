@@ -26,6 +26,7 @@ failure is logged and skipped, never a failed merge.
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import logging
 import re
 from typing import Any
@@ -228,3 +229,72 @@ async def capture_story_lessons(sm, epic: dict, story: dict) -> list[dict]:
     except Exception:  # noqa: BLE001 — see the module docstring
         logger.exception("lessons: could not capture from %s", story.get("jira_key"))
         return []
+
+
+# --- handing accepted lessons to an agent -------------------------------
+# Only `accepted` lessons ever get here (project_guide_for_run reads that
+# status and no other). Kept apart from the guide's own text: the guide is
+# the repo's or forge's summary of the code, these are what a person vouched
+# for after watching forge stumble, and the prompt says which is which.
+
+# Its own budget, so lessons never crowd out the guide the way a long guide
+# would crowd out them — and a standing tax on every planner turn stays small.
+MAX_LESSONS_CHARS = 2_000
+
+
+def _glob_matches(glob: str, path: str) -> bool:
+    """fnmatch, where `**/` may match no directory (so `src/**/*.vue` also
+    covers `src/App.vue`). A path may carry a `@label/` repo prefix; a glob
+    is tried against it with and without."""
+    bare = path.split("/", 1)[1] if path.startswith("@") and "/" in path else path
+    patterns = {glob, glob.replace("**/", "")}
+    return any(fnmatch.fnmatchcase(candidate, pattern) for pattern in patterns for candidate in (path, bare))
+
+
+def select_lessons(lessons: list[dict], paths: list[str] | None = None) -> list[dict]:
+    """The lessons an agent should be shown, within MAX_LESSONS_CHARS.
+
+    `paths` is what the reader will touch (dev: the plan's files). None
+    means "no narrowing" — the planner, which does not yet know — and every
+    lesson qualifies. Given paths, an unscoped lesson always qualifies and a
+    scoped one only when a glob matches one of them. Most-confirmed first,
+    so when the budget cuts, what is dropped is what one story alone saw."""
+    chosen = []
+    for lesson in lessons:
+        globs = lesson.get("scope_globs") or []
+        if paths is None or not globs or any(_glob_matches(g, p) for g in globs for p in paths):
+            chosen.append(lesson)
+    chosen.sort(key=lambda row: (-(row.get("occurrences") or 1), row.get("id") or 0))
+    kept: list[dict] = []
+    used = 0
+    for lesson in chosen:
+        cost = len(lesson["text"]) + 3
+        if used + cost > MAX_LESSONS_CHARS:
+            break
+        kept.append(lesson)
+        used += cost
+    return kept
+
+
+def format_lessons_block(lessons: list[dict] | None, paths: list[str] | None = None) -> str:
+    """The prompt section for these lessons, or "" when none qualify."""
+    selected = select_lessons(lessons or [], paths)
+    if not selected:
+        return ""
+    return (
+        "Lessons learned in this project — a person reviewed and accepted each after earlier runs went wrong. "
+        "Follow them; where one disagrees with what you read in the repository, the repository is right.\n"
+        + "\n".join(f"- {lesson['text']}" for lesson in selected)
+        + "\n\n"
+    )
+
+
+def plan_paths(plan: dict | None) -> list[str]:
+    """Every file an approved plan creates or modifies."""
+    paths: list[str] = []
+    for key in ("files_to_create", "files_to_modify"):
+        for entry in (plan or {}).get(key) or []:
+            raw = entry.get("path") if isinstance(entry, dict) else entry
+            if raw and str(raw).strip():
+                paths.append(str(raw).strip())
+    return paths

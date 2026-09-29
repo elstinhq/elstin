@@ -63,6 +63,7 @@ from forge.config.store import get_bool_config, get_config, get_float_config, ge
 from forge.llm.errors import LlmError
 from forge.llm.registry import LlmNotConfiguredError, get_provider
 from forge.llm.types import ContentBlock, LlmResponse, history_from_json, history_to_json, text_message
+from forge.services.lessons import format_lessons_block, plan_paths
 from forge.services.run_activity import append_activity
 from forge.services.usage import effective_budget_usd, record_phase_usage, record_run_outcome, turn_usage_meta
 from forge.tools import language_hooks
@@ -122,6 +123,11 @@ def _build_prompt(*, continuing: bool, plan: dict[str, Any], context_bundle: dic
         return brief
     guide = context_bundle.get("project_guide") or {}
     project_guide_text = f"Project guide ({guide.get('path', 'AGENTS.md')}):\n{guide.get('content', '')}" if guide.get("found") else ""
+    # Narrowed to the plan's own files: dev writes nothing else, so a lesson
+    # scoped to other paths would only be noise in a prompt sent every turn.
+    lessons_text = format_lessons_block(guide.get("lessons"), plan_paths(plan)).rstrip("\n")
+    if lessons_text:
+        project_guide_text = f"{project_guide_text}\n\n{lessons_text}" if project_guide_text else lessons_text
     project_context_text = f"Project context:\n{context_bundle.get('project_context', '')}\n\n" if context_bundle.get("project_context") else ""
     dev_skills_text = _format_skills_block(context_bundle.get("dev_skills"))
     prior_work = context_bundle.get("prior_work") or {}

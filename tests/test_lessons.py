@@ -257,3 +257,181 @@ def test_migration_produces_the_table_the_model_expects():
     columns = {c["name"] for c in inspect(engine).get_columns("project_lessons")}
     expected = {c.name for c in ProjectLesson.__table__.columns}
     assert columns == expected, f"migration/model drift: {expected ^ columns}"
+
+
+# --- what an agent is shown ---------------------------------------------
+
+
+def _row(id, text, *, globs=(), occurrences=1):
+    return {"id": id, "text": text, "scope_globs": list(globs), "occurrences": occurrences}
+
+
+def test_the_planner_sees_every_lesson_dev_only_those_its_files_match():
+    rows = [
+        _row(1, "Build with JDK 21."),
+        _row(2, "Run eslint --fix on Vue files.", globs=["src/**/*.vue"]),
+        _row(3, "Never hand-edit the OpenAPI copy.", globs=["api/*.yaml"]),
+    ]
+
+    assert all(r["text"] in lessons.format_lessons_block(rows) for r in rows)
+
+    dev = lessons.format_lessons_block(rows, ["src/App.vue"])
+    assert "Build with JDK 21." in dev
+    assert "eslint --fix" in dev  # `**/` matches no directory, so src/App.vue counts
+    assert "OpenAPI" not in dev
+
+
+def test_a_repo_prefix_on_a_planned_path_does_not_hide_a_scoped_lesson():
+    rows = [_row(1, "Run eslint --fix on Vue files.", globs=["src/**/*.vue"])]
+    assert "eslint" in lessons.format_lessons_block(rows, ["@portal/src/views/Home.vue"])
+
+
+def test_no_lessons_is_an_empty_block():
+    assert lessons.format_lessons_block(None) == ""
+    assert lessons.format_lessons_block([], ["a.py"]) == ""
+
+
+def test_the_budget_drops_what_only_one_story_saw_first():
+    common = _row(1, "Confirmed by many stories. " + "x" * 1500, occurrences=5)
+    rare = _row(2, "Seen once. " + "y" * 1500, occurrences=1)
+
+    kept = lessons.select_lessons([rare, common])
+
+    assert [r["id"] for r in kept] == [1]
+
+
+def test_plan_paths_reads_both_file_lists_and_both_entry_shapes():
+    plan = {"files_to_create": [{"path": "a.py"}], "files_to_modify": ["b.py", {"path": " c.py "}, {"path": ""}]}
+    assert lessons.plan_paths(plan) == ["a.py", "b.py", "c.py"]
+    assert lessons.plan_paths(None) == []
+
+
+def test_both_prompts_carry_lessons_even_without_a_guide():
+    from forge.agents.roles.dev_loop import _build_prompt
+    from forge.agents.roles.planner_loop import _build_prompt_text
+
+    guide = {"found": False, "lessons": [_row(1, "Build with JDK 21.")]}
+
+    planner = _build_prompt_text(
+        user_request="do it", project_path="/p", context_bundle={"project_guide": guide},
+        linked_issues_context=None, acceptance_criteria_hint=None, prior_work={}, clarification_answers=None,
+    )
+    dev = _build_prompt(
+        continuing=False, plan={"files_to_modify": ["pom.xml"]}, context_bundle={"project_guide": guide}, brief="b",
+    )
+
+    assert "Build with JDK 21." in planner and "PROJECT ARCHITECTURE GUIDE" not in planner
+    assert "Build with JDK 21." in dev
+
+
+def test_a_prompt_without_lessons_is_unchanged():
+    from forge.agents.roles.planner_loop import _build_prompt_text
+
+    def prompt(guide):
+        return _build_prompt_text(
+            user_request="do it", project_path="/p", context_bundle={"project_guide": guide},
+            linked_issues_context=None, acceptance_criteria_hint=None, prior_work={}, clarification_answers=None,
+        )
+
+    assert prompt({"found": False}) == prompt({"found": False, "lessons": []})
+    assert "Lessons learned" not in prompt({"found": False})
+
+
+# --- reaching the run: only accepted lessons ------------------------------
+
+
+async def test_a_run_gets_accepted_lessons_and_nothing_else(world):
+    from forge.services.project_guide import project_guide_for_run
+
+    sm, _, project_id = world
+    accepted = sm.add_lesson_candidate(project_id, "Build with JDK 21 always.")
+    sm.set_lesson_status(accepted["id"], "accepted")
+    sm.add_lesson_candidate(project_id, "A merely proposed lesson text here.")
+    rejected = sm.add_lesson_candidate(project_id, "A rejected lesson text goes here.")
+    sm.set_lesson_status(rejected["id"], "rejected")
+
+    guide = await project_guide_for_run(sm, project_id, {})
+
+    assert guide["found"] is False
+    assert [row["text"] for row in guide["lessons"]] == ["Build with JDK 21 always."]
+
+
+async def test_no_accepted_lessons_leaves_the_guide_exactly_as_it_was(world):
+    from forge.services.project_guide import project_guide_for_run
+
+    sm, _, project_id = world
+    sm.add_lesson_candidate(project_id, "A merely proposed lesson text here.")
+
+    assert await project_guide_for_run(sm, project_id, {}) == {"found": False}
+
+
+# --- the API ------------------------------------------------------------
+
+
+@pytest.fixture()
+def api(world):
+    from fastapi.testclient import TestClient
+
+    from forge.app import create_app
+
+    sm, _, project_id = world
+    with TestClient(create_app()) as client:
+        yield client, sm, project_id
+
+
+def test_lessons_are_listed_and_filtered_by_status(api):
+    client, sm, project_id = api
+    first = sm.add_lesson_candidate(project_id, "Build with JDK 21 always.")
+    sm.add_lesson_candidate(project_id, "Never hand-edit the OpenAPI copy.")
+    sm.set_lesson_status(first["id"], "accepted")
+
+    assert len(client.get(f"/api/projects/{project_id}/lessons").json()) == 2
+    accepted = client.get(f"/api/projects/{project_id}/lessons", params={"status": "accepted"}).json()
+    assert [r["text"] for r in accepted] == ["Build with JDK 21 always."]
+    assert client.get(f"/api/projects/{project_id}/lessons", params={"status": "maybe"}).status_code == 422
+    assert client.get("/api/projects/9999/lessons").status_code == 404
+
+
+def test_a_lesson_can_be_edited_and_accepted_in_one_call(api):
+    client, sm, project_id = api
+    row = sm.add_lesson_candidate(project_id, "Build with JDK 21 always.")
+
+    reply = client.put(
+        f"/api/projects/{project_id}/lessons/{row['id']}",
+        json={"text": "Build with JDK 21; 26 crashes javac.", "status": "accepted"},
+    )
+
+    assert reply.status_code == 200
+    assert reply.json()["text"] == "Build with JDK 21; 26 crashes javac."
+    assert reply.json()["status"] == "accepted"
+
+
+def test_an_edit_is_held_to_the_same_size_as_a_proposal(api):
+    client, sm, project_id = api
+    row = sm.add_lesson_candidate(project_id, "Build with JDK 21 always.")
+    url = f"/api/projects/{project_id}/lessons/{row['id']}"
+
+    assert client.put(url, json={"text": "x" * (lessons.MAX_LESSON_CHARS + 1)}).status_code == 422
+    assert client.put(url, json={"text": "   "}).status_code == 422
+    assert client.put(url, json={}).status_code == 422
+    assert client.put(url, json={"status": "maybe"}).status_code == 422
+    assert sm.get_project_lesson(row["id"])["text"] == "Build with JDK 21 always."
+
+
+def test_a_lesson_of_another_project_is_not_found(api):
+    client, sm, project_id = api
+    other = sm.create_project("other")
+    row = sm.add_lesson_candidate(other, "Build with JDK 21 always.")
+
+    assert client.put(f"/api/projects/{project_id}/lessons/{row['id']}", json={"status": "accepted"}).status_code == 404
+    assert client.delete(f"/api/projects/{project_id}/lessons/{row['id']}").status_code == 404
+    assert sm.get_project_lesson(row["id"])["status"] == "proposed"
+
+
+def test_delete_forgets_a_lesson_so_it_can_be_proposed_again(api):
+    client, sm, project_id = api
+    row = sm.add_lesson_candidate(project_id, "Build with JDK 21 always.")
+
+    assert client.delete(f"/api/projects/{project_id}/lessons/{row['id']}").json()["deleted"] is True
+    assert sm.list_project_lessons(project_id) == []
+    assert sm.add_lesson_candidate(project_id, "Build with JDK 21 always.")["created"] is True
