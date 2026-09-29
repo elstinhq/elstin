@@ -280,6 +280,35 @@ then a guide forge generated and stored, then nothing.
 - The guide is read as authoritative, so a wrong line gets followed: the API
   and UI let a person read, edit (`PUT .../guide`), regenerate or discard it.
 
+## Lessons from runs (capture only so far)
+
+Every run starts cold, so a mistake forge made on one story (the wrong JDK,
+build output staged in a PR) is made again on the next. `services/lessons.py`
+mines a finished story's own evidence for short lessons a person can accept
+into the project guide. Only the capture half exists; nothing is injected
+into a prompt yet.
+
+- **Opt-in:** `capture_lessons` (off by default, project-overridable) — one
+  extra model call per story that needed a retry.
+- **When:** at the end of `_land_story`, after the story is `merged`. A story
+  with no friction (`had_friction`: gate failures, verifier rejections, merge
+  send-backs or retries) is not mined and costs nothing; a run that predates
+  the counters is "not measured", not trouble. Never raises, never holds up a
+  merge.
+- **How:** one single-shot `generation.chat_completion_json` on the planner's
+  model (like the guide), over the story's counters, a person's answers and
+  its *status* activity events (newest kept when cut). Not an agent loop.
+- **Guards:** each lesson must quote the evidence verbatim, else it is dropped;
+  1–3 lessons, 20–300 chars; a lesson already known **in any status** is
+  counted (`occurrences`, `evidence_story_keys`), not re-proposed — a
+  rejected one stays rejected.
+- **Storage:** `project_lessons` (`db/models/lesson.py`,
+  `state/manager_lesson.py`; migration `20260929_0031`). Status `proposed` →
+  `accepted` | `rejected`. Kept in forge, never written into a repo.
+- **Not built yet:** the accept/reject UI and API, injecting accepted lessons
+  into the guide slot (`services/project_guide.py`, scoped by `scope_globs`),
+  staleness, and exporting them into the epic PR body.
+
 ## Work that already exists for a ticket
 
 Tickets rarely arrive untouched: a story is "In Progress" because someone
@@ -1066,6 +1095,7 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | Removing a ticket (rows, worktrees, branches, checkpoints — local only) | `daemon/ticket_removal.py`, `state/manager_removal.py`, `tools/worktree.py`'s `discard_worktree` |
 | Deleting a project (its tickets, clones, settings — local only) | `daemon/project_removal.py`, `state/manager_project.py`'s `delete_project_records` |
 | What the agents are told about a repo (its AGENTS.md, or one forge generates) | `services/project_guide.py`; routes in `api/project_routes.py` |
+| Lessons proposed from finished runs | `services/lessons.py` (capture), `state/manager_lesson.py` |
 | Persistence API | `state/manager_*.py` + Alembic |
 | UI | `ui-src/src/` (React/TS); rebuild with `cd ui-src && npm run build` |
 | Tests | Mirror package under `tests/`; extend `fake_agents` if graph entry points change |

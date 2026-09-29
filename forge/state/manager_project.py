@@ -5,7 +5,16 @@ from datetime import datetime, timezone
 from sqlalchemy import delete, func, or_, select, update
 
 from forge.db.engine import session_scope
-from forge.db.models import Epic, Project, ProjectConfig, ProjectRepo, ProjectTicketFilter, Story, StoryWorktree
+from forge.db.models import (
+    Epic,
+    Project,
+    ProjectConfig,
+    ProjectLesson,
+    ProjectRepo,
+    ProjectTicketFilter,
+    Story,
+    StoryWorktree,
+)
 
 # A story done with its folder: nothing of it is left to land from there.
 _FINISHED_STORY_STATUSES = ("merged", "done", "skipped")
@@ -202,6 +211,7 @@ class _ProjectMixin:
             counts = {
                 "settings_overrides": gone(delete(ProjectConfig).where(ProjectConfig.project_id == project_id)),
                 "ticket_filters": gone(delete(ProjectTicketFilter).where(ProjectTicketFilter.project_id == project_id)),
+                "lessons": gone(delete(ProjectLesson).where(ProjectLesson.project_id == project_id)),
                 "folders": gone(delete(ProjectRepo).where(ProjectRepo.project_id == project_id)),
             }
             session.delete(project)

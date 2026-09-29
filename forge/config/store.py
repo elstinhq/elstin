@@ -101,6 +101,11 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         "Write an AGENTS.md-style guide (kept in forge, the repo is not touched) for a repo that has none, before its first plan",
         False, "false", "bool",
     ),
+    ConfigField(
+        "capture_lessons",
+        "After a story that needed retries lands, propose short lessons for a person to accept into the project guide (one extra model call; nothing reaches an agent until accepted)",
+        False, "false", "bool",
+    ),
     ConfigField("dev_sdk_model", "Dev agent model", False, "gpt-5.1", "string"),
     ConfigField(
         "dev_web_access_enabled",
@@ -175,6 +180,7 @@ PROJECT_OVERRIDABLE_KEYS = frozenset({
     "auto_run_enabled",
     "require_plan_approval",
     "generate_project_guide",
+    "capture_lessons",
     "ticket_hold_statuses",
     "manage_gitignore",
 })

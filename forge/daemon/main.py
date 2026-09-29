@@ -66,6 +66,7 @@ from forge.services.epic_sync import stored_dependencies
 from forge.services.prior_work import closed_as_done, lookup_due, needs_choice, start_candidate
 from forge.services.github_service import GitHubService, parse_github_remote, push_branch
 from forge.services.jira_service import issue_key_sort_key
+from forge.services.lessons import capture_story_lessons
 from forge.services.project_guide import project_guide_for_run
 from forge.services.run_activity import append_activity, last_event_at
 from forge.services.ticket_source import get_ticket_source, ticket_source_configured
@@ -1675,6 +1676,9 @@ async def _land_story(sm: StateManager, epic: dict, story: dict) -> None:
         detail="Brought up to date with the epic branch and re-verified first." if updated else None,
     )
     logger.info("story %s merged into %s", story_key, epic_branch)
+    # After the merge is recorded, so a slow or failing model call can never
+    # hold up or undo a landing. It never raises (forge/services/lessons.py).
+    await capture_story_lessons(sm, epic, sm.get_story(story_key) or story)
 
 
 async def _story_run_values(story_key: str) -> dict:
