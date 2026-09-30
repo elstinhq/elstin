@@ -36,7 +36,7 @@ export function SettingsField({ field, saving, onSave, override }: SettingsField
     return (
       <div className="flex flex-col gap-1">
         <div className="flex items-center justify-between gap-3">
-          <Label htmlFor={`field-${field.key}`} className="font-normal">
+          <Label htmlFor={`field-${field.key}`} className="font-normal leading-snug">
             {field.label}
           </Label>
           <Switch
@@ -54,7 +54,9 @@ export function SettingsField({ field, saving, onSave, override }: SettingsField
   return (
     <div className="flex flex-col gap-1">
       <div className="flex flex-col gap-1.5">
-        <Label htmlFor={`field-${field.key}`}>{field.label}</Label>
+        <Label htmlFor={`field-${field.key}`} className="leading-snug">
+          {field.label}
+        </Label>
         <div className="flex items-center gap-2">
           <Input
             id={`field-${field.key}`}

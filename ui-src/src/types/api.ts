@@ -438,6 +438,15 @@ export interface ConfigField {
   overridden?: boolean; // only present on project-scoped config
 }
 
+/** A section of the settings screen (GET /api/config/categories). */
+export interface ConfigCategory {
+  id: string;
+  title: string;
+  description: string;
+  /** The fields in this section, in the order they show. */
+  keys: string[];
+}
+
 export interface ActivityEvent {
   // Server-side row id, ascending. Doubles as the SSE event id, so it is
   // both the React key and how the stream hook drops replayed duplicates

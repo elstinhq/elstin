@@ -1,4 +1,5 @@
 import type {
+  ConfigCategory,
   ConfigField,
   Epic,
   EpicUsage,
@@ -140,6 +141,7 @@ export const api = {
 
   // -- global config -----------------------------------------------------
   getGlobalConfig: () => request<ConfigField[]>("/api/config"),
+  getConfigCategories: () => request<ConfigCategory[]>("/api/config/categories"),
   setGlobalConfig: (key: string, value: string) =>
     request<{ key: string; updated: boolean }>(`/api/config/${encodeURIComponent(key)}`, put({ value })),
 

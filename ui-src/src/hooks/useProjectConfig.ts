@@ -33,3 +33,8 @@ export function useSetGlobalConfig() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.globalConfig() }),
   });
 }
+
+// The sections never change while the page is open, so they are fetched once.
+export function useConfigCategories() {
+  return useQuery({ queryKey: queryKeys.configCategories(), queryFn: api.getConfigCategories, staleTime: Infinity });
+}

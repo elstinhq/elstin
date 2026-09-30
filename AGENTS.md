@@ -1063,6 +1063,14 @@ Rules that keep it safe:
 
 - Config schema and UI fields: `forge/config/store.py` (`CONFIG_FIELDS`,
   `PROJECT_OVERRIDABLE_KEYS`).
+- **A new setting needs a section.** The settings page groups fields into
+  collapsible sections, and the server owns the grouping:
+  `CONFIG_CATEGORIES` (`forge/config/store.py`, served at
+  `GET /api/config/categories`) lists each section's title, description and
+  the keys in it, in display order. Add the key to the section it belongs to
+  when you add the `ConfigField` — `tests/test_config_store.py` fails on a
+  setting with no section, or in two. A saved value whose key is not declared
+  (an old row) shows under "Other", so it stays reachable.
 - Project overrides: JIRA creds + approval gates only. The LLM provider/
   key / GitHub / models stay global. A project's ticket filter is **not** a config
   override — it is its own table (`project_ticket_filters`), since it has
@@ -1119,6 +1127,15 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
   (`ui-src/src/entries/*.tsx`) is an independent root matching one HTML
   shell, same navigation model as before (plain `<a href>`/
   `window.location` between pages).
+- **Settings page** (`components/settings/`): a filterable list of collapsible
+  sections (`SettingsSection`) built from `GET /api/config` plus
+  `GET /api/config/categories` — the page holds no per-setting knowledge, so
+  a new setting needs no UI change. Which sections are open is remembered in
+  `localStorage` (`forge.settings.open`; every read and write is guarded,
+  since storage can be blocked), `/settings#tracing` opens and scrolls to a
+  section, and filtering opens every section that has a match. Underscores
+  and spaces match each other, so a key and its label find the same setting.
+  `SettingsField` is shared with the project settings dialog.
 - `ui-src/build.mjs` bundles all three entry points (esbuild, built-in
   JSX/TSX support) into `settings-ui/vendor/app-*.js`, then shells out to
   the Tailwind CLI to compile `src/styles/globals.css` into

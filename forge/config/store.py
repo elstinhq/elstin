@@ -189,6 +189,87 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
 
 _FIELDS_BY_KEY: dict[str, ConfigField] = {f.key: f for f in CONFIG_FIELDS}
 
+
+@dataclass(frozen=True)
+class ConfigCategory:
+    id: str
+    title: str
+    description: str
+    keys: tuple[str, ...]
+
+
+# The sections of the settings screen, in the order a person sets forge up:
+# where tickets and code come from, which model, how work flows, how each
+# agent behaves, then housekeeping. `keys` is both membership and the order
+# the fields show in. Every key in CONFIG_FIELDS belongs to exactly one
+# section — tests/test_config_store.py fails on a setting with no home, so
+# the screen never needs a catch-all for a declared field.
+CONFIG_CATEGORIES: tuple[ConfigCategory, ...] = (
+    ConfigCategory(
+        "tickets", "Ticket sources", "JIRA, and how often forge re-checks your ticket filters.",
+        (
+            "jira_base_url", "jira_email", "jira_api_token", "jira_write_enabled",
+            "jira_filter_poll_seconds", "ticket_hold_statuses", "jira_attachments_dir",
+        ),
+    ),
+    ConfigCategory(
+        "github", "GitHub", "Pull requests, and GitHub Issues as a ticket source.",
+        ("github_org", "github_token", "github_issues_write_enabled"),
+    ),
+    ConfigCategory(
+        "models", "Model provider", "Where model calls go, and how long one may take.",
+        ("llm_provider", "openai_api_key", "llm_base_url", "llm_request_timeout_seconds"),
+    ),
+    ConfigCategory(
+        "workflow", "Workflow", "How stories are picked up, approved and run.",
+        ("auto_run_enabled", "require_plan_approval", "max_parallel_stories", "generate_project_guide", "capture_lessons"),
+    ),
+    ConfigCategory(
+        "planner", "Planner", "Reads the code and writes the plan, with optional investigation agents.",
+        (
+            "planner_sdk_model", "planner_sdk_effort", "planner_sdk_max_turns", "planner_sdk_max_retries",
+            "planner_sdk_max_budget_usd", "planner_explorers_enabled", "planner_explorer_max_agents",
+            "planner_explorer_max_turns", "planner_explorer_model",
+        ),
+    ),
+    ConfigCategory(
+        "dev", "Dev agent", "Writes the code from the approved plan.",
+        (
+            "dev_sdk_model", "dev_sdk_effort", "dev_sdk_max_turns", "dev_sdk_max_budget_usd",
+            "dev_sdk_max_idle_turns", "dev_web_access_enabled", "brave_search_api_key",
+        ),
+    ),
+    ConfigCategory(
+        "review", "Review", "The verifier and epic QA.",
+        ("verifier_qa_model", "verifier_skip_llm_trivial_chars"),
+    ),
+    ConfigCategory(
+        "limits", "Spend and context", "Ceilings that apply across agents.",
+        ("story_max_budget_usd", "agent_compaction_token_threshold"),
+    ),
+    ConfigCategory(
+        "git", "Git and storage", "Commit identity, and where forge keeps clones, worktrees and data.",
+        (
+            "git_author_name", "git_author_email", "manage_gitignore",
+            "worktrees_base_dir", "cloned_repos_base_dir", "data_dir",
+        ),
+    ),
+    ConfigCategory(
+        "tracing", "Tracing", "Send run traces to LangSmith. Off by default.",
+        (
+            "langsmith_tracing_enabled", "langsmith_api_key", "langsmith_project",
+            "langsmith_endpoint", "langsmith_workspace_id",
+        ),
+    ),
+)
+
+
+def list_config_categories() -> list[dict]:
+    """The settings screen's sections, for GET /api/config/categories."""
+    return [
+        {"id": c.id, "title": c.title, "description": c.description, "keys": list(c.keys)} for c in CONFIG_CATEGORIES
+    ]
+
 # The subset of CONFIG_FIELDS a project can override — JIRA connection +
 # the three approval gates. Everything else (the LLM provider/key, GitHub,
 # model config, worktree/data dirs) stays global, shared across all projects.
