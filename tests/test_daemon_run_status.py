@@ -10,6 +10,7 @@ under test is the daemon's bookkeeping around `graph.ainvoke`, not the agents.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,7 +28,10 @@ class _StubGraph:
         self._on_invoke = on_invoke
         self.invocations = 0
 
-    async def aupdate_state(self, config, patch):
+    async def aget_state(self, config):
+        return SimpleNamespace(next=(), values={})
+
+    async def aupdate_state(self, config, patch, as_node=None):
         return None
 
     async def ainvoke(self, state, config):

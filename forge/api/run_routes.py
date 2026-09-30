@@ -52,6 +52,12 @@ plans the story again from scratch — the way to say "not this plan" short
 of approving it. The person's answers to earlier questions are kept: they
 are decisions, and the fresh run is given them (forge/daemon/main.py).
 
+Retry: POST /{key}/retry recovers a failed story. A run that failed in dev
+after planning finished picks up at dev with its plan (forge/daemon/main.py's
+arm_resume_at_dev) rather than paying for the planner again; any other
+failure starts over from planning. `?replan=true` forces the fresh plan even
+then — the way to say the plan itself is what went wrong.
+
 Plan: the planner's structured plan (feature_summary, plan_markdown,
 files_to_create/modify, acceptance_criteria, ...) lives only inside the
 story's LangGraph checkpoint (forge/db/models/gameplan.py's docstring on
@@ -65,6 +71,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Literal
 
@@ -74,7 +81,7 @@ from jira import JIRAError
 from pydantic import BaseModel
 
 from forge.config.store import resolve_bool_config
-from forge.daemon.main import cancel_run, check_story_action, execute_story_action, live_run_keys
+from forge.daemon.main import arm_resume_at_dev, cancel_run, check_story_action, execute_story_action, live_run_keys
 from forge.db.engine import get_database_url
 from forge.orchestration.graph import checkpointer_from_url, compile_graph
 from forge.orchestration.reconciler import Blocked
@@ -83,6 +90,8 @@ from forge.services.epic_sync import relevel_epic, sync_story_from_jira
 from forge.services.run_activity import append_activity, list_activity
 from forge.services.usage import get_run_outcome, get_story_usage
 from forge.state.manager import StateManager
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/stories", tags=["stories"])
 
@@ -129,9 +138,10 @@ def _story_with_pr(sm: StateManager, story_key: str) -> dict:
     # usage.py's record_run_outcome), so on a story that has retried, this
     # is the run's lifetime total, not just the latest attempt — the
     # distinction the UI actually needs (dev wrote real code vs. the run
-    # never got past planning) holds either way: a fresh "run"-stage
-    # failure only ever accumulates from the attempt that produced it,
-    # since retry_story's "run" recovery path is a full redispatch.
+    # never got past planning) holds either way: a "run"-stage failure
+    # accumulates from the attempt that produced it — a full redispatch
+    # replans, and a resume at dev (arm_resume_at_dev) keeps the planner
+    # counts it already has and adds the new dev passes.
     story["run_outcome"] = get_run_outcome(story_key) if story.get("thread_id") else None
     return story
 
@@ -288,7 +298,7 @@ async def cancel_story_run(story_key: str) -> dict:
 
 
 @router.post("/{story_key}/retry")
-def retry_story(story_key: str, background_tasks: BackgroundTasks) -> dict:
+async def retry_story(story_key: str, background_tasks: BackgroundTasks, replan: bool = False) -> dict:
     """Recovers a story the reconciler halted the whole epic on (any
     "failed" story blocks every level — see forge/orchestration/
     reconciler.py). sm.retry_story picks the recovery path from
@@ -296,9 +306,15 @@ def retry_story(story_key: str, background_tasks: BackgroundTasks) -> dict:
     re-attempted merge for an integration-merge conflict — see
     forge/state/manager_story.py. For an auto_run project the next daemon
     poll cycle (up to 15s) picks it up; for a manual-mode project
-    _maybe_trigger_manual_run drives it immediately since nothing else will."""
+    _maybe_trigger_manual_run drives it immediately since nothing else will.
+
+    A run failure whose planning is still good — it ended failed in dev — is
+    re-armed at dev first (arm_resume_at_dev) and resumed instead of
+    redispatched, so the plan is not paid for twice. `replan` skips that.
+    `async` because reading the checkpoint is: the blocking calls go through
+    `to_thread`, as everywhere else in this module."""
     sm = StateManager()
-    story = sm.get_story(story_key)
+    story = await asyncio.to_thread(sm.get_story, story_key)
     if story is None:
         raise HTTPException(status_code=404, detail=f"No such story: {story_key}")
     if story["status"] != "failed":
@@ -306,9 +322,22 @@ def retry_story(story_key: str, background_tasks: BackgroundTasks) -> dict:
             status_code=409,
             detail=f"{story_key} is not failed (status={story['status']}) — nothing to retry",
         )
-    sm.retry_story(story_key)
-    _maybe_trigger_manual_run(sm, story_key, background_tasks)
-    return _story_with_pr(sm, story_key)
+    resume_at_dev = False
+    if not replan and story.get("failure_stage") in (None, "run"):
+        epic = await asyncio.to_thread(sm.get_epic, story["epic_key"])
+        try:
+            resume_at_dev = await arm_resume_at_dev(sm, epic, story)
+        except Exception:  # noqa: BLE001 — a saving, never a reason to leave the story failed
+            logger.exception("story %s: could not resume at dev — retrying with a fresh plan", story_key)
+    await asyncio.to_thread(sm.retry_story, story_key, resume_at_dev=resume_at_dev)
+    if resume_at_dev:
+        await asyncio.to_thread(
+            append_activity, story_key, type="status", phase="system",
+            title="Retry: continuing at development with the earlier plan",
+            detail="Planning had finished and the run failed in development, so it is not planned again.",
+        )
+    await asyncio.to_thread(_maybe_trigger_manual_run, sm, story_key, background_tasks)
+    return await asyncio.to_thread(_story_with_pr, sm, story_key)
 
 
 @router.post("/{story_key}/external-change")

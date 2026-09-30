@@ -536,6 +536,28 @@ def _merge_into_epic_branch(
         return {"result": "conflict", "detail": detail}
 
 
+def _latest_done_work_merge(sm: StateManager, epic: dict) -> datetime | None:
+    """When done tickets' work was last merged into the epic branch, if ever."""
+    latest = None
+    for story in sm.list_stories_for_epic(epic["jira_key"]):
+        for result in ((story.get("prior_work") or {}).get("epic_merge") or {}).values():
+            if result.get("result") == "merged" and result.get("at"):
+                at = datetime.fromisoformat(result["at"])
+                latest = at if latest is None or at > latest else latest
+    return latest
+
+
+def _plan_predates_done_work(sm: StateManager, epic: dict, story_key: str) -> bool:
+    """The story's latest plan was started before done work last landed in the
+    epic branch — the staleness rule `_replan_behind_done_work` applies to a
+    plan waiting for approval."""
+    latest = _latest_done_work_merge(sm, epic)
+    if latest is None:
+        return False
+    started = last_event_at(story_key, phase="planner", title="Planning started")
+    return started is None or started < latest
+
+
 def _replan_behind_done_work(sm: StateManager, epic: dict) -> list[str]:
     """Stories waiting for plan approval whose plan was made before done
     work was merged into the epic branch go back to planning — with their
@@ -544,12 +566,7 @@ def _replan_behind_done_work(sm: StateManager, epic: dict) -> list[str]:
     was made without it (its planner read the epic branch, or a worktree
     made from it). A story whose run is live is left alone; it is caught
     here once it parks."""
-    latest = None
-    for story in sm.list_stories_for_epic(epic["jira_key"]):
-        for result in ((story.get("prior_work") or {}).get("epic_merge") or {}).values():
-            if result.get("result") == "merged" and result.get("at"):
-                at = datetime.fromisoformat(result["at"])
-                latest = at if latest is None or at > latest else latest
+    latest = _latest_done_work_merge(sm, epic)
     if latest is None:
         return []
     base = get_config("worktrees_base_dir") or "/data/repos"
@@ -1116,7 +1133,7 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
                 # dispatched, and QA reviewing a stale diff would be worse
                 # than the cost of recomputing it.
                 patch["qa_context"] = await asyncio.to_thread(_build_qa_context, sm, epic, story)
-            await graph.aupdate_state(config, patch)
+            await _apply_resume_patch(graph, config, patch)
             result = await graph.ainvoke(None, config)
         else:
             # The codebase map is drawn from what the planner will read (the
@@ -1208,7 +1225,8 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
         )
     # "run" — nothing has been merged at this point (a run only reaches
     # "ready_to_merge" on success), so retry_story's recovery for this stage
-    # is a full redispatch. See forge/state/manager_story.py.
+    # starts the run again: a full redispatch, or — when it failed in dev —
+    # a resume at dev (arm_resume_at_dev). See forge/state/manager_story.py.
     sm.set_story_status(
         story_key, new_status, parked_reason=finished_reason, failure_stage="run" if new_status == "failed" else None,
     )
@@ -1734,6 +1752,90 @@ async def _send_back_to_dev(
         detail=brief[:1000],
     )
     logger.info("story %s: sent back to dev to land (attempt %d)", story_key, attempts)
+
+
+async def _apply_resume_patch(graph, config: dict, patch: dict) -> None:
+    """`graph.aupdate_state(config, patch)` for a run about to be resumed,
+    without moving where it resumes.
+
+    A run re-opened at dev (`arm_resume_at_dev`, `_send_back_to_dev`) waits on
+    dev with status "developing", because it was re-opened as if the gate had
+    just sent it back. An update that does not say which node is writing it
+    makes LangGraph work that out from the checkpoint, and after a dev failure
+    it picks dev — whose edge leads on to the gate, so the resumed run skipped
+    dev and "completed" having written nothing. Naming the gate, as when the
+    run was re-opened, keeps it waiting on dev: `route_after_gate` sends
+    "developing" there. Any other checkpoint is left to the inference it always
+    used."""
+    snapshot = await graph.aget_state(config)
+    at_dev_again = tuple(snapshot.next) == ("dev",) and (snapshot.values or {}).get("status") == "developing"
+    await graph.aupdate_state(config, patch, as_node="gate" if at_dev_again else None)
+
+
+def _ended_failed_in_dev(history: list) -> bool:
+    """`history`: the story's checkpoints, newest first (two are enough). True
+    when the run finished `failed` having last run dev — the checkpoint before
+    the final one was waiting on dev — with a plan in its state. That is a
+    run whose planning is done and worth keeping.
+
+    Read off the checkpoint sequence, not the state: a failed state does not
+    say which node failed, and LangGraph no longer records the writing node in
+    a checkpoint's metadata. A run cancelled mid-flight has not finished
+    (`next` is not empty), so it never qualifies."""
+    if len(history) < 2:
+        return False
+    last, before = history[0], history[1]
+    values = last.values or {}
+    return not last.next and tuple(before.next) == ("dev",) and values.get("status") == "failed" and bool(values.get("plan"))
+
+
+def _worktrees_intact(entries: list[dict]) -> bool:
+    """The story has worktrees and every one is still on disk on its branch —
+    what dev needs to carry on from where it was."""
+    return bool(entries) and all(_reusable_worktree(entry["repo_path"], entry) for entry in entries)
+
+
+async def arm_resume_at_dev(sm: StateManager, epic: dict, story: dict) -> bool:
+    """Retry's cheaper road: let a run that failed in dev pick up at dev with
+    the plan it already has, instead of planning again. A provider that ran
+    out of credits, or an outage, fails dev after a planner run that was paid
+    for and is still good; a full redispatch (`retry_story`'s default) throws
+    it away and pays for it a second time.
+
+    Re-opens the finished graph at dev the way `_send_back_to_dev` does — as if
+    the gate had just sent the run back, so it continues dev -> gate ->
+    review. Dev restarts from the plan (its own conversation is only
+    checkpointed when a pass completes), and sees whatever the failed pass
+    already wrote to the worktree. Returns True once the checkpoint is
+    re-armed, and the caller then has to move the story to "dispatched"
+    (`retry_story(resume_at_dev=True)`), where the reconciler resumes it. False,
+    having changed nothing, whenever planning should happen again:
+
+    * the run did not end failed in dev (`_ended_failed_in_dev`) — a planner,
+      gate or review failure, a cancelled run, a QA story, no checkpoint;
+    * a worktree is gone, so there is nothing for dev to continue in;
+    * done work was merged into the epic branch after the plan started, the
+      same staleness that sends a plan waiting for approval back to planning;
+    * the ticket's text changed in its source and is waiting on a person
+      (`external_pending`) — the plan may no longer say what it asks."""
+    story_key = story["jira_key"]
+    if story.get("kind") == "qa" or story.get("external_pending") is not None:
+        return False
+    entries = await asyncio.to_thread(sm.list_story_worktrees, story_key)
+    if not await asyncio.to_thread(_worktrees_intact, entries):
+        return False
+    if await asyncio.to_thread(_plan_predates_done_work, sm, epic, story_key):
+        return False
+    config = {"configurable": {"thread_id": story_key}}
+    async with checkpointer_from_url(get_database_url()) as checkpointer:
+        graph = compile_graph(checkpointer, require_plan_approval=False)
+        history = [snapshot async for snapshot in graph.aget_state_history(config, limit=2)]
+        if not _ended_failed_in_dev(history):
+            return False
+        # A fresh gate budget: the failure was dev's, not a run of gate fails.
+        await graph.aupdate_state(config, {"status": "developing", "error": None, "gate_attempts": 0}, as_node="gate")
+    logger.info("story %s: re-armed at dev — the earlier plan is kept", story_key)
+    return True
 
 
 def _abort_merge_in_progress(worktree_path: str) -> None:

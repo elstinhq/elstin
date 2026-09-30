@@ -647,7 +647,8 @@ question — the planner then follows them as decisions but may still ask
 about something they do not settle. `send_back_to_planning` clears them
 when a re-plan should reconsider (new work merged under the plan), and
 keeps them for a person's Re-plan (`POST /api/stories/{key}/replan`).
-A fresh run (Retry after a failed run) keeps the story's worktrees and the
+A fresh run (Retry after a failed run that could not resume at dev — see
+"Retry after a dev failure") keeps the story's worktrees and the
 uncommitted work in them — in its default repo too (`_reusable_worktree`;
 recreating it lost MKT2-866's passing backend while its portal was kept).
 The planner's brief lists that work (`_earlier_run_changes`, "Work from
@@ -797,6 +798,13 @@ state, not a bespoke table.
     queue: `graph.aupdate_state(..., as_node="gate")` with
     `status="developing"`, a `gate_feedback` brief and `integration_paths`,
     then an ordinary resume continues dev → gate → verifier → END.
+  - So can a run that ended **`failed` in dev** — see "Retry after a dev
+    failure" below. Both re-entries leave the checkpoint waiting on `dev`
+    with `status="developing"`, and the daemon's resume patch
+    (`_apply_resume_patch`) names the gate as the writer for exactly that
+    shape: an update that names no node lets LangGraph guess, and after a dev
+    failure it guesses dev, whose edge leads to the gate — the resumed run
+    skipped dev and "completed" having written nothing.
   - `verifier` and `qa` catch `services/generation.py`'s `GenerationError`
     (provider call failed, or the reply carried no JSON object) and return
     `status="failed"`, for the same reason `dev` catches `DevLoopError`:
@@ -809,6 +817,35 @@ state, not a bespoke table.
 
 Checkpointer: Postgres (`langgraph-checkpoint-postgres`). `thread_id` =
 story JIRA key.
+
+**Retry after a dev failure.** Retry (`POST /api/stories/{key}/retry`) of a
+`run` failure used to be a full redispatch: `pending`, a fresh
+`initial_state()`, the planner again. When the run's planning was good and dev
+is what failed — a provider out of credits, an outage — that pays for the
+planner twice. `daemon/main.py`'s `arm_resume_at_dev` instead re-opens the
+finished graph at `dev` (`as_node="gate"`, `status="developing"`, a fresh
+`gate_attempts`), and `retry_story(resume_at_dev=True)` sets the story
+`dispatched`, which the reconciler answers with a `ResumeStory`. Dev restarts
+from the plan — its own conversation is only checkpointed when a pass
+completes — and sees whatever the failed pass already wrote to the worktree.
+
+It applies only when the checkpoint says the run **finished `failed` having
+last run dev** with a plan (`_ended_failed_in_dev`, read off the checkpoint
+sequence: the final checkpoint has nothing `next` and the one before it was
+waiting on `dev`; LangGraph no longer records the writing node in a
+checkpoint's metadata). Everything else keeps the full redispatch: a planner,
+gate or review failure, a cancelled run, a QA story, a merge failure, a story
+with no recorded worktrees or one whose worktree is gone, a plan started
+before done work last merged into the epic branch (`_plan_predates_done_work`,
+the rule `_replan_behind_done_work` applies), and a ticket whose changed text
+is waiting on a person. `?replan=true` forces the fresh plan — the way to say
+the plan itself was the problem. The route decides, not the daemon: the
+external-change "replan" also sends a failed story to `pending`, and the
+daemon could not tell the two apart.
+
+A failure at *review* (the verifier's provider call) is not covered: dev's
+work is done and resuming at dev would redo it. Resuming at the verifier is the
+natural next step.
 
 ## Tools and languages
 
@@ -1135,6 +1172,7 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | Which system tickets come from (source per project, neutral `Ticket`) | `services/ticket_source.py` — sync code calls `get_ticket_source(project_id)`, never `JiraService` directly |
 | Live activity / streaming | `services/activity_stream.py`, `api/run_routes.py` |
 | Graph routing / gates | `orchestration/graph.py`, `config/store.py` |
+| Retry: plan again vs. resume at dev | `daemon/main.py`'s `arm_resume_at_dev`, `state/manager_story.py`'s `retry_story`, `api/run_routes.py` |
 | Dispatch / PR / CI | `daemon/main.py`, `orchestration/integration.py` |
 | Where a branch starts (existing work for a ticket) | `services/prior_work.py` (git), `daemon/prior_work_lookup.py` (when, storage, planner view) |
 | Read-only repos and reference folders (what runs read, what plans may change) | `tools/reference_folder.py`, `tools/workspace.py`'s `Workspace.read_only`, `agents/roles/plan_gate.py`, `daemon/main.py`'s `_workspace_roots` |
