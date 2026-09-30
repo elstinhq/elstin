@@ -94,7 +94,7 @@ state only (status, kind, worktree, gates, levels).
 | `daemon/` | Poll loop, ticket-filter sweep, worktree create, intent handling, PR/CI/merge, QA brief assembly | Call agents without going through the graph |
 | `state/` | **Only** DB access for epics/stories/PRs/projects | Import `forge.db.models` outside the allow-list in hard constraint #1 |
 | `db/` | SQLAlchemy models + engine | Business logic here |
-| `services/` | JIRA/GitHub clients, epic sync, ticket filters, story_kind, generation (verifier/QA's single-shot LLM call), repo clone / attach, run activity + its live fan-out, run telemetry (cost **and** run shape) | Bypass StateManager for persistence |
+| `services/` | JIRA/GitHub clients, epic sync, ticket filters, story_kind, generation (verifier/QA's single-shot LLM call), repo clone / attach, run activity + its live fan-out, run telemetry (cost **and** run shape), LangSmith tracing (`tracing.py`) | Bypass StateManager for persistence |
 | `tools/` | Dev-agent tools, planner's read-only tools, language profiles, worktree, path guard, workspace (multi-repo read roots) | Hardcode language names — use `language_hooks`; give a reference repo a write path |
 | `mcp/` | MCP servers (jira/github standalone) | Assume agents already use JIRA/GitHub MCP — daemon calls services directly today |
 | `api/` | FastAPI routers | Long-running work — daemon owns that |
@@ -1013,6 +1013,52 @@ prompt or threshold change. These counters exist so that a real task set
 and a real baseline can be assembled from merged stories later, instead of
 tuning against invented tasks now.
 
+## Tracing (LangSmith)
+
+`services/tracing.py`. Off by default and opt-in, because a trace carries
+whole prompts — ticket text, source code, tool output — to a third party.
+Settings (`/settings`, Postgres, like everything else): `langsmith_tracing_enabled`,
+`langsmith_api_key` (secret), `langsmith_project` (default `forge`),
+`langsmith_endpoint` (blank = LangSmith cloud; the EU region or a
+self-hosted instance goes here), `langsmith_workspace_id` (only for an
+org-scoped key). The **enabled flag and the LangSmith project name are
+project-overridable**, so one project's code can stay out of LangSmith while
+another's is traced; the key is global.
+
+One story run is one trace, `forge:<story key>`, in the configured project:
+
+- **The graph** — a child per node (planner, dev, gate, verifier, qa) from a
+  `LangChainTracer` that `daemon/main.py`'s `_invoke_graph` puts in the
+  graph config (`traced_run`). A run parked at plan approval and resumed
+  after it is two traces of one `thread_id`, which LangSmith groups.
+  Metadata: story, epic, project, kind, resume, retry count, ticket summary.
+- **Every model call**, nested under the node that made it — the client in
+  `llm/openai_compat.py` is wrapped with `langsmith.wrappers.wrap_openai`
+  (patched in place: same client, same returns, same typed errors).
+  Messages, reply, token usage with cache reads and reasoning tokens. It
+  records nothing outside a traced run.
+- **Every tool call** the planner, its explorers and dev make
+  (`agents/loop.py`'s `_call_tool` → `tool_span`), with arguments and
+  result cut at `MAX_TRACED_CHARS` — the model calls are not cut, the tool
+  payloads (a whole file) are.
+- **Lessons capture**, the one model call outside the graph, as its own
+  trace (`traced_operation`, in `_land_story`). Project-guide generation
+  is not traced.
+
+Rules that keep it safe:
+
+- **Config from Postgres, never env** (hard constraint #8). forge does not
+  read `LANGSMITH_*`; the SDK client is built from the settings, and while a
+  run executes with tracing off it is switched off explicitly, because the
+  SDK would otherwise obey an ambient `LANGSMITH_TRACING=true` and send the
+  run to whatever that points at. `tests/test_tracing.py` pins this.
+- **Tracing never fails a run.** Unreadable settings or a client that cannot
+  be built log a warning and the run goes untraced; delivery is the SDK's own
+  background thread, which logs and drops what it cannot send.
+- **Cost is not filled in.** LangSmith prices tokens from its own model
+  table, which does not know `openai/gpt-5.6-terra`-style ids; forge's
+  `story_usage` (OpenRouter's reported cost) stays the record of spend.
+
 ## Config and migrations
 
 - Config schema and UI fields: `forge/config/store.py` (`CONFIG_FIELDS`,
@@ -1137,7 +1183,8 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
    levels derived from it: a re-sync reads stored kinds for stories that
    already exist, so a human's override survives every later sweep.
 7. Dev writes stay **plan-scoped** (`dev_tools` + `path_guard`).
-8. Config from Postgres — not env (except `DATABASE_URL`).
+8. Config from Postgres — not env (except `DATABASE_URL`). That includes
+   LangSmith: `LANGSMITH_*` is not read (see "Tracing (LangSmith)").
 9. Planner/dev run **only** through `forge/agents/loop.py`; verifier/qa
    **only** through `forge/services/generation.py`. No role constructs an
    `LlmProvider` or imports a provider SDK (`openai`, etc.) directly —
@@ -1171,6 +1218,7 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | Filter-based ingestion | `services/jira_filter.py`, `daemon/ticket_sync.py` |
 | Which system tickets come from (source per project, neutral `Ticket`) | `services/ticket_source.py` — sync code calls `get_ticket_source(project_id)`, never `JiraService` directly |
 | Live activity / streaming | `services/activity_stream.py`, `api/run_routes.py` |
+| LangSmith tracing (what is traced, settings, per-project switch) | `services/tracing.py`; call sites: `daemon/main.py`'s `_invoke_graph`, `agents/loop.py`'s `_call_tool`, `llm/openai_compat.py` |
 | Graph routing / gates | `orchestration/graph.py`, `config/store.py` |
 | Retry: plan again vs. resume at dev | `daemon/main.py`'s `arm_resume_at_dev`, `state/manager_story.py`'s `retry_story`, `api/run_routes.py` |
 | Dispatch / PR / CI | `daemon/main.py`, `orchestration/integration.py` |

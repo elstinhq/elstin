@@ -83,6 +83,26 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         "OpenAI-compatible API base URL (blank = OpenAI's own API; set to reach Azure/OpenRouter/vLLM/Ollama/etc.)",
         False, None, "string",
     ),
+    # LangSmith tracing (forge/services/tracing.py). Off unless turned on: a trace
+    # carries whole prompts — ticket text, source code, tool output — to a third
+    # party, so it is a decision, and one a project can make for itself.
+    ConfigField(
+        "langsmith_tracing_enabled",
+        "Send run traces to LangSmith. Prompts, source code, ticket text and tool output leave this machine (off = nothing is sent)",
+        False, "false", "bool",
+    ),
+    ConfigField("langsmith_api_key", "LangSmith API key", True, None, "string"),
+    ConfigField("langsmith_project", "LangSmith project the traces go to", False, "forge", "string"),
+    ConfigField(
+        "langsmith_endpoint",
+        "LangSmith API URL (blank = LangSmith cloud; set for the EU region or a self-hosted instance)",
+        False, None, "string",
+    ),
+    ConfigField(
+        "langsmith_workspace_id",
+        "LangSmith workspace ID (only needed with an organization-scoped API key)",
+        False, None, "string",
+    ),
     ConfigField("worktrees_base_dir", "Worktrees base directory", False, "/data/repos", "string"),
     ConfigField("cloned_repos_base_dir", "Cloned project repos base directory", False, "/data/cloned-repos", "string"),
     ConfigField("data_dir", "Data directory (dev-loop baseline snapshots, etc.)", False, "/data", "string"),
@@ -183,6 +203,8 @@ PROJECT_OVERRIDABLE_KEYS = frozenset({
     "capture_lessons",
     "ticket_hold_statuses",
     "manage_gitignore",
+    "langsmith_tracing_enabled",
+    "langsmith_project",
 })
 
 _cache_lock = threading.Lock()

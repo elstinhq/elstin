@@ -67,6 +67,7 @@ from forge.services.prior_work import closed_as_done, lookup_due, needs_choice, 
 from forge.services.github_service import GitHubService, parse_github_remote, push_branch
 from forge.services.jira_service import issue_key_sort_key
 from forge.services.lessons import capture_story_lessons, pr_lessons_section
+from forge.services.tracing import traced_operation, traced_run
 from forge.services.project_guide import project_guide_for_run
 from forge.services.run_activity import append_activity, last_event_at
 from forge.services.ticket_source import get_ticket_source, ticket_source_configured
@@ -1134,7 +1135,7 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
                 # than the cost of recomputing it.
                 patch["qa_context"] = await asyncio.to_thread(_build_qa_context, sm, epic, story)
             await _apply_resume_patch(graph, config, patch)
-            result = await graph.ainvoke(None, config)
+            result = await _invoke_graph(graph, None, config, epic=epic, story=story, resume=True)
         else:
             # The codebase map is drawn from what the planner will read (the
             # worktree and the epic branch), not the clones.
@@ -1166,7 +1167,7 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
             state["clarification_answers"] = story.get("clarification_answers") or []
             if story_kind == "qa":
                 state["qa_context"] = await asyncio.to_thread(_build_qa_context, sm, epic, story)
-            result = await graph.ainvoke(state, config)
+            result = await _invoke_graph(graph, state, config, epic=epic, story=story, resume=False)
 
     # Record every repo the run turned out to write. dev creates a worktree
     # per repo the approved plan names, so this set is only known after the
@@ -1709,7 +1710,11 @@ async def _land_story(sm: StateManager, epic: dict, story: dict) -> None:
     logger.info("story %s merged into %s", story_key, epic_branch)
     # After the merge is recorded, so a slow or failing model call can never
     # hold up or undo a landing. It never raises (forge/services/lessons.py).
-    await capture_story_lessons(sm, epic, sm.get_story(story_key) or story)
+    with traced_operation(
+        epic["project_id"], name=f"forge:lessons:{story_key}", metadata={"story_key": story_key, "epic_key": epic_key},
+        tags=["forge", "lessons"],
+    ):
+        await capture_story_lessons(sm, epic, sm.get_story(story_key) or story)
 
 
 async def _story_run_values(story_key: str) -> dict:
@@ -1752,6 +1757,29 @@ async def _send_back_to_dev(
         detail=brief[:1000],
     )
     logger.info("story %s: sent back to dev to land (attempt %d)", story_key, attempts)
+
+
+async def _invoke_graph(graph, graph_input, config: dict, *, epic: dict, story: dict, resume: bool) -> dict:
+    """`graph.ainvoke` for a story's run — one LangSmith trace per invocation
+    when tracing is on for the story's project (forge/services/tracing.py).
+    A run parked at plan approval and resumed after it is two traces of the
+    same thread: LangSmith groups them by the `thread_id` LangGraph records."""
+    kind = story.get("kind") or "dev"
+    with traced_run(
+        epic["project_id"],
+        name=f"forge:{story['jira_key']}",
+        metadata={
+            "story_key": story["jira_key"],
+            "epic_key": epic["jira_key"],
+            "project_id": epic["project_id"],
+            "kind": kind,
+            "resume": resume,
+            "retry_count": story.get("retry_count") or 0,
+            "ticket": (story.get("summary") or "")[:200],
+        },
+        tags=["forge", kind, "resume" if resume else "fresh"],
+    ) as trace_config:
+        return await graph.ainvoke(graph_input, {**config, **trace_config})
 
 
 async def _apply_resume_patch(graph, config: dict, patch: dict) -> None:

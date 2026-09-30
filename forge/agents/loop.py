@@ -143,6 +143,7 @@ from forge.llm.types import (
     ToolResultBlock,
     Usage,
 )
+from forge.services.tracing import tool_span
 
 logger = logging.getLogger("forge.agents.loop")
 
@@ -356,7 +357,17 @@ async def _call_tool(tool_fns: dict[str, ToolFn], name: str, arguments: dict[str
     """Returns (result_text, is_error). Never raises: any exception from
     the tool function (including forge/tools/path_guard.py's
     PathGuardError) becomes an is_error tool_result the model can react
-    to, matching how a real tool failure looks to a human developer."""
+    to, matching how a real tool failure looks to a human developer.
+
+    Each call is a span in the run's LangSmith trace when tracing is on
+    (forge/services/tracing.py); the tool itself is unchanged."""
+    with tool_span(name, arguments) as span:
+        text, is_error = await _run_tool(tool_fns, name, arguments)
+        span.finish(text, is_error=is_error)
+    return text, is_error
+
+
+async def _run_tool(tool_fns: dict[str, ToolFn], name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
     fn = tool_fns.get(name)
     if fn is None:
         return f"Unknown tool: {name!r}. Available tools: {sorted(tool_fns)}", True
