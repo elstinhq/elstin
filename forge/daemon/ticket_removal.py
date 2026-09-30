@@ -211,6 +211,10 @@ async def remove_epic(sm: StateManager, epic_key: str) -> dict[str, Any]:
             "activity_events": counts["activity_events"],
             "usage_rows": counts["usage_rows"],
             "run_outcomes": counts["run_outcomes"],
+            # Proposed lessons whose only evidence was this ticket are dropped;
+            # the rest just stop citing it (state/manager_lesson.py).
+            "lessons_detached": counts["lessons_detached"],
+            "lessons_dropped": counts["lessons_dropped"],
             "checkpoint_threads": checkpoint_threads,
             **{k: local[k] for k in ("worktrees", "branches", "directories")},
         },

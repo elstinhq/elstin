@@ -25,6 +25,41 @@ def normalize_lesson_text(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
 
 
+def forget_evidence(session, story_keys: list[str] | set[str]) -> tuple[int, int]:
+    """Detach removed stories from every lesson's evidence, inside the caller's
+    transaction. Returns (lessons detached from, lessons dropped).
+
+    A ticket that is removed takes its record with it — activity, usage,
+    outcomes — so a lesson still citing it points at nothing a reviewer can
+    open. Worse, a ticket added again under the same key would then look like
+    the source of lessons learned on the deleted run, and an epic's pull
+    request lists the lessons whose evidence includes one of its stories
+    (forge/services/lessons.py's pr_lessons_section).
+
+    A lesson that is still only *proposed* and has no evidence left is dropped:
+    nobody vouched for it and nothing supports it. One a person accepted or
+    rejected is kept — that decision was theirs — with the removed stories
+    taken out and its count reduced (never below 1: it was seen at least once)."""
+    keys = set(story_keys)
+    if not keys:
+        return 0, 0
+    detached = dropped = 0
+    for row in session.execute(select(ProjectLesson)).scalars().all():
+        evidence = list(row.evidence_story_keys or [])
+        removed = [key for key in evidence if key in keys]
+        if not removed:
+            continue
+        remaining = [key for key in evidence if key not in keys]
+        if not remaining and row.status == LESSON_PROPOSED:
+            session.delete(row)
+            dropped += 1
+            continue
+        row.evidence_story_keys = remaining
+        row.occurrences = max(1, (row.occurrences or 1) - len(removed))
+        detached += 1
+    return detached, dropped
+
+
 class _LessonMixin:
     def add_lesson_candidate(
         self,

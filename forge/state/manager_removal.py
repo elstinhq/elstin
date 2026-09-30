@@ -29,6 +29,7 @@ from forge.db.models import (
     StoryUsage,
     StoryWorktree,
 )
+from forge.state.manager_lesson import forget_evidence
 from forge.state.manager_story import _story_to_dict
 
 
@@ -93,8 +94,9 @@ class _RemovalMixin:
     def delete_ticket_records(self, epic_key: str) -> dict[str, int]:
         """Delete the ticket's rows in one transaction, children before
         parents (pull requests and worktrees reference stories, stories
-        reference the epic). Returns how many of each went. Zeros for an
-        unknown epic; nothing else is touched."""
+        reference the epic). Returns how many of each went, plus how many
+        lessons lost this ticket as evidence and how many were dropped for
+        having none left. Zeros for an unknown epic; nothing else is touched."""
         with session_scope() as session:
             story_keys = list(session.execute(select(Story.jira_key).where(Story.epic_key == epic_key)).scalars())
             keys = sorted({epic_key, *story_keys})
@@ -102,7 +104,14 @@ class _RemovalMixin:
             def gone(statement) -> int:
                 return session.execute(statement).rowcount or 0
 
+            # Lessons drawn from this ticket's runs lose it as evidence — see
+            # forge/state/manager_lesson.py's forget_evidence. Same transaction,
+            # so a removal that fails part-way leaves them untouched.
+            lessons_detached, lessons_dropped = forget_evidence(session, keys)
+
             counts = {
+                "lessons_detached": lessons_detached,
+                "lessons_dropped": lessons_dropped,
                 "activity_events": gone(delete(ActivityEvent).where(ActivityEvent.run_id.in_(keys))),
                 "usage_rows": gone(delete(StoryUsage).where(StoryUsage.run_id.in_(keys))),
                 "run_outcomes": gone(delete(StoryRunOutcome).where(StoryRunOutcome.run_id.in_(keys))),

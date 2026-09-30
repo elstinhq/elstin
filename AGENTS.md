@@ -296,11 +296,28 @@ into the project guide; accepted ones are handed to the planner and dev.
   merge.
 - **How:** one single-shot `generation.chat_completion_json` on the planner's
   model (like the guide), over the story's counters, a person's answers and
-  its *status* activity events (newest kept when cut). Not an agent loop.
+  the events that say what went wrong (newest kept when cut). Not an agent
+  loop. The record (`build_evidence`): status events, plus the **reviewer's
+  reasoning** (a `thinking` event, the only place a rejection is explained) —
+  but only a verdict that sent the run back to dev, never the final approval,
+  which just describes what was built. **Planner-phase events are left out**
+  (plan gate, stub clarification questions: the pipeline, not the project —
+  the first real capture proposed one as a lesson). `Fix mode:` events carry
+  the reviewer's required fixes (`dev_loop._fix_mode_detail`), and a long
+  gate output keeps its head and its tail, where the failing test is. The
+  prompt asks for a stated cause (a required fix, an answer, an error that
+  names what was wrong) and rules out generic advice.
 - **Guards:** each lesson must quote the evidence verbatim, else it is dropped;
   1–3 lessons, 20–300 chars; a lesson already known **in any status** is
   counted (`occurrences`, `evidence_story_keys`), not re-proposed — a
   rejected one stays rejected.
+- **Removing a ticket** (`state/manager_lesson.py`'s `forget_evidence`, called
+  in `delete_ticket_records`' transaction): the ticket's stories stop being
+  evidence for any lesson. A still-*proposed* lesson left with none is dropped;
+  one a person accepted or rejected is kept, with its count reduced. Without
+  this, a ticket re-added under the same key looked like the source of the
+  deleted run's lessons (an epic's PR body lists lessons by evidence key).
+  The removal report gains `lessons_detached` / `lessons_dropped`.
 - **Storage:** `project_lessons` (`db/models/lesson.py`,
   `state/manager_lesson.py`; migration `20260929_0031`). Status `proposed` →
   `accepted` | `rejected`. Kept in forge, never written into a repo.

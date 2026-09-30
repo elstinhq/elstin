@@ -110,6 +110,22 @@ _IDLE_TURNS_PER_EXTRA_FILES = 2
 _IDLE_BUDGET_CAP_FACTOR = 4
 
 
+# Activity-event details are capped by the caller's reader; this is enough for
+# a reviewer's fix list, which the reviewer already keeps to one sentence each.
+_FIX_MODE_DETAIL_CHARS = 4_000
+
+
+def _fix_mode_detail(required_fixes: list[str], analyze_errors: list[str]) -> str:
+    """The text of a fix round's activity event: the reviewer's required fixes,
+    numbered as dev is given them, then the analyzer's errors."""
+    parts: list[str] = []
+    if required_fixes:
+        parts.append("Required fixes:\n" + "\n".join(f"{i}. {fix}" for i, fix in enumerate(required_fixes, 1)))
+    if analyze_errors:
+        parts.append("Analyzer errors:\n" + "\n".join(f"- {line}" for line in analyze_errors[:25]))
+    return "\n\n".join(parts)[:_FIX_MODE_DETAIL_CHARS]
+
+
 def idle_budget_for_plan(base: int, planned_files: int) -> int:
     """The idle-turn budget for a plan of this many files. 0 (off) stays off."""
     if base <= 0:
@@ -408,7 +424,15 @@ async def run_dev(
             required_fixes, analyze_errors = _collect_required_fixes(verifier_report)
             brief = _build_iteration_brief(worktree_path, allowed_paths, required_fixes, analyze_errors, continuing=continuing)
             if run_id and (required_fixes or analyze_errors):
-                append_activity(run_id, type="status", phase="dev", title=f"Fix mode: {len(required_fixes)} required fix(es), {len(analyze_errors)} analyzer error(s) carried into dev loop")
+                # The fixes themselves, not just how many: they are what the
+                # reviewer found wrong, so they are what the activity feed
+                # and forge/services/lessons.py need to say why a run was
+                # sent back.
+                append_activity(
+                    run_id, type="status", phase="dev",
+                    title=f"Fix mode: {len(required_fixes)} required fix(es), {len(analyze_errors)} analyzer error(s) carried into dev loop",
+                    detail=_fix_mode_detail(required_fixes, analyze_errors) or None,
+                )
 
         prompt = _build_prompt(continuing=continuing, plan=plan, context_bundle=context_bundle, brief=brief)
 

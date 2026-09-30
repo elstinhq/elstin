@@ -392,6 +392,8 @@ export interface RemoveTicketReport {
     activity_events: number;
     usage_rows: number;
     run_outcomes: number;
+    lessons_detached: number;
+    lessons_dropped: number;
     checkpoint_threads: number;
     worktrees: string[];
     branches: string[];

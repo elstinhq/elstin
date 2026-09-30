@@ -490,3 +490,201 @@ def test_a_lesson_containing_a_code_fence_cannot_break_out_of_the_block():
 
     assert text.count("````markdown") == 1  # the outer fence is longer than the one inside
     assert text.rstrip().splitlines()[-1] == "````"
+
+
+# --- what the extractor reads (fix 1) --------------------------------------
+
+
+def _event(phase, type, title, detail=None):
+    return {"phase": phase, "type": type, "title": title, "detail": detail}
+
+
+def test_the_reviewers_reasoning_is_part_of_the_record():
+    """It is a "thinking" event, and the only place a rejection is explained."""
+    events = [
+        _event("verifier", "thinking", "Verifier reasoning", "Coverage tests for the cap are missing."),
+        _event("dev", "status", "Entering development (iteration 1)"),
+    ]
+
+    text = lessons.build_evidence({"jira_key": "ENG-2"}, None, events)
+
+    assert "Coverage tests for the cap are missing." in text
+
+
+def test_thinking_from_other_phases_is_not_evidence():
+    events = [_event("dev", "thinking", "Dev reasoning", "I will start with the DB layer."),
+              _event("planner", "thinking", "Planner reasoning", "The plan is fine.")]
+
+    text = lessons.build_evidence({"jira_key": "ENG-2"}, None, events)
+
+    assert "DB layer" not in text and "plan is fine" not in text
+
+
+def test_planner_events_are_about_the_pipeline_and_stay_out():
+    events = [
+        _event("planner", "status", "Plan gate rejected the plan: 2 problem(s)", "stub clarification question ''"),
+        _event("dev", "status", "Fix mode: 1 required fix(es), 0 analyzer error(s) carried into dev loop", "Required fixes:\n1. Add a test."),
+    ]
+
+    text = lessons.build_evidence({"jira_key": "ENG-2"}, None, events)
+
+    assert "Plan gate rejected" not in text and "stub clarification" not in text
+    assert "1. Add a test." in text
+
+
+def test_a_long_gate_output_keeps_its_header_and_its_tail():
+    """Toolchains print the failing test and its error last."""
+    detail = "HEAD-OF-FEEDBACK " + "x" * 5000 + " TAIL: test 'toggle twice' failed: UNIQUE constraint"
+    events = [_event("dev", "status", "Fix mode: deterministic gate feedback carried into dev loop", detail)]
+
+    text = lessons.build_evidence({"jira_key": "ENG-2"}, None, events)
+
+    assert "HEAD-OF-FEEDBACK" in text and "UNIQUE constraint" in text and "[…]" in text
+    assert len(text) < 2500
+
+
+def test_ordinary_status_details_stay_short():
+    events = [_event("system", "status", "Merged", "y" * 5000)]
+    assert len(lessons.build_evidence({"jira_key": "ENG-2"}, None, events)) < 1200
+
+
+def test_the_fix_round_event_carries_the_fixes(monkeypatch):
+    from forge.agents.roles.dev_loop import _fix_mode_detail
+
+    text = _fix_mode_detail(["Add a cap test.", "Revert the lockfile."], ["error: undefined getter"])
+
+    assert "1. Add a cap test." in text and "2. Revert the lockfile." in text and "undefined getter" in text
+    assert _fix_mode_detail([], []) == ""
+    assert len(_fix_mode_detail(["z" * 9000], [])) <= 4000
+
+
+async def test_the_model_is_shown_the_reviewers_reasoning_and_not_the_planners_retries(world, monkeypatch):
+    from forge.services.run_activity import append_activity
+
+    sm, epic, project_id = world
+    _enable(project_id)
+    record_run_outcome("ENG-2", verifier_runs=1, verifier_rejections=1)
+    append_activity("ENG-2", type="status", phase="planner", title="Plan gate rejected the plan", detail="stub label")
+    append_activity("ENG-2", type="thinking", phase="verifier", title="Verifier reasoning",
+                    detail="Wrapper types must not be weakened to dynamic just to ease testing.")
+    append_activity("ENG-2", type="status", phase="dev", title="Entering development (iteration 1)")
+    fake = _reply()
+    monkeypatch.setattr(lessons, "chat_completion_json", fake)
+
+    await lessons.capture_story_lessons(sm, epic, sm.get_story("ENG-2"))
+
+    sent = fake.calls[0]["messages"][1]["content"]
+    assert "must not be weakened to dynamic" in sent
+    assert "Plan gate rejected" not in sent
+
+
+def test_the_prompt_rules_out_pipeline_talk_and_causeless_failures():
+    prompt = lessons._SYSTEM_PROMPT
+    assert "plan gate" in prompt and "clarification" in prompt
+    assert "no stated cause" in prompt
+
+
+# --- deleted tickets (fix 2) ------------------------------------------------
+
+
+@pytest.fixture()
+def two_epics(world):
+    sm, _, project_id = world
+    sm.create_epic("ENG-9", project_id=project_id, levels=[["ENG-10"]])
+    sm.create_story("ENG-10", epic_key="ENG-9", wave=0, summary="other")
+    return sm, project_id
+
+
+def _add(sm, project_id, text, *story_keys, status=None):
+    row = sm.add_lesson_candidate(project_id, text, story_key=story_keys[0])
+    for key in story_keys[1:]:
+        sm.add_lesson_candidate(project_id, text, story_key=key)
+    if status:
+        sm.set_lesson_status(row["id"], status)
+    return row["id"]
+
+
+def test_removing_a_ticket_drops_the_proposed_lessons_only_it_supported(two_epics):
+    sm, project_id = two_epics
+    only_here = _add(sm, project_id, "Only ENG-2 ever saw this one.", "ENG-2")
+    shared = _add(sm, project_id, "Both tickets saw this lesson.", "ENG-2", "ENG-10")
+
+    counts = sm.delete_ticket_records("ENG-1")
+
+    assert counts["lessons_dropped"] == 1 and counts["lessons_detached"] == 1
+    assert sm.get_project_lesson(only_here) is None
+    kept = sm.get_project_lesson(shared)
+    assert kept["evidence_story_keys"] == ["ENG-10"] and kept["occurrences"] == 1
+
+
+def test_a_decision_a_person_made_survives_the_removal(two_epics):
+    sm, project_id = two_epics
+    accepted = _add(sm, project_id, "Build with JDK 21 always.", "ENG-2", status="accepted")
+    rejected = _add(sm, project_id, "Split every story into three files.", "ENG-2", status="rejected")
+
+    sm.delete_ticket_records("ENG-1")
+
+    for lesson_id, status in ((accepted, "accepted"), (rejected, "rejected")):
+        row = sm.get_project_lesson(lesson_id)
+        assert row["status"] == status and row["evidence_story_keys"] == []
+        assert row["occurrences"] >= 1
+
+
+def test_a_lesson_from_the_deleted_run_is_not_credited_to_a_ticket_added_under_the_same_key(two_epics):
+    """The bug this fixes: re-adding a ticket reuses its key, so evidence left
+    behind made the old run's lessons look like this epic's."""
+    sm, project_id = two_epics
+    accepted = _add(sm, project_id, "Build with JDK 21 always.", "ENG-2", status="accepted")
+    epic_keys = {"ENG-1", "ENG-2"}
+    assert lessons.pr_lessons_section(sm.list_project_lessons(project_id), epic_keys) != []
+
+    sm.delete_ticket_records("ENG-1")
+    sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2"]])
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0, summary="again")
+
+    assert lessons.pr_lessons_section(sm.list_project_lessons(project_id), epic_keys) == []
+    assert sm.get_project_lesson(accepted)["evidence_story_keys"] == []
+
+
+def test_the_same_story_can_be_counted_again_after_its_ticket_was_removed(two_epics):
+    sm, project_id = two_epics
+    _add(sm, project_id, "Only ENG-2 ever saw this one.", "ENG-2", status="accepted")
+    sm.delete_ticket_records("ENG-1")
+    sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2"]])
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0, summary="again")
+
+    again = sm.add_lesson_candidate(project_id, "Only ENG-2 ever saw this one.", story_key="ENG-2")
+
+    assert again["created"] is False and again["evidence_story_keys"] == ["ENG-2"]
+
+
+def test_removing_a_ticket_no_lesson_cites_changes_nothing(two_epics):
+    sm, project_id = two_epics
+    row = _add(sm, project_id, "Cited only by the other ticket.", "ENG-10")
+
+    counts = sm.delete_ticket_records("ENG-1")
+
+    assert counts["lessons_dropped"] == 0 and counts["lessons_detached"] == 0
+    assert sm.get_project_lesson(row)["evidence_story_keys"] == ["ENG-10"]
+
+
+def test_only_a_verdict_that_sent_the_run_back_counts_as_evidence():
+    """The last verdict, after which nothing returned to dev, is an approval:
+    it says what was built, which is not a problem to learn from."""
+    events = [
+        _event("dev", "status", "Entering development (iteration 0)"),
+        _event("verifier", "thinking", "Verifier reasoning", "Tests for the migration are clearly unmet."),
+        _event("dev", "status", "Entering development (iteration 1)"),
+        _event("verifier", "thinking", "Verifier reasoning", "Everything planned is implemented, including migration tests."),
+        _event("system", "status", "Merged into the epic branch"),
+    ]
+
+    text = lessons.build_evidence({"jira_key": "ENG-2"}, None, events)
+
+    assert "Tests for the migration are clearly unmet." in text
+    assert "including migration tests" not in text
+
+
+def test_a_run_that_was_never_sent_back_has_no_verdict_evidence():
+    events = [_event("verifier", "thinking", "Verifier reasoning", "All planned criteria are met.")]
+    assert "All planned criteria" not in lessons.build_evidence({"jira_key": "ENG-2"}, None, events)

@@ -47,6 +47,14 @@ MAX_LESSON_CHARS = 300
 # ones that describe how the run ended.
 MAX_EVIDENCE_CHARS = 12_000
 _EVENT_DETAIL_CHARS = 600
+# What a reviewer said was wrong, and what the toolchain reported, are the
+# record's substance; most other status lines are one-line bookkeeping.
+_KEY_EVENT_DETAIL_CHARS = 1_500
+# Phases whose events are about the pipeline's own machinery — a plan the plan
+# gate sent back, a clarification question with stub text — not about the
+# project. A lesson drawn from them would land in the project's guide as if it
+# were project knowledge (the first real capture proposed exactly that).
+_PIPELINE_ONLY_PHASES = frozenset({"planner"})
 _MAX_EXISTING_LESSONS = 40
 _KINDS = ("environment", "convention", "gotcha", "process")
 
@@ -77,9 +85,11 @@ _SYSTEM_PROMPT = f"""You read the record of one finished story from an autonomou
 
 Rules:
 - Return at most {MAX_LESSONS_PER_STORY} lessons, and return none when nothing in the record is a reusable lesson. An empty list is a good answer.
-- A lesson is about THIS project's repos, toolchain or conventions, stated as an instruction ("Build with JDK 21; the default JDK 26 crashes javac"). Never about this one ticket, never generic engineering advice.
+- A lesson is about THIS project's repos, toolchain or conventions, stated as an instruction ("Build with JDK 21; the default JDK 26 crashes javac"). Never about this one ticket, and never generic engineering advice that would hold for any project ("add tests", "follow best practices", "keep changes small").
 - Each lesson must be supported by the record. "evidence_quote" is a short passage copied verbatim from the record; a lesson whose quote is not in the record is discarded.
 - One line each, {MIN_LESSON_CHARS}-{MAX_LESSON_CHARS} characters. No preamble, no reasoning.
+- The record is a log of an automated pipeline. Ignore what is about the pipeline itself — the plan's format, the plan gate, clarification questions, retry counters — and anything about how the agents are prompted. Only what it says about the project's own code, build, tests or conventions can be a lesson.
+- A lesson needs a cause you can point to: a reviewer's required fix or reasoning, a person's answer, or an error message that names what was wrong. A failure with no stated cause ("tests failed" and a stack trace) is not a lesson — return none rather than guess at one.
 - Do not repeat a lesson from "Already known", even reworded.
 - "scope_globs": path globs the lesson applies to (e.g. "src/**/*.vue"), or an empty list when it holds for the whole project.
 - kind: environment (toolchain/build/runtime), convention (how code here is written), gotcha (a trap that failed a run), process (how work should be ordered or split)."""
@@ -104,7 +114,8 @@ def had_friction(story: dict, outcome: dict | None) -> bool:
 
 def build_evidence(story: dict, outcome: dict | None, events: list[dict[str, Any]]) -> str:
     """The record the model reads: what the run measured, what a person told
-    it, and its status lines (newest kept when it must be cut)."""
+    it, and the events that say what went wrong (newest kept when it must be
+    cut)."""
     lines = [f"Story {story['jira_key']}: {story.get('summary') or ''}".strip()]
     counters = {k: v for k, v in (outcome or {}).items() if k not in ("run_id",) and v not in (None, 0)}
     if counters:
@@ -116,16 +127,22 @@ def build_evidence(story: dict, outcome: dict | None, events: list[dict[str, Any
     if answers:
         lines.append("A person's answers to the planner's questions: " + " | ".join(str(a)[:300] for a in answers))
     lines.append("")
-    lines.append("Status events, oldest first:")
+    lines.append("Events, oldest first (the reviewer's reasoning and required fixes, gate output, merge trouble):")
     status = []
-    for event in events:
-        if event.get("type") != "status":
+    last_fix_round = max(
+        (i for i, event in enumerate(events)
+         if event.get("phase") == "dev" and str(event.get("title") or "").startswith("Entering development (iteration")),
+        default=-1,
+    )
+    for index, event in enumerate(events):
+        # A verdict is only evidence of a problem when it sent the run back to
+        # dev. The last one, after which nothing went back, is an approval:
+        # it describes what was built, which is not something that went wrong.
+        if event.get("type") == "thinking" and index > last_fix_round:
             continue
-        entry = f"[{event.get('phase')}] {event.get('title')}"
-        detail = (event.get("detail") or "").strip()
-        if detail:
-            entry += f" — {detail[:_EVENT_DETAIL_CHARS]}"
-        status.append(entry)
+        entry = _evidence_entry(event)
+        if entry:
+            status.append(entry)
     head = "\n".join(lines)
     budget = max(0, MAX_EVIDENCE_CHARS - len(head))
     kept: list[str] = []
@@ -137,6 +154,40 @@ def build_evidence(story: dict, outcome: dict | None, events: list[dict[str, Any
         used += len(entry) + 1
     kept.reverse()
     return head + "\n" + "\n".join(kept)
+
+
+def _is_key_event(event: dict[str, Any]) -> bool:
+    """A reviewer's verdict or a fix round's brief: the events that say *why* a
+    run was sent back."""
+    title = str(event.get("title") or "")
+    return title.startswith("Fix mode") or (event.get("phase") == "verifier" and event.get("type") == "thinking")
+
+
+def _evidence_entry(event: dict[str, Any]) -> str | None:
+    """One line of the record for this event, or None when it is not evidence.
+
+    Status events, plus the reviewer's own reasoning (a "thinking" event: the
+    only place its explanation of a rejection is written down). Tool calls,
+    model turns and token counts say what an agent did, not what went wrong,
+    and planner-phase events are about the pipeline, not the project."""
+    phase = event.get("phase")
+    kind = event.get("type")
+    if phase in _PIPELINE_ONLY_PHASES:
+        return None
+    if kind != "status" and not (kind == "thinking" and phase == "verifier"):
+        return None
+    entry = f"[{phase}] {event.get('title')}"
+    detail = (event.get("detail") or "").strip()
+    if detail:
+        if _is_key_event(event):
+            # Toolchain output puts the failing test and its error last, so a
+            # long one keeps both ends rather than only its header.
+            half = _KEY_EVENT_DETAIL_CHARS // 2
+            detail = detail if len(detail) <= _KEY_EVENT_DETAIL_CHARS else f"{detail[:half]} […] {detail[-half:]}"
+        else:
+            detail = detail[:_EVENT_DETAIL_CHARS]
+        entry += f" — {detail}"
+    return entry
 
 
 def _squash(text: str) -> str:
