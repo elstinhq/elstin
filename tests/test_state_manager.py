@@ -153,6 +153,42 @@ def test_retry_story_run_failure_redispatches(project_id):
     assert sm.get_epic("ENG-1")["phase"] == "implementing"  # no longer excluded from polling
 
 
+def test_retry_story_resume_at_dev_goes_back_to_dispatched(project_id):
+    """A run that failed in dev, re-armed at dev by the caller, is not sent to
+    "pending" — DispatchStory would start the graph over and plan again.
+    "dispatched" with nothing executing it is what the reconciler answers with
+    a ResumeStory, so the run continues from the checkpoint it was left at."""
+    from forge.state.manager import StateManager
+
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id)
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0)
+    sm.set_epic_phase("ENG-1", "failed")
+    sm.set_story_status("ENG-2", "failed", failure_stage="run")
+
+    sm.retry_story("ENG-2", resume_at_dev=True)
+
+    story = sm.get_story("ENG-2")
+    assert story["status"] == "dispatched"
+    assert story["failure_stage"] is None
+    assert story["retry_count"] == 1
+    assert sm.get_epic("ENG-1")["phase"] == "implementing"
+
+
+def test_retry_story_resume_at_dev_does_not_change_a_merge_retry(project_id):
+    """A merge failure never re-plans, so there is nothing to resume."""
+    from forge.state.manager import StateManager
+
+    sm = StateManager()
+    sm.create_epic("ENG-1", project_id=project_id)
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0)
+    sm.set_story_status("ENG-2", "failed", failure_stage="merge")
+
+    sm.retry_story("ENG-2", resume_at_dev=True)
+
+    assert sm.get_story("ENG-2")["status"] == "ready_to_merge"
+
+
 def test_retry_story_merge_failure_reattempts_merge(project_id):
     """failure_stage="merge" goes back to "ready_to_merge" with a fresh merge
     budget — the run itself already succeeded, so its committed work is kept

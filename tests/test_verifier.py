@@ -486,3 +486,30 @@ def test_every_changed_file_is_shown_within_the_budget():
     assert len(shown[20]["diff"]) == verifier._MAX_DIFF_CHARS
     many = verifier._budgeted_diffs([{"path": f"f{i}", "diff": "z" * 50_000} for i in range(30)])
     assert len(many) == 30 and sum(len(d["diff"]) for d in many) <= verifier._DIFF_BUDGET_CHARS
+
+
+async def test_the_review_call_is_made_for_the_callers_project(git_repo, registered_fake_profiles, monkeypatch):
+    """The project id reaches the single-shot call, which is what picks the
+    project's review model and its provider; without one the call is global."""
+    seen = []
+
+    async def fake_review(**kwargs):
+        seen.append(kwargs.get("project_id", "<not passed>"))
+        return {"passed": True, "issues": [], "required_fixes": []}, {"model": "fake"}
+
+    monkeypatch.setattr(verifier, "get_int_config", lambda key, default=0: 0)
+    monkeypatch.setattr(verifier, "chat_completion_json", fake_review)
+    gate = {
+        "passed": True, "issues": [], "required_fixes": [], "profiles": {}, "changed_files": [], "dev_targets": [],
+        "assumed_satisfied": [{"path": "foo.alpha", "reason": "already formats the currency"}],
+    }
+    common = dict(
+        plan={"files_to_create": [], "files_to_modify": []}, acceptance_criteria=[],
+        worktree_path=git_repo, file_changes=[], precomputed_gate=gate,
+        declared_unchanged={"foo.alpha": "already formats the currency"},
+    )
+
+    await verifier.run_verifier(**common, project_id=7)
+    await verifier.run_verifier(**common)
+
+    assert seen == [7, None]

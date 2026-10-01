@@ -90,6 +90,12 @@ def _undated(model: str) -> str:
     return _DATE_SUFFIX_RE.sub("", model)
 
 
+def known_models() -> list[str]:
+    """Every model id forge has a price for, sorted — what a model picker can
+    offer when the provider's own listing cannot be reached."""
+    return sorted({model for rows in MODEL_PRICING.values() for model in rows})
+
+
 def pricing_for(provider: str | None, model: str | None) -> ModelPricing | None:
     """The table row for (provider, model), or None.
 

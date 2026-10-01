@@ -318,7 +318,7 @@ async def test_a_single_story_writes_every_repo_its_plan_names(split_project, mo
 
     monkeypatch.setattr(graph_module, "run_planner", planner_spanning_both)
     monkeypatch.setattr(graph_module, "run_dev", dev_writes_both)
-    monkeypatch.setattr(dev_loop_module, "get_provider", lambda: _FakeProvider())
+    monkeypatch.setattr(dev_loop_module, "get_provider", lambda *_args, **_kwargs: _FakeProvider())
 
     sm = split_project["sm"]
     await poll_once(sm, wait=True)

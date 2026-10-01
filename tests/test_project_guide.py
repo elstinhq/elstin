@@ -393,13 +393,17 @@ def test_a_repo_with_no_guide_reports_none(guide_api):
 def test_generating_through_the_api_stores_and_reports_the_guide(guide_api, monkeypatch):
     sm, _pid, repo_id, _root, url = guide_api
 
-    async def fake_generate(path):
+    asked_for = []
+
+    async def fake_generate(path, project_id=None):
+        asked_for.append(project_id)
         return "generated text"
 
     monkeypatch.setattr(project_routes, "generate_project_guide", fake_generate)
     with _client() as client:
         body = client.post(f"{url}/generate").json()
         assert (body["source"], body["content"]) == ("generated", "generated text") and body["generated_at"]
+        assert asked_for == [_pid]  # written on the project's own model and provider
         assert client.get(url).json()["content"] == "generated text"
     assert sm.get_project_repo(repo_id)["generated_guide"] == "generated text"
 
@@ -416,7 +420,7 @@ def test_generating_is_refused_for_a_repo_that_ships_its_own(guide_api):
 def test_a_generation_failure_is_a_502_and_stores_nothing(guide_api, monkeypatch):
     sm, _pid, repo_id, _root, url = guide_api
 
-    async def failing(path):
+    async def failing(path, project_id=None):
         raise pg.GuideError("no model configured")
 
     monkeypatch.setattr(project_routes, "generate_project_guide", failing)

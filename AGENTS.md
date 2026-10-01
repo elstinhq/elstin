@@ -94,7 +94,7 @@ state only (status, kind, worktree, gates, levels).
 | `daemon/` | Poll loop, ticket-filter sweep, worktree create, intent handling, PR/CI/merge, QA brief assembly | Call agents without going through the graph |
 | `state/` | **Only** DB access for epics/stories/PRs/projects | Import `forge.db.models` outside the allow-list in hard constraint #1 |
 | `db/` | SQLAlchemy models + engine | Business logic here |
-| `services/` | JIRA/GitHub clients, epic sync, ticket filters, story_kind, generation (verifier/QA's single-shot LLM call), repo clone / attach, run activity + its live fan-out, run telemetry (cost **and** run shape) | Bypass StateManager for persistence |
+| `services/` | JIRA/GitHub clients, epic sync, ticket filters, story_kind, generation (verifier/QA's single-shot LLM call), repo clone / attach, run activity + its live fan-out, run telemetry (cost **and** run shape), LangSmith tracing (`tracing.py`) | Bypass StateManager for persistence |
 | `tools/` | Dev-agent tools, planner's read-only tools, language profiles, worktree, path guard, workspace (multi-repo read roots) | Hardcode language names — use `language_hooks`; give a reference repo a write path |
 | `mcp/` | MCP servers (jira/github standalone) | Assume agents already use JIRA/GitHub MCP — daemon calls services directly today |
 | `api/` | FastAPI routers | Long-running work — daemon owns that |
@@ -647,7 +647,8 @@ question — the planner then follows them as decisions but may still ask
 about something they do not settle. `send_back_to_planning` clears them
 when a re-plan should reconsider (new work merged under the plan), and
 keeps them for a person's Re-plan (`POST /api/stories/{key}/replan`).
-A fresh run (Retry after a failed run) keeps the story's worktrees and the
+A fresh run (Retry after a failed run that could not resume at dev — see
+"Retry after a dev failure") keeps the story's worktrees and the
 uncommitted work in them — in its default repo too (`_reusable_worktree`;
 recreating it lost MKT2-866's passing backend while its portal was kept).
 The planner's brief lists that work (`_earlier_run_changes`, "Work from
@@ -797,6 +798,13 @@ state, not a bespoke table.
     queue: `graph.aupdate_state(..., as_node="gate")` with
     `status="developing"`, a `gate_feedback` brief and `integration_paths`,
     then an ordinary resume continues dev → gate → verifier → END.
+  - So can a run that ended **`failed` in dev** — see "Retry after a dev
+    failure" below. Both re-entries leave the checkpoint waiting on `dev`
+    with `status="developing"`, and the daemon's resume patch
+    (`_apply_resume_patch`) names the gate as the writer for exactly that
+    shape: an update that names no node lets LangGraph guess, and after a dev
+    failure it guesses dev, whose edge leads to the gate — the resumed run
+    skipped dev and "completed" having written nothing.
   - `verifier` and `qa` catch `services/generation.py`'s `GenerationError`
     (provider call failed, or the reply carried no JSON object) and return
     `status="failed"`, for the same reason `dev` catches `DevLoopError`:
@@ -809,6 +817,35 @@ state, not a bespoke table.
 
 Checkpointer: Postgres (`langgraph-checkpoint-postgres`). `thread_id` =
 story JIRA key.
+
+**Retry after a dev failure.** Retry (`POST /api/stories/{key}/retry`) of a
+`run` failure used to be a full redispatch: `pending`, a fresh
+`initial_state()`, the planner again. When the run's planning was good and dev
+is what failed — a provider out of credits, an outage — that pays for the
+planner twice. `daemon/main.py`'s `arm_resume_at_dev` instead re-opens the
+finished graph at `dev` (`as_node="gate"`, `status="developing"`, a fresh
+`gate_attempts`), and `retry_story(resume_at_dev=True)` sets the story
+`dispatched`, which the reconciler answers with a `ResumeStory`. Dev restarts
+from the plan — its own conversation is only checkpointed when a pass
+completes — and sees whatever the failed pass already wrote to the worktree.
+
+It applies only when the checkpoint says the run **finished `failed` having
+last run dev** with a plan (`_ended_failed_in_dev`, read off the checkpoint
+sequence: the final checkpoint has nothing `next` and the one before it was
+waiting on `dev`; LangGraph no longer records the writing node in a
+checkpoint's metadata). Everything else keeps the full redispatch: a planner,
+gate or review failure, a cancelled run, a QA story, a merge failure, a story
+with no recorded worktrees or one whose worktree is gone, a plan started
+before done work last merged into the epic branch (`_plan_predates_done_work`,
+the rule `_replan_behind_done_work` applies), and a ticket whose changed text
+is waiting on a person. `?replan=true` forces the fresh plan — the way to say
+the plan itself was the problem. The route decides, not the daemon: the
+external-change "replan" also sends a failed story to `pending`, and the
+daemon could not tell the two apart.
+
+A failure at *review* (the verifier's provider call) is not covered: dev's
+work is done and resuming at dev would redo it. Resuming at the verifier is the
+natural next step.
 
 ## Tools and languages
 
@@ -976,12 +1013,110 @@ prompt or threshold change. These counters exist so that a real task set
 and a real baseline can be assembled from merged stories later, instead of
 tuning against invented tasks now.
 
+## Tracing (LangSmith)
+
+`services/tracing.py`. Off by default and opt-in, because a trace carries
+whole prompts — ticket text, source code, tool output — to a third party.
+Settings (`/settings`, Postgres, like everything else): `langsmith_tracing_enabled`,
+`langsmith_api_key` (secret), `langsmith_project` (default `forge`),
+`langsmith_endpoint` (blank = LangSmith cloud; the EU region or a
+self-hosted instance goes here), `langsmith_workspace_id` (only for an
+org-scoped key). The **enabled flag and the LangSmith project name are
+project-overridable**, so one project's code can stay out of LangSmith while
+another's is traced; the key is global.
+
+One story run is one trace, `forge:<story key>`, in the configured project:
+
+- **The graph** — a child per node (planner, dev, gate, verifier, qa) from a
+  `LangChainTracer` that `daemon/main.py`'s `_invoke_graph` puts in the
+  graph config (`traced_run`). A run parked at plan approval and resumed
+  after it is two traces of one `thread_id`, which LangSmith groups.
+  Metadata: story, epic, project, kind, resume, retry count, ticket summary.
+- **Every model call**, nested under the node that made it — the client in
+  `llm/openai_compat.py` is wrapped with `langsmith.wrappers.wrap_openai`
+  (patched in place: same client, same returns, same typed errors).
+  Messages, reply, token usage with cache reads and reasoning tokens. It
+  records nothing outside a traced run.
+- **Every tool call** the planner, its explorers and dev make
+  (`agents/loop.py`'s `_call_tool` → `tool_span`), with arguments and
+  result cut at `MAX_TRACED_CHARS` — the model calls are not cut, the tool
+  payloads (a whole file) are.
+- **Lessons capture**, the one model call outside the graph, as its own
+  trace (`traced_operation`, in `_land_story`). Project-guide generation
+  is not traced.
+
+Rules that keep it safe:
+
+- **Config from Postgres, never env** (hard constraint #8). forge does not
+  read `LANGSMITH_*`; the SDK client is built from the settings, and while a
+  run executes with tracing off it is switched off explicitly, because the
+  SDK would otherwise obey an ambient `LANGSMITH_TRACING=true` and send the
+  run to whatever that points at. `tests/test_tracing.py` pins this.
+- **Tracing never fails a run.** Unreadable settings or a client that cannot
+  be built log a warning and the run goes untraced; delivery is the SDK's own
+  background thread, which logs and drops what it cannot send.
+- **Cost is not filled in.** LangSmith prices tokens from its own model
+  table, which does not know `openai/gpt-5.6-terra`-style ids; forge's
+  `story_usage` (OpenRouter's reported cost) stays the record of spend.
+
+## Per-project models and provider
+
+A project can choose **which provider, endpoint and API key** its model calls
+use (`llm_provider`, `llm_base_url`, `openai_api_key`) and **which model each
+role runs on** (`planner_sdk_model`, `planner_explorer_model`, `dev_sdk_model`,
+`verifier_qa_model`). All seven are in `PROJECT_OVERRIDABLE_KEYS`; whatever a
+project sets nothing for is the global setting, so it can move one role, or just
+its key, without pinning the rest. The other agent limits (turns, budgets,
+effort) stay global.
+
+How a choice reaches a call:
+
+- **The graph carries only `project_id`** (`FeatureRunState.project_id`, set by
+  the daemon on a fresh run and re-supplied on every resume). Never a key, and
+  not resolved model names: graph state is checkpointed to Postgres and sent to
+  LangSmith, so a secret in it would be stored and shipped.
+- **Roles resolve from it where they use it.** `resolve_text(key, project_id)`
+  (`config/store.py`) is the project's own value, else the global one, and a
+  *blank* override counts as none. `run_planner`, `run_dev`, `run_verifier`,
+  `run_epic_qa` and `generation.chat_completion_json` take `project_id`; lessons
+  capture and guide generation pass the project's too.
+- **`get_provider(project_id)`** (`llm/registry.py`) builds the adapter from the
+  project's connection. One rule keeps it safe: a project that points at **its
+  own endpoint or provider must bring its own key**. The global key was issued
+  for the global endpoint, and is never sent to another host — the call fails
+  with `LlmNotConfiguredError` saying so. A project that sets only a key (another
+  account on the same endpoint) is fine. The project's settings dialog warns
+  about the missing key before a run fails on it.
+- A project that moves to another provider usually needs its models chosen too;
+  the global model ids rarely exist there. `llm_base_url` blank means "OpenAI's
+  own API", which is why a blank project override cannot mean that — set the URL.
+
+The **model picker** (`type: "model"` on those four fields): the server marks
+them, and `GET /api/config/models[?project_id=]` returns suggestions — the
+project's provider's own `/models` listing (`LlmProvider.list_models`), else the
+models `llm/pricing.py` has prices for, with `error` saying why. Cached
+(`services/model_options.py`), keyed by the resolved connection, so two projects
+never share a listing. They are suggestions, not a whitelist: any model id can be
+typed. `components/shared/ModelCombobox.tsx` shows the whole list until you type
+(a native `<datalist>` narrows to the text already in the box, hiding every
+other model), caps it at 200 rows, and is keyboard operable.
+
 ## Config and migrations
 
 - Config schema and UI fields: `forge/config/store.py` (`CONFIG_FIELDS`,
   `PROJECT_OVERRIDABLE_KEYS`).
-- Project overrides: JIRA creds + approval gates only. The LLM provider/
-  key / GitHub / models stay global. A project's ticket filter is **not** a config
+- **A new setting needs a section.** The settings page groups fields into
+  collapsible sections, and the server owns the grouping:
+  `CONFIG_CATEGORIES` (`forge/config/store.py`, served at
+  `GET /api/config/categories`) lists each section's title, description and
+  the keys in it, in display order. Add the key to the section it belongs to
+  when you add the `ConfigField` — `tests/test_config_store.py` fails on a
+  setting with no section, or in two. A saved value whose key is not declared
+  (an old row) shows under "Other", so it stays reachable.
+- Project overrides: JIRA creds, the approval gates, the LangSmith switch and
+  the **model side** — provider, endpoint, API key, and which model each role
+  runs on (see "Per-project models"). GitHub / the other agent limits stay
+  global. A project's ticket filter is **not** a config
   override — it is its own table (`project_ticket_filters`), since it has
   no global default to fall back to.
 - Alembic: `alembic/versions/YYYYMMDD_NNNN_description.py`. Docstring must
@@ -1036,6 +1171,19 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
   (`ui-src/src/entries/*.tsx`) is an independent root matching one HTML
   shell, same navigation model as before (plain `<a href>`/
   `window.location` between pages).
+- **Settings page** (`components/settings/`): a filterable list of collapsible
+  sections (`SettingsSection`) built from `GET /api/config` plus
+  `GET /api/config/categories` — the page holds no per-setting knowledge, so
+  a new setting needs no UI change. Which sections are open is remembered in
+  `localStorage` (`forge.settings.open`; every read and write is guarded,
+  since storage can be blocked), `/settings#tracing` opens and scrolls to a
+  section, and filtering opens every section that has a match. Underscores
+  and spaces match each other, so a key and its label find the same setting.
+  `SettingsField` is shared with the project settings dialog, which is built
+  from the same sections (only the project-overridable fields, each with its
+  "Using global default" / "Reset" hint; sections holding an override start
+  open). A field you leave unchanged saves nothing — in a project that would
+  pin today's global value as an override.
 - `ui-src/build.mjs` bundles all three entry points (esbuild, built-in
   JSX/TSX support) into `settings-ui/vendor/app-*.js`, then shells out to
   the Tailwind CLI to compile `src/styles/globals.css` into
@@ -1100,7 +1248,8 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
    levels derived from it: a re-sync reads stored kinds for stories that
    already exist, so a human's override survives every later sweep.
 7. Dev writes stay **plan-scoped** (`dev_tools` + `path_guard`).
-8. Config from Postgres — not env (except `DATABASE_URL`).
+8. Config from Postgres — not env (except `DATABASE_URL`). That includes
+   LangSmith: `LANGSMITH_*` is not read (see "Tracing (LangSmith)").
 9. Planner/dev run **only** through `forge/agents/loop.py`; verifier/qa
    **only** through `forge/services/generation.py`. No role constructs an
    `LlmProvider` or imports a provider SDK (`openai`, etc.) directly —
@@ -1134,7 +1283,10 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | Filter-based ingestion | `services/jira_filter.py`, `daemon/ticket_sync.py` |
 | Which system tickets come from (source per project, neutral `Ticket`) | `services/ticket_source.py` — sync code calls `get_ticket_source(project_id)`, never `JiraService` directly |
 | Live activity / streaming | `services/activity_stream.py`, `api/run_routes.py` |
+| LangSmith tracing (what is traced, settings, per-project switch) | `services/tracing.py`; call sites: `daemon/main.py`'s `_invoke_graph`, `agents/loop.py`'s `_call_tool`, `llm/openai_compat.py` |
 | Graph routing / gates | `orchestration/graph.py`, `config/store.py` |
+| Per-project provider / models, the model picker | `llm/registry.py` (`get_provider`), `config/store.py` (`resolve_text`, `PROJECT_OVERRIDABLE_KEYS`), `services/model_options.py`, `components/shared/ModelCombobox.tsx` |
+| Retry: plan again vs. resume at dev | `daemon/main.py`'s `arm_resume_at_dev`, `state/manager_story.py`'s `retry_story`, `api/run_routes.py` |
 | Dispatch / PR / CI | `daemon/main.py`, `orchestration/integration.py` |
 | Where a branch starts (existing work for a ticket) | `services/prior_work.py` (git), `daemon/prior_work_lookup.py` (when, storage, planner view) |
 | Read-only repos and reference folders (what runs read, what plans may change) | `tools/reference_folder.py`, `tools/workspace.py`'s `Workspace.read_only`, `agents/roles/plan_gate.py`, `daemon/main.py`'s `_workspace_roots` |

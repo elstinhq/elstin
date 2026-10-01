@@ -28,7 +28,7 @@ import os
 import re
 from typing import Any
 
-from forge.config.store import get_config, resolve_bool_config
+from forge.config.store import resolve_bool_config, resolve_text
 from forge.llm.registry import LlmNotConfiguredError
 from forge.services.generation import GenerationError, chat_completion_json
 from forge.tools.codebase_skeleton import build_codebase_skeleton
@@ -119,13 +119,14 @@ def read_repo_guide(repo_path: str) -> tuple[str, str] | None:
     return None
 
 
-def _guide_model() -> str | None:
-    """The model that writes a guide: the planner's. The guide is written for
-    the planner and dev to treat as authoritative, and the verifier/QA model
-    (the default for a single-shot call, chosen for cheap pass/fail review)
-    returned a title, or a sentence about the sections, in place of the
-    document. None falls back to that default when no planner model is set."""
-    return (get_config("planner_sdk_model") or "").strip() or None
+def _guide_model(project_id: int | None = None) -> str | None:
+    """The model that writes a guide: the planner's — the project's own choice,
+    else the global one. The guide is written for the planner and dev to treat
+    as authoritative, and the verifier/QA model (the default for a single-shot
+    call, chosen for cheap pass/fail review) returned a title, or a sentence
+    about the sections, in place of the document. None falls back to that
+    default when no planner model is set."""
+    return resolve_text("planner_sdk_model", project_id)
 
 
 def _guide_problem(body: str) -> str | None:
@@ -243,7 +244,7 @@ def gather_repo_facts(repo_path: str, *, max_chars: int = _FACTS_CHARS) -> str:
     return out[:max_chars]
 
 
-async def generate_project_guide(repo_path: str) -> str:
+async def generate_project_guide(repo_path: str, project_id: int | None = None) -> str:
     """Writes a guide for one repo. Raises GuideError rather than returning
     something half-usable — a wrong "authoritative" guide is worse than none,
     so the caller stores it only on success."""
@@ -265,7 +266,8 @@ async def generate_project_guide(repo_path: str) -> str:
                 response_schema=_GUIDE_SCHEMA,
                 response_schema_name="project_guide",
                 label="project guide",
-                model=_guide_model(),
+                model=_guide_model(project_id),
+                project_id=project_id,
             )
         except LlmNotConfiguredError as exc:
             raise GuideError(str(exc)) from exc
@@ -295,7 +297,7 @@ async def project_guide_for_run(sm, project_id: int, repo_roots: dict[str, str])
                 if repo is None or repo.get("generated_guide") or await asyncio.to_thread(read_repo_guide, path):
                     continue
                 try:
-                    guide = await generate_project_guide(path)
+                    guide = await generate_project_guide(path, project_id)
                 except GuideError as exc:
                     logger.warning("project guide: not generated for %s: %s", label, exc)
                     continue

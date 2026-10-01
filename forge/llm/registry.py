@@ -13,7 +13,7 @@ avoid repeating.
 """
 from __future__ import annotations
 
-from forge.config.store import get_config, get_float_config
+from forge.config.store import get_config, get_float_config, project_override, resolve_text
 from forge.llm.base import LlmProvider
 from forge.llm.openai_compat import OpenAiCompatProvider
 
@@ -22,20 +22,42 @@ class LlmNotConfiguredError(RuntimeError):
     """Raised when the configured provider has no credentials set."""
 
 
-def get_provider() -> LlmProvider:
-    """The single provider forge is configured to use. `llm_provider`
-    (config, default "openai") selects the adapter; today "openai" is the
-    only one wired. A future adapter (e.g. an Anthropic one, or a second
-    OpenAI-compatible endpoint under a different name) is a new `elif`
-    branch here, not a change to any caller."""
-    provider_name = (get_config("llm_provider") or "openai").strip().lower()
+def _points_elsewhere(project_id: int | None) -> bool:
+    """The project chose its own endpoint or provider, rather than inheriting
+    the global one."""
+    if project_override("llm_base_url", project_id):
+        return True
+    chosen = project_override("llm_provider", project_id)
+    return chosen is not None and chosen.lower() != (get_config("llm_provider") or "openai").strip().lower()
+
+
+def get_provider(project_id: int | None = None) -> LlmProvider:
+    """The provider a project's calls go to. `llm_provider` (config, default
+    "openai") selects the adapter; today "openai" is the only one wired. A
+    future adapter (e.g. an Anthropic one, or a second OpenAI-compatible
+    endpoint under a different name) is a new `elif` branch here, not a change
+    to any caller.
+
+    A project may set its own provider, endpoint and key (each inheriting the
+    global setting when it sets none). One rule keeps that safe: a project that
+    points at its own endpoint must bring its own key. The global key was issued
+    for the global endpoint, and sending it to another host — a project's
+    self-hosted gateway, a different vendor — hands that host a credential it
+    was never meant to see. A project that sets only a key (another account on
+    the same endpoint) is fine."""
+    if _points_elsewhere(project_id) and not project_override("openai_api_key", project_id):
+        raise LlmNotConfiguredError(
+            "This project sends its model calls to its own endpoint but has no API key of its own — "
+            "set one in the project's settings. The global key is not sent to another endpoint."
+        )
+    provider_name = (resolve_text("llm_provider", project_id) or "openai").lower()
     if provider_name == "openai":
-        api_key = get_config("openai_api_key")
+        api_key = resolve_text("openai_api_key", project_id)
         if not api_key:
             raise LlmNotConfiguredError(
                 "No OpenAI API key configured — set one at /settings before running planner/dev/verifier/qa."
             )
-        base_url = get_config("llm_base_url") or None
+        base_url = resolve_text("llm_base_url", project_id)
         return OpenAiCompatProvider(
             api_key=api_key,
             base_url=base_url,

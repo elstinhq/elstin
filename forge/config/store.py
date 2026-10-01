@@ -25,7 +25,9 @@ class ConfigField:
     label: str
     secret: bool
     default: str | None
-    type: Literal["string", "bool"]
+    # "model" is a string the settings screens offer the provider's models for
+    # (GET /api/config/models) and that a project may override.
+    type: Literal["string", "bool", "model"]
 
 
 CONFIG_FIELDS: tuple[ConfigField, ...] = (
@@ -83,6 +85,26 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         "OpenAI-compatible API base URL (blank = OpenAI's own API; set to reach Azure/OpenRouter/vLLM/Ollama/etc.)",
         False, None, "string",
     ),
+    # LangSmith tracing (forge/services/tracing.py). Off unless turned on: a trace
+    # carries whole prompts — ticket text, source code, tool output — to a third
+    # party, so it is a decision, and one a project can make for itself.
+    ConfigField(
+        "langsmith_tracing_enabled",
+        "Send run traces to LangSmith. Prompts, source code, ticket text and tool output leave this machine (off = nothing is sent)",
+        False, "false", "bool",
+    ),
+    ConfigField("langsmith_api_key", "LangSmith API key", True, None, "string"),
+    ConfigField("langsmith_project", "LangSmith project the traces go to", False, "forge", "string"),
+    ConfigField(
+        "langsmith_endpoint",
+        "LangSmith API URL (blank = LangSmith cloud; set for the EU region or a self-hosted instance)",
+        False, None, "string",
+    ),
+    ConfigField(
+        "langsmith_workspace_id",
+        "LangSmith workspace ID (only needed with an organization-scoped API key)",
+        False, None, "string",
+    ),
     ConfigField("worktrees_base_dir", "Worktrees base directory", False, "/data/repos", "string"),
     ConfigField("cloned_repos_base_dir", "Cloned project repos base directory", False, "/data/cloned-repos", "string"),
     ConfigField("data_dir", "Data directory (dev-loop baseline snapshots, etc.)", False, "/data", "string"),
@@ -106,7 +128,7 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         "After a story that needed retries lands, propose short lessons for a person to accept into the project guide (one extra model call; nothing reaches an agent until accepted)",
         False, "false", "bool",
     ),
-    ConfigField("dev_sdk_model", "Dev agent model", False, "gpt-5.1", "string"),
+    ConfigField("dev_sdk_model", "Dev agent model", False, "gpt-5.1", "model"),
     ConfigField(
         "dev_web_access_enabled",
         "Let the dev agent search the web and fetch public pages (docs, package READMEs); internal/private addresses are always refused",
@@ -126,7 +148,7 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         "This is the base for a small plan; a plan touching many files gets more (+1 per 2 extra files, up to 4x)",
         False, "4", "string",
     ),
-    ConfigField("planner_sdk_model", "Planner agent model", False, "gpt-5.1", "string"),
+    ConfigField("planner_sdk_model", "Planner agent model", False, "gpt-5.1", "model"),
     ConfigField("planner_sdk_effort", "Planner agent reasoning effort (low/medium/high/xhigh/max)", False, "medium", "string"),
     ConfigField("planner_sdk_max_turns", "Planner agent max turns per run (0 = unbounded)", False, "40", "string"),
     ConfigField("planner_sdk_max_retries", "Planner agent retries on a transient SDK error", False, "2", "string"),
@@ -146,7 +168,7 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
     ConfigField(
         "planner_explorer_model",
         "Model for investigation agents (blank = use the planner model; a cheaper model usually suffices for reading code)",
-        False, None, "string",
+        False, None, "model",
     ),
     ConfigField(
         "agent_compaction_token_threshold",
@@ -163,15 +185,98 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         "counts what the provider reports it billed, else the forge/llm/pricing.py estimate",
         False, "0", "string",
     ),
-    ConfigField("verifier_qa_model", "Verifier/QA review model", False, "gpt-5.1-mini", "string"),
+    ConfigField("verifier_qa_model", "Verifier/QA review model", False, "gpt-5.1-mini", "model"),
     ConfigField("verifier_skip_llm_trivial_chars", "Skip LLM review below this diff size in chars (0 = never skip)", False, "0", "string"),
 )
 
 _FIELDS_BY_KEY: dict[str, ConfigField] = {f.key: f for f in CONFIG_FIELDS}
 
-# The subset of CONFIG_FIELDS a project can override — JIRA connection +
-# the three approval gates. Everything else (the LLM provider/key, GitHub,
-# model config, worktree/data dirs) stays global, shared across all projects.
+
+@dataclass(frozen=True)
+class ConfigCategory:
+    id: str
+    title: str
+    description: str
+    keys: tuple[str, ...]
+
+
+# The sections of the settings screen, in the order a person sets forge up:
+# where tickets and code come from, which model, how work flows, how each
+# agent behaves, then housekeeping. `keys` is both membership and the order
+# the fields show in. Every key in CONFIG_FIELDS belongs to exactly one
+# section — tests/test_config_store.py fails on a setting with no home, so
+# the screen never needs a catch-all for a declared field.
+CONFIG_CATEGORIES: tuple[ConfigCategory, ...] = (
+    ConfigCategory(
+        "tickets", "Ticket sources", "JIRA, and how often forge re-checks your ticket filters.",
+        (
+            "jira_base_url", "jira_email", "jira_api_token", "jira_write_enabled",
+            "jira_filter_poll_seconds", "ticket_hold_statuses", "jira_attachments_dir",
+        ),
+    ),
+    ConfigCategory(
+        "github", "GitHub", "Pull requests, and GitHub Issues as a ticket source.",
+        ("github_org", "github_token", "github_issues_write_enabled"),
+    ),
+    ConfigCategory(
+        "models", "Model provider", "Where model calls go, and how long one may take.",
+        ("llm_provider", "openai_api_key", "llm_base_url", "llm_request_timeout_seconds"),
+    ),
+    ConfigCategory(
+        "workflow", "Workflow", "How stories are picked up, approved and run.",
+        ("auto_run_enabled", "require_plan_approval", "max_parallel_stories", "generate_project_guide", "capture_lessons"),
+    ),
+    ConfigCategory(
+        "planner", "Planner", "Reads the code and writes the plan, with optional investigation agents.",
+        (
+            "planner_sdk_model", "planner_sdk_effort", "planner_sdk_max_turns", "planner_sdk_max_retries",
+            "planner_sdk_max_budget_usd", "planner_explorers_enabled", "planner_explorer_max_agents",
+            "planner_explorer_max_turns", "planner_explorer_model",
+        ),
+    ),
+    ConfigCategory(
+        "dev", "Dev agent", "Writes the code from the approved plan.",
+        (
+            "dev_sdk_model", "dev_sdk_effort", "dev_sdk_max_turns", "dev_sdk_max_budget_usd",
+            "dev_sdk_max_idle_turns", "dev_web_access_enabled", "brave_search_api_key",
+        ),
+    ),
+    ConfigCategory(
+        "review", "Review", "The verifier and epic QA.",
+        ("verifier_qa_model", "verifier_skip_llm_trivial_chars"),
+    ),
+    ConfigCategory(
+        "limits", "Spend and context", "Ceilings that apply across agents.",
+        ("story_max_budget_usd", "agent_compaction_token_threshold"),
+    ),
+    ConfigCategory(
+        "git", "Git and storage", "Commit identity, and where forge keeps clones, worktrees and data.",
+        (
+            "git_author_name", "git_author_email", "manage_gitignore",
+            "worktrees_base_dir", "cloned_repos_base_dir", "data_dir",
+        ),
+    ),
+    ConfigCategory(
+        "tracing", "Tracing", "Send run traces to LangSmith. Off by default.",
+        (
+            "langsmith_tracing_enabled", "langsmith_api_key", "langsmith_project",
+            "langsmith_endpoint", "langsmith_workspace_id",
+        ),
+    ),
+)
+
+
+def list_config_categories() -> list[dict]:
+    """The settings screen's sections, for GET /api/config/categories."""
+    return [
+        {"id": c.id, "title": c.title, "description": c.description, "keys": list(c.keys)} for c in CONFIG_CATEGORIES
+    ]
+
+# The subset of CONFIG_FIELDS a project can override — JIRA connection, the
+# approval gates, the LangSmith switch, and the model side: which provider,
+# endpoint and key its calls use and which model each role runs on.
+# Everything else (GitHub, the other agent limits, worktree/data dirs) stays
+# global, shared across all projects.
 PROJECT_OVERRIDABLE_KEYS = frozenset({
     "jira_base_url",
     "jira_email",
@@ -183,6 +288,21 @@ PROJECT_OVERRIDABLE_KEYS = frozenset({
     "capture_lessons",
     "ticket_hold_statuses",
     "manage_gitignore",
+    "langsmith_tracing_enabled",
+    "langsmith_project",
+    # Which model each role runs on. A project that sets none uses the global
+    # value (resolve_text), so a project can move one role without pinning
+    # the rest.
+    "planner_sdk_model",
+    "planner_explorer_model",
+    "dev_sdk_model",
+    "verifier_qa_model",
+    # Where its model calls go and as whom (forge/llm/registry.py). A project
+    # that points at another endpoint must bring its own key: the global key
+    # is never sent to an endpoint it was not issued for.
+    "llm_provider",
+    "llm_base_url",
+    "openai_api_key",
 })
 
 _cache_lock = threading.Lock()
@@ -334,6 +454,22 @@ def resolve_config(key: str, project_id: int | None) -> str | None:
         if override is not None:
             return override
     return get_config(key)
+
+
+def resolve_text(key: str, project_id: int | None) -> str | None:
+    """A text setting as this project sees it: its own override, else the
+    global value. None when neither is set, for the caller to default. A blank
+    override counts as no override — the global value wins, never an empty
+    model id or key."""
+    return project_override(key, project_id) or (get_config(key) or "").strip() or None
+
+
+def project_override(key: str, project_id: int | None) -> str | None:
+    """What the project itself set for `key` — not the global fallback. None
+    when it set nothing, or only a blank."""
+    if project_id is None:
+        return None
+    return (get_project_config(project_id, key) or "").strip() or None
 
 
 def resolve_bool_config(key: str, project_id: int | None) -> bool:

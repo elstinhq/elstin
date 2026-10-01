@@ -36,7 +36,7 @@ def _response(text: str, *, structured=None, usage=None) -> LlmResponse:
 
 async def test_parses_plain_json_content(monkeypatch):
     provider = FakeProvider(response=_response('{"passed": true}'))
-    monkeypatch.setattr(generation, "get_provider", lambda: provider)
+    monkeypatch.setattr(generation, "get_provider", lambda *_args, **_kwargs: provider)
 
     parsed, usage = await generation.chat_completion_json(messages=[{"role": "system", "content": "sys"}, {"role": "user", "content": "review this"}])
 
@@ -54,7 +54,7 @@ async def test_tolerates_prose_around_json():
 
 async def test_uses_structured_output_when_provider_supports_it(monkeypatch):
     provider = FakeProvider(response=_response('{"a": 1}', structured={"a": 1}))
-    monkeypatch.setattr(generation, "get_provider", lambda: provider)
+    monkeypatch.setattr(generation, "get_provider", lambda *_args, **_kwargs: provider)
 
     parsed, _ = await generation.chat_completion_json(
         messages=[{"role": "user", "content": "go"}],
@@ -68,7 +68,7 @@ async def test_uses_structured_output_when_provider_supports_it(monkeypatch):
 
 async def test_skips_structured_output_when_provider_lacks_support(monkeypatch):
     provider = FakeProvider(response=_response('{"a": 1}'), capabilities=Capabilities(supports_structured_output=False))
-    monkeypatch.setattr(generation, "get_provider", lambda: provider)
+    monkeypatch.setattr(generation, "get_provider", lambda *_args, **_kwargs: provider)
 
     await generation.chat_completion_json(
         messages=[{"role": "user", "content": "go"}],
@@ -80,7 +80,7 @@ async def test_skips_structured_output_when_provider_lacks_support(monkeypatch):
 
 async def test_system_and_user_messages_split_correctly(monkeypatch):
     provider = FakeProvider(response=_response('{}'))
-    monkeypatch.setattr(generation, "get_provider", lambda: provider)
+    monkeypatch.setattr(generation, "get_provider", lambda *_args, **_kwargs: provider)
 
     await generation.chat_completion_json(messages=[
         {"role": "system", "content": "be terse"},
@@ -93,7 +93,7 @@ async def test_system_and_user_messages_split_correctly(monkeypatch):
 
 async def test_provider_error_is_wrapped_as_runtime_error(monkeypatch):
     provider = FakeProvider(response=LlmBadRequestError("bad schema"))
-    monkeypatch.setattr(generation, "get_provider", lambda: provider)
+    monkeypatch.setattr(generation, "get_provider", lambda *_args, **_kwargs: provider)
 
     with pytest.raises(RuntimeError, match="bad schema"):
         await generation.chat_completion_json(messages=[{"role": "user", "content": "go"}], label="verifier")
@@ -153,7 +153,7 @@ def test_prose_with_no_json_raises_generation_error_not_json_decode_error():
 
 async def test_unparseable_reply_surfaces_as_generation_error(monkeypatch):
     provider = FakeProvider(response=_response("Sorry, I can't help with that."))
-    monkeypatch.setattr(generation, "get_provider", lambda: provider)
+    monkeypatch.setattr(generation, "get_provider", lambda *_args, **_kwargs: provider)
 
     from forge.services.generation import GenerationError
 
@@ -165,7 +165,7 @@ async def test_provider_error_is_a_generation_error_and_still_a_runtime_error(mo
     """GenerationError subclasses RuntimeError so existing callers that
     catch RuntimeError keep working unchanged."""
     provider = FakeProvider(response=LlmBadRequestError("nope"))
-    monkeypatch.setattr(generation, "get_provider", lambda: provider)
+    monkeypatch.setattr(generation, "get_provider", lambda *_args, **_kwargs: provider)
 
     from forge.services.generation import GenerationError
 
@@ -228,7 +228,7 @@ def test_verifier_schema_allows_a_finding_with_no_single_file():
 
 async def test_schema_is_forwarded_to_the_provider_when_supported(monkeypatch):
     provider = FakeProvider(response=_response('{"passed": true}', structured={"passed": True}))
-    monkeypatch.setattr(generation, "get_provider", lambda: provider)
+    monkeypatch.setattr(generation, "get_provider", lambda *_args, **_kwargs: provider)
 
     from forge.agents.roles.verifier import _VERIFIER_JSON_SCHEMA
 
@@ -248,7 +248,7 @@ async def test_a_caller_can_pick_the_model_and_the_default_is_the_verifier_qa_on
 
     set_config("verifier_qa_model", "small-review-model")
     provider = FakeProvider(response=_response('{"a": 1}'))
-    monkeypatch.setattr(generation, "get_provider", lambda: provider)
+    monkeypatch.setattr(generation, "get_provider", lambda *_args, **_kwargs: provider)
 
     await generation.chat_completion_json(messages=[{"role": "user", "content": "go"}])
     assert provider.last_request.model == "small-review-model"

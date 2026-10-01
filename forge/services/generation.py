@@ -22,7 +22,7 @@ import time
 from collections.abc import Iterator
 from typing import Any
 
-from forge.config.store import get_config
+from forge.config.store import resolve_text
 from forge.llm.errors import LlmError
 from forge.llm.registry import get_provider
 from forge.llm.types import LlmRequest, ResponseFormat, text_message
@@ -48,8 +48,8 @@ class GenerationError(RuntimeError):
     the same reasoning applied to DevLoopError."""
 
 
-def get_verifier_qa_model() -> str:
-    return get_config("verifier_qa_model") or "gpt-5.1-mini"
+def get_verifier_qa_model(project_id: int | None = None) -> str:
+    return resolve_text("verifier_qa_model", project_id) or "gpt-5.1-mini"
 
 
 # ```json ... ``` — by far the most common way a chat-tuned model wraps a
@@ -141,6 +141,7 @@ async def chat_completion_json(
     phase: str = "system",
     label: str = "LLM call",
     model: str | None = None,
+    project_id: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run a JSON-object chat completion, optionally recording activity +
     token usage. `messages` is OpenAI-shaped ({"role": "system"|"user", ...})
@@ -157,8 +158,12 @@ async def chat_completion_json(
     `model` overrides the verifier/QA model for a caller whose task needs a
     stronger one (forge/services/project_guide.py writes a document the
     planner then treats as authoritative, which the small model that suits a
-    pass/fail review does not do reliably)."""
-    model = model or get_verifier_qa_model()
+    pass/fail review does not do reliably).
+
+    `project_id` is the project whose settings apply: the provider, endpoint
+    and key the call goes to, and the review model when `model` is not given.
+    None is the global settings."""
+    model = model or get_verifier_qa_model(project_id)
     # Both callers (verifier, QA) reach a model only through here, so one
     # check covers them. A GenerationError is what the graph's verifier and
     # qa nodes already catch, so an exhausted ceiling becomes a failed
@@ -169,7 +174,7 @@ async def chat_completion_json(
             f"{label} skipped: story spend ceiling (story_max_budget_usd) is exhausted. "
             "Raise the ceiling at /settings and retry the story."
         )
-    provider = get_provider()
+    provider = get_provider(project_id)
     system_parts = [m["content"] for m in messages if m.get("role") == "system" and m.get("content")]
     user_parts = [m["content"] for m in messages if m.get("role") != "system"]
     system = "\n\n".join(str(part) for part in system_parts) if system_parts else None

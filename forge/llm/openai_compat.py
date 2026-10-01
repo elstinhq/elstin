@@ -32,6 +32,7 @@ from openai import (
     BadRequestError,
     RateLimitError,
 )
+from langsmith.wrappers import wrap_openai
 
 from forge.llm.base import Capabilities
 from forge.llm.errors import (
@@ -157,7 +158,11 @@ class OpenAiCompatProvider:
         # property is what cut one dev run's cache reads to 4%). Verify
         # with the per-turn cache_read_tokens in each "token" activity
         # event before adding placement logic.
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=0)
+        # Patched in place, so it is still the same client and every call still
+        # returns and raises what it did. A call is only recorded — messages,
+        # reply, token usage — inside a traced run (forge/services/tracing.py),
+        # nested under the graph node that made it; anywhere else it is a no-op.
+        self._client = wrap_openai(AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=0))
 
     async def complete(self, request: LlmRequest) -> LlmResponse:
         kwargs = self._build_kwargs(request)
@@ -190,6 +195,21 @@ class OpenAiCompatProvider:
             raise LlmError(str(exc)) from exc
 
         return self._parse_response(completion, request)
+
+    async def list_models(self) -> list[str]:
+        """GET {base_url}/models. OpenAI-compatible gateways all answer it; the
+        ids are whatever that endpoint serves, embeddings and the rest
+        included — a picker offers them as suggestions, not as a whitelist."""
+        try:
+            listing = self._client.models.list()
+            ids = {model.id async for model in listing}
+        except AuthenticationError as exc:
+            raise LlmAuthError(str(exc)) from exc
+        except APIConnectionError as exc:  # APITimeoutError is one
+            raise LlmConnectionError(str(exc)) from exc
+        except APIStatusError as exc:
+            raise LlmError(str(exc)) from exc
+        return sorted(ids)
 
     def _build_kwargs(self, request: LlmRequest) -> dict[str, Any]:
         messages = self._to_openai_messages(request)

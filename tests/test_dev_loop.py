@@ -73,7 +73,7 @@ async def test_run_dev_raises_on_hard_provider_error(git_repo: str, monkeypatch:
     from forge.config.store import set_config
 
     set_config("openai_api_key", "sk-test")
-    monkeypatch.setattr(dev_loop_module, "get_provider", lambda: FakeProvider(script=[LlmBadRequestError("bad schema")]))
+    monkeypatch.setattr(dev_loop_module, "get_provider", lambda *_args, **_kwargs: FakeProvider(script=[LlmBadRequestError("bad schema")]))
 
     with pytest.raises(DevLoopError, match="bad schema"):
         await run_dev(plan={}, context_bundle={}, worktree_path=git_repo, project_path=git_repo)
@@ -84,7 +84,7 @@ async def test_run_dev_completes_with_no_tool_calls(git_repo: str, monkeypatch: 
     from forge.config.store import set_config
 
     set_config("openai_api_key", "sk-test")
-    monkeypatch.setattr(dev_loop_module, "get_provider", lambda: FakeProvider(script=[_text_response("nothing to change")]))
+    monkeypatch.setattr(dev_loop_module, "get_provider", lambda *_args, **_kwargs: FakeProvider(script=[_text_response("nothing to change")]))
 
     result = await run_dev(plan={}, context_bundle={}, worktree_path=git_repo, project_path=git_repo, run_id="ENG-1")
 
@@ -104,7 +104,7 @@ async def test_run_dev_dispatches_a_real_dev_tool(git_repo: str, monkeypatch: py
     set_config("openai_api_key", "sk-test")
     monkeypatch.setattr(
         dev_loop_module, "get_provider",
-        lambda: FakeProvider(script=[
+        lambda *_args, **_kwargs: FakeProvider(script=[
             _tool_call_response("write_file_tool", {"path": "widget.py", "content": "widget = True\n"}),
             _text_response("created widget.py"),
         ]),
@@ -134,7 +134,7 @@ async def test_run_dev_raises_when_the_turn_was_truncated(git_repo: str, monkeyp
         content=[TextBlock(text="starting to write the fi")], stop_reason="max_tokens",
         usage=Usage(input_tokens=10, output_tokens=5), model="gpt-5.1",
     )
-    monkeypatch.setattr(dev_loop_module, "get_provider", lambda: FakeProvider(script=[truncated]))
+    monkeypatch.setattr(dev_loop_module, "get_provider", lambda *_args, **_kwargs: FakeProvider(script=[truncated]))
 
     with pytest.raises(DevLoopError, match="max_tokens"):
         await run_dev(plan={}, context_bundle={}, worktree_path=git_repo, project_path=git_repo)
@@ -148,7 +148,7 @@ async def test_run_dev_soft_stop_on_max_turns(git_repo: str, monkeypatch: pytest
     set_config("dev_sdk_max_turns", "1")
     monkeypatch.setattr(
         dev_loop_module, "get_provider",
-        lambda: FakeProvider(script=[_tool_call_response("search_codebase_tool", {"query": "foo"})]),
+        lambda *_args, **_kwargs: FakeProvider(script=[_tool_call_response("search_codebase_tool", {"query": "foo"})]),
     )
 
     result = await run_dev(plan={}, context_bundle={}, worktree_path=git_repo, project_path=git_repo)
@@ -176,7 +176,7 @@ async def test_run_dev_resumes_from_prior_history(git_repo: str, monkeypatch: py
             captured_requests.append(request)
             return await super().complete(request)
 
-    monkeypatch.setattr(dev_loop_module, "get_provider", lambda: CapturingProvider(script=[_text_response("resumed and done")]))
+    monkeypatch.setattr(dev_loop_module, "get_provider", lambda *_args, **_kwargs: CapturingProvider(script=[_text_response("resumed and done")]))
 
     await run_dev(
         plan={}, context_bundle={}, worktree_path=git_repo, project_path=git_repo,
@@ -206,7 +206,7 @@ async def test_run_dev_uses_gate_feedback_as_the_brief_on_top_of_prior_history(g
             captured_requests.append(request)
             return await super().complete(request)
 
-    monkeypatch.setattr(dev_loop_module, "get_provider", lambda: CapturingProvider(script=[_text_response("fixed")]))
+    monkeypatch.setattr(dev_loop_module, "get_provider", lambda *_args, **_kwargs: CapturingProvider(script=[_text_response("fixed")]))
 
     await run_dev(
         plan={}, context_bundle={}, worktree_path=git_repo, project_path=git_repo,
@@ -232,7 +232,7 @@ async def test_run_dev_no_progress_stop_is_a_soft_stop(git_repo: str, monkeypatc
     set_config("dev_sdk_max_idle_turns", "2")
     monkeypatch.setattr(
         dev_loop_module, "get_provider",
-        lambda: FakeProvider(script=[
+        lambda *_args, **_kwargs: FakeProvider(script=[
             _tool_call_response("search_codebase_tool", {"query": "foo"}, call_id="c1"),
             _tool_call_response("search_codebase_tool", {"query": "bar"}, call_id="c2"),
             _text_response("never reached"),
@@ -271,7 +271,7 @@ async def _run_with_read_only_turns(git_repo: str, monkeypatch: pytest.MonkeyPat
     set_config("dev_sdk_max_idle_turns", "2")
     monkeypatch.setattr(
         dev_loop_module, "get_provider",
-        lambda: FakeProvider(script=[
+        lambda *_args, **_kwargs: FakeProvider(script=[
             _tool_call_response("search_codebase_tool", {"query": f"q{i}"}, call_id=f"c{i}") for i in range(read_turns)
         ] + [_text_response("done")]),
     )
@@ -316,7 +316,7 @@ async def test_dev_run_seeds_the_checklist_from_the_plan_and_reshows_it_each_tur
 
     monkeypatch.setattr(
         dev_loop_module, "get_provider",
-        lambda: CapturingProvider(script=[
+        lambda *_args, **_kwargs: CapturingProvider(script=[
             _tool_call_response("update_progress_tool", {"updates": [{"path": "widget.py", "status": "doing"}]}, call_id="c1"),
             _text_response("all done"),
         ]),
@@ -349,7 +349,7 @@ async def test_dev_run_resumes_a_prior_checklist_instead_of_reseeding(git_repo: 
             captured.append(request)
             return await super().complete(request)
 
-    monkeypatch.setattr(dev_loop_module, "get_provider", lambda: CapturingProvider(script=[_text_response("fixed")]))
+    monkeypatch.setattr(dev_loop_module, "get_provider", lambda *_args, **_kwargs: CapturingProvider(script=[_text_response("fixed")]))
 
     prior = [{"path": "widget.py", "action": "create", "status": "done"}]
     result = await run_dev(
@@ -401,7 +401,7 @@ async def test_files_the_story_already_changed_stay_writable_off_the_plan(git_re
     set_config("openai_api_key", "sk-test")
     monkeypatch.setattr(
         dev_loop_module, "get_provider",
-        lambda: FakeProvider(script=[
+        lambda *_args, **_kwargs: FakeProvider(script=[
             _tool_call_response("edit_file_tool", {"path": "@portal/export.ts", "target_content": "x = 1", "replacement_content": "x = 2"}, "c1"),
             _tool_call_response("edit_file_tool", {"path": "Search.java", "target_content": "{}", "replacement_content": "{ int n; }"}, "c2"),
             _tool_call_response("write_file_tool", {"path": "Other.java", "content": "class Other {}\n"}, "c3"),
@@ -418,3 +418,55 @@ async def test_files_the_story_already_changed_stay_writable_off_the_plan(git_re
     assert (portal / "export.ts").read_text() == "export const x = 2;\n"
     assert open(f"{git_repo}/Search.java").read() == "class Search { int n; }\n"
     assert not os.path.exists(f"{git_repo}/Other.java")  # neither planned nor the story's: still refused
+
+
+async def test_dev_runs_on_its_projects_model_and_asks_for_its_projects_provider(git_repo: str, monkeypatch: pytest.MonkeyPatch, project_id):
+    import forge.agents.roles.dev_loop as dev_loop_module
+    from forge.config.store import set_config, set_project_config
+
+    set_config("openai_api_key", "sk-test")
+    set_config("dev_sdk_model", "global-dev")
+    set_project_config(project_id, "dev_sdk_model", "project-dev")
+    captured, asked = [], []
+
+    @dataclass
+    class CapturingProvider(FakeProvider):
+        async def complete(self, request: LlmRequest) -> LlmResponse:
+            captured.append(request.model)
+            return await super().complete(request)
+
+    def provider_for(project=None):
+        asked.append(project)
+        return CapturingProvider(script=[_text_response("done"), _text_response("done")])
+
+    monkeypatch.setattr(dev_loop_module, "get_provider", provider_for)
+
+    await run_dev(plan={}, context_bundle={}, worktree_path=git_repo, project_path=git_repo, project_id=project_id)
+    await run_dev(plan={}, context_bundle={}, worktree_path=git_repo, project_path=git_repo)
+
+    assert captured[0] == "project-dev" and captured[-1] == "global-dev"
+    assert asked == [project_id, None]
+
+
+async def test_an_explicit_model_beats_the_projects_choice(git_repo: str, monkeypatch: pytest.MonkeyPatch, project_id):
+    import forge.agents.roles.dev_loop as dev_loop_module
+    from forge.config.store import set_config, set_project_config
+
+    set_config("openai_api_key", "sk-test")
+    set_project_config(project_id, "dev_sdk_model", "project-dev")
+    captured = []
+
+    @dataclass
+    class CapturingProvider(FakeProvider):
+        async def complete(self, request: LlmRequest) -> LlmResponse:
+            captured.append(request.model)
+            return await super().complete(request)
+
+    monkeypatch.setattr(dev_loop_module, "get_provider", lambda *_a, **_k: CapturingProvider(script=[_text_response("done")]))
+
+    await run_dev(
+        plan={}, context_bundle={}, worktree_path=git_repo, project_path=git_repo,
+        project_id=project_id, sdk_model="explicit",
+    )
+
+    assert captured == ["explicit"]

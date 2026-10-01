@@ -115,6 +115,89 @@ def test_retry_story_redispatches_a_run_failure(epic):
     assert epic.get_epic("ENG-1")["phase"] == "implementing"
 
 
+def _stub_arm(monkeypatch, result: bool) -> list[str]:
+    """Replaces the checkpoint check (tests/test_resume_at_dev.py covers the
+    real one) and records which stories it was asked about."""
+    asked: list[str] = []
+
+    async def fake_arm(sm, epic_row, story):
+        asked.append(story["jira_key"])
+        return result
+
+    monkeypatch.setattr("forge.api.run_routes.arm_resume_at_dev", fake_arm)
+    return asked
+
+
+def test_retry_resumes_at_dev_when_the_run_failed_there(epic, monkeypatch):
+    """The story is not sent back to planning: it is dispatched for a resume,
+    and the run's activity feed says why no plan was made."""
+    from forge.services.run_activity import list_activity
+
+    asked = _stub_arm(monkeypatch, True)
+    epic.set_epic_phase("ENG-1", "failed")
+    epic.set_story_status("ENG-2", "failed", failure_stage="run")
+
+    with _client() as client:
+        response = client.post("/api/stories/ENG-2/retry")
+
+    assert response.status_code == 200
+    assert asked == ["ENG-2"]
+    assert response.json()["status"] == "dispatched"
+    assert response.json()["retry_count"] == 1
+    assert epic.get_epic("ENG-1")["phase"] == "implementing"
+    assert "Retry: continuing at development with the earlier plan" in [e["title"] for e in list_activity("ENG-2")]
+
+
+def test_retry_plans_again_when_the_run_cannot_resume_at_dev(epic, monkeypatch):
+    asked = _stub_arm(monkeypatch, False)
+    epic.set_story_status("ENG-2", "failed", failure_stage="run")
+
+    with _client() as client:
+        response = client.post("/api/stories/ENG-2/retry")
+
+    assert asked == ["ENG-2"]
+    assert response.json()["status"] == "pending"
+
+
+def test_retry_still_works_when_the_resume_check_itself_fails(epic, monkeypatch):
+    """Resuming at dev is a saving. A checkpoint that cannot be read must not
+    leave a failed story with a Retry button that errors."""
+    async def broken(sm, epic_row, story):
+        raise RuntimeError("the checkpoint store is unreachable")
+
+    monkeypatch.setattr("forge.api.run_routes.arm_resume_at_dev", broken)
+    epic.set_story_status("ENG-2", "failed", failure_stage="run")
+
+    with _client() as client:
+        response = client.post("/api/stories/ENG-2/retry")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "pending"  # the fresh plan Retry always gave
+
+
+def test_retry_with_replan_never_looks_at_the_checkpoint(epic, monkeypatch):
+    """The way to say the plan itself was the problem."""
+    asked = _stub_arm(monkeypatch, True)
+    epic.set_story_status("ENG-2", "failed", failure_stage="run")
+
+    with _client() as client:
+        response = client.post("/api/stories/ENG-2/retry", params={"replan": "true"})
+
+    assert asked == []
+    assert response.json()["status"] == "pending"
+
+
+def test_retry_of_a_merge_failure_never_looks_at_the_checkpoint(epic, monkeypatch):
+    asked = _stub_arm(monkeypatch, True)
+    epic.set_story_status("ENG-2", "failed", failure_stage="merge")
+
+    with _client() as client:
+        response = client.post("/api/stories/ENG-2/retry")
+
+    assert asked == []
+    assert response.json()["status"] == "ready_to_merge"
+
+
 def test_retry_story_reattempts_a_merge_failure(epic):
     epic.set_story_status("ENG-2", "failed", failure_stage="merge")
 

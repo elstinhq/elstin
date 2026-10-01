@@ -314,7 +314,7 @@ class _StoryMixin:
             if story is not None:
                 story.pr_open_error = error
 
-    def retry_story(self, jira_key: str) -> None:
+    def retry_story(self, jira_key: str, *, resume_at_dev: bool = False) -> None:
         """Recovers a story the reconciler halted the epic on (see
         forge/orchestration/reconciler.py's epic-wide halt on any "failed"
         story). Caller (forge/api/run_routes.py) is responsible for
@@ -333,6 +333,14 @@ class _StoryMixin:
         for a story that failed before this column existed — goes back to
         pending for a full redispatch, since a run failure has nothing
         committed worth keeping.
+
+        `resume_at_dev`: the caller has already re-armed the story's
+        checkpoint at dev (forge/daemon/main.py's arm_resume_at_dev), so a
+        run that failed in dev continues with the plan it has instead of
+        planning again. The story goes to "dispatched" — what the
+        reconciler answers with a ResumeStory when nothing is executing it
+        — rather than "pending", whose DispatchStory starts the graph over.
+        Ignored for a merge failure, which never re-plans.
         """
         with session_scope() as session:
             story = session.get(Story, jira_key)
@@ -345,6 +353,8 @@ class _StoryMixin:
             story.merge_attempts = 0
             if stage == "merge":
                 story.status = "ready_to_merge"
+            elif resume_at_dev:
+                story.status = "dispatched"
             else:
                 story.status = "pending"
             epic_key = story.epic_key

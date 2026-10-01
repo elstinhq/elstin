@@ -12,7 +12,10 @@ from forge.db.models import *  # noqa: F401,F403 — registers every model on Ba
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Not `disable_existing_loggers` (fileConfig's default): a migration run
+    # in-process (the tests do) would otherwise silence every logger created
+    # before it, and a later test reading them through caplog saw nothing.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 database_url = os.environ.get("DATABASE_URL")
 if not database_url:

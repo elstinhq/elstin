@@ -59,7 +59,7 @@ from forge.agents.roles.dev import (
     _plan_path_set,
     build_dev_system,
 )
-from forge.config.store import get_bool_config, get_config, get_float_config, get_int_config
+from forge.config.store import get_bool_config, get_config, get_float_config, get_int_config, resolve_text
 from forge.llm.errors import LlmError
 from forge.llm.registry import LlmNotConfiguredError, get_provider
 from forge.llm.types import ContentBlock, LlmResponse, history_from_json, history_to_json, text_message
@@ -197,6 +197,7 @@ async def run_dev(
     integration_paths: list[str] | None = None,
     sdk_model: str | None = None,
     sdk_effort: str | None = None,
+    project_id: int | None = None,
 ) -> dict[str, Any]:
     """gate_feedback: the Tier 1 deterministic gate's own fix message
     (forge/orchestration/graph.py's gate_node, formatted by
@@ -236,13 +237,14 @@ async def run_dev(
     (the epic branch in that repo, so it starts with the stories already
     merged there). Both from the daemon; see FeatureRunState."""
     continuing = bool(prior_history)
-    resolved_model = sdk_model or get_config("dev_sdk_model")
+    # The project's own choice, else the global setting (resolve_text).
+    resolved_model = sdk_model or resolve_text("dev_sdk_model", project_id)
     logger.info("Dev starting worktree=%s model=%s resume=%s", worktree_path, resolved_model, continuing)
     if run_id:
         append_activity(run_id, type="status", phase="dev", title="Development started", meta={"resumed": continuing})
 
     try:
-        provider = get_provider()
+        provider = get_provider(project_id)
     except LlmNotConfiguredError as exc:
         raise DevLoopError(str(exc)) from exc
 
