@@ -1059,6 +1059,46 @@ Rules that keep it safe:
   table, which does not know `openai/gpt-5.6-terra`-style ids; forge's
   `story_usage` (OpenRouter's reported cost) stays the record of spend.
 
+## Per-project models and provider
+
+A project can choose **which provider, endpoint and API key** its model calls
+use (`llm_provider`, `llm_base_url`, `openai_api_key`) and **which model each
+role runs on** (`planner_sdk_model`, `planner_explorer_model`, `dev_sdk_model`,
+`verifier_qa_model`). All seven are in `PROJECT_OVERRIDABLE_KEYS`; whatever a
+project sets nothing for is the global setting, so it can move one role, or just
+its key, without pinning the rest. The other agent limits (turns, budgets,
+effort) stay global.
+
+How a choice reaches a call:
+
+- **The graph carries only `project_id`** (`FeatureRunState.project_id`, set by
+  the daemon on a fresh run and re-supplied on every resume). Never a key, and
+  not resolved model names: graph state is checkpointed to Postgres and sent to
+  LangSmith, so a secret in it would be stored and shipped.
+- **Roles resolve from it where they use it.** `resolve_text(key, project_id)`
+  (`config/store.py`) is the project's own value, else the global one, and a
+  *blank* override counts as none. `run_planner`, `run_dev`, `run_verifier`,
+  `run_epic_qa` and `generation.chat_completion_json` take `project_id`; lessons
+  capture and guide generation pass the project's too.
+- **`get_provider(project_id)`** (`llm/registry.py`) builds the adapter from the
+  project's connection. One rule keeps it safe: a project that points at **its
+  own endpoint or provider must bring its own key**. The global key was issued
+  for the global endpoint, and is never sent to another host — the call fails
+  with `LlmNotConfiguredError` saying so. A project that sets only a key (another
+  account on the same endpoint) is fine. The project's settings dialog warns
+  about the missing key before a run fails on it.
+- A project that moves to another provider usually needs its models chosen too;
+  the global model ids rarely exist there. `llm_base_url` blank means "OpenAI's
+  own API", which is why a blank project override cannot mean that — set the URL.
+
+The **model picker** (`type: "model"` on those four fields): the server marks
+them, and `GET /api/config/models[?project_id=]` returns suggestions — the
+project's provider's own `/models` listing (`LlmProvider.list_models`), else the
+models `llm/pricing.py` has prices for, with `error` saying why. Cached
+(`services/model_options.py`), keyed by the resolved connection, so two projects
+never share a listing. They are suggestions, not a whitelist: any model id can be
+typed.
+
 ## Config and migrations
 
 - Config schema and UI fields: `forge/config/store.py` (`CONFIG_FIELDS`,
@@ -1071,8 +1111,10 @@ Rules that keep it safe:
   when you add the `ConfigField` — `tests/test_config_store.py` fails on a
   setting with no section, or in two. A saved value whose key is not declared
   (an old row) shows under "Other", so it stays reachable.
-- Project overrides: JIRA creds + approval gates only. The LLM provider/
-  key / GitHub / models stay global. A project's ticket filter is **not** a config
+- Project overrides: JIRA creds, the approval gates, the LangSmith switch and
+  the **model side** — provider, endpoint, API key, and which model each role
+  runs on (see "Per-project models"). GitHub / the other agent limits stay
+  global. A project's ticket filter is **not** a config
   override — it is its own table (`project_ticket_filters`), since it has
   no global default to fall back to.
 - Alembic: `alembic/versions/YYYYMMDD_NNNN_description.py`. Docstring must
@@ -1237,6 +1279,7 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | Live activity / streaming | `services/activity_stream.py`, `api/run_routes.py` |
 | LangSmith tracing (what is traced, settings, per-project switch) | `services/tracing.py`; call sites: `daemon/main.py`'s `_invoke_graph`, `agents/loop.py`'s `_call_tool`, `llm/openai_compat.py` |
 | Graph routing / gates | `orchestration/graph.py`, `config/store.py` |
+| Per-project provider / models, the model picker | `llm/registry.py` (`get_provider`), `config/store.py` (`resolve_text`, `PROJECT_OVERRIDABLE_KEYS`), `services/model_options.py` |
 | Retry: plan again vs. resume at dev | `daemon/main.py`'s `arm_resume_at_dev`, `state/manager_story.py`'s `retry_story`, `api/run_routes.py` |
 | Dispatch / PR / CI | `daemon/main.py`, `orchestration/integration.py` |
 | Where a branch starts (existing work for a ticket) | `services/prior_work.py` (git), `daemon/prior_work_lookup.py` (when, storage, planner view) |

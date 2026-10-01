@@ -48,7 +48,7 @@ def test_clear_project_config_reverts_to_global():
 def test_set_project_config_rejects_non_overridable_key():
     project_id = StateManager().create_project("Widgets")
     with pytest.raises(ValueError):
-        set_project_config(project_id, "openai_api_key", "sk-openai-x")
+        set_project_config(project_id, "github_token", "ghp-x")  # still global: a GitHub token is not per project
 
 
 def test_two_projects_have_independent_overrides():

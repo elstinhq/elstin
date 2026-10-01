@@ -196,6 +196,21 @@ class OpenAiCompatProvider:
 
         return self._parse_response(completion, request)
 
+    async def list_models(self) -> list[str]:
+        """GET {base_url}/models. OpenAI-compatible gateways all answer it; the
+        ids are whatever that endpoint serves, embeddings and the rest
+        included — a picker offers them as suggestions, not as a whitelist."""
+        try:
+            listing = self._client.models.list()
+            ids = {model.id async for model in listing}
+        except AuthenticationError as exc:
+            raise LlmAuthError(str(exc)) from exc
+        except APIConnectionError as exc:  # APITimeoutError is one
+            raise LlmConnectionError(str(exc)) from exc
+        except APIStatusError as exc:
+            raise LlmError(str(exc)) from exc
+        return sorted(ids)
+
     def _build_kwargs(self, request: LlmRequest) -> dict[str, Any]:
         messages = self._to_openai_messages(request)
         kwargs: dict[str, Any] = {

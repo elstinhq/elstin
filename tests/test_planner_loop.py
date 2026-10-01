@@ -80,7 +80,7 @@ def _configure(monkeypatch, provider, *, explorers: bool = False) -> None:
     # PLAN loop, so they opt out; the explorer path has its own tests at
     # the bottom of this file and in tests/test_explorer.py.
     set_config("planner_explorers_enabled", "true" if explorers else "false")
-    monkeypatch.setattr(planner_module, "get_provider", lambda: provider)
+    monkeypatch.setattr(planner_module, "get_provider", lambda *_args, **_kwargs: provider)
 
 
 def test_plan_schema_satisfies_strict_structured_output_rules():
@@ -547,3 +547,74 @@ async def test_the_plan_loop_keeps_the_whole_cap_when_nothing_was_explored(monke
     await run_planner(user_request="Add a widget", project_path=git_repo)
 
     assert captured["budget"] == pytest.approx(1.00)
+
+
+# --- which model each call runs on ------------------------------------------
+
+
+async def _models_used(monkeypatch, git_repo, **kwargs) -> tuple[list[str], list[str]]:
+    """(models of the scoping + explorer calls, models of the plan call) for a
+    run with one explorer."""
+    provider = FakeProvider(script=[
+        _scope_response({"name": "ui", "question": "How is it rendered?", "path_hints": []}),
+        _text_response("Rendered in `a.py:1`."),
+        _plan_response(),
+    ])
+    _configure(monkeypatch, provider, explorers=True)
+    await run_planner(user_request="Add a widget", project_path=git_repo, **kwargs)
+    return [call.model for call in provider.calls[:2]], [provider.calls[2].model]
+
+
+async def test_a_projects_models_split_the_plan_from_the_investigation(monkeypatch, git_repo, project_id):
+    from forge.config.store import set_project_config
+
+    set_project_config(project_id, "planner_sdk_model", "project-big")
+    set_project_config(project_id, "planner_explorer_model", "project-cheap")
+
+    investigation, plan = await _models_used(monkeypatch, git_repo, project_id=project_id)
+
+    assert investigation == ["project-cheap", "project-cheap"]
+    assert plan == ["project-big"]
+
+
+async def test_investigation_follows_the_projects_planner_model_when_no_explorer_model_is_set(monkeypatch, git_repo, project_id):
+    from forge.config.store import set_project_config
+
+    set_project_config(project_id, "planner_sdk_model", "project-big")
+
+    investigation, plan = await _models_used(monkeypatch, git_repo, project_id=project_id)
+
+    assert investigation == ["project-big", "project-big"] and plan == ["project-big"]
+
+
+async def test_the_global_explorer_model_applies_when_the_project_sets_none(monkeypatch, git_repo, project_id):
+    from forge.config.store import set_config, set_project_config
+
+    set_config("planner_explorer_model", "global-cheap")
+    set_project_config(project_id, "planner_sdk_model", "project-big")
+
+    investigation, plan = await _models_used(monkeypatch, git_repo, project_id=project_id)
+
+    assert investigation == ["global-cheap", "global-cheap"] and plan == ["project-big"]
+
+
+async def test_a_run_with_no_project_uses_the_global_models(monkeypatch, git_repo):
+    from forge.config.store import set_config
+
+    set_config("planner_sdk_model", "global-big")
+    set_config("planner_explorer_model", "global-cheap")
+
+    investigation, plan = await _models_used(monkeypatch, git_repo)
+
+    assert investigation == ["global-cheap", "global-cheap"] and plan == ["global-big"]
+
+
+async def test_the_planner_asks_for_the_provider_of_its_project(monkeypatch, git_repo):
+    asked = []
+    provider = FakeProvider(script=[_plan_response()])
+    _configure(monkeypatch, provider)
+    monkeypatch.setattr(planner_module, "get_provider", lambda project_id=None: asked.append(project_id) or provider)
+
+    await run_planner(user_request="Add a widget", project_path=git_repo, project_id=42)
+
+    assert asked == [42]

@@ -137,6 +137,13 @@ class FeatureRunState(TypedDict, total=False):
     acceptance_criteria_hint: list[str]
     sdk_model: str | None
     sdk_effort: str | None
+    # The project the story belongs to, for the roles to resolve what a
+    # project can choose for itself — which model each role runs on, and which
+    # provider, endpoint and key the calls go to — instead of reading the
+    # global setting. Only the id: a key must never be put in this state, which
+    # is checkpointed to Postgres and sent to LangSmith. None (a run
+    # checkpointed before this existed) means the global settings.
+    project_id: int | None
 
 
 def initial_state(run_id: str, user_request: str, project_path: str) -> FeatureRunState:
@@ -189,4 +196,5 @@ def initial_state(run_id: str, user_request: str, project_path: str) -> FeatureR
         acceptance_criteria_hint=[],
         sdk_model=None,
         sdk_effort=None,
+        project_id=None,
     )

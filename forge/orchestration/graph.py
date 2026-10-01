@@ -105,6 +105,7 @@ async def planner_node(state: FeatureRunState) -> dict:
             read_only_labels=state.get("read_only_labels") or None,
             sdk_model=state.get("sdk_model"),
             sdk_effort=state.get("sdk_effort"),
+            project_id=state.get("project_id"),
         )
     except PlannerLoopError as exc:
         # Same reasoning as dev_node's DevLoopError catch below, plus one
@@ -184,6 +185,7 @@ async def dev_node(state: FeatureRunState) -> dict:
             story_worktrees=state.get("story_worktrees") or None,
             sdk_model=state.get("sdk_model"),
             sdk_effort=state.get("sdk_effort"),
+            project_id=state.get("project_id"),
         )
     except DevLoopError as exc:
         # Caught here, not left to propagate: nothing upstream of this node
@@ -336,6 +338,7 @@ async def verifier_node(state: FeatureRunState) -> dict:
             # gate_node already ran the toolchain on this exact worktree state
             # — reuse its report rather than paying for a second run.
             precomputed_gate=state.get("tier1_gate") or None,
+            project_id=state.get("project_id"),
         )
     except GenerationError as exc:
         # Same reasoning as dev_node's DevLoopError catch: an exception
@@ -430,6 +433,7 @@ async def qa_node(state: FeatureRunState) -> dict:
             worktree_path=worktree_path,
             project_path=state["project_path"],
             run_id=run_id or None,
+            project_id=state.get("project_id"),
         )
     except GenerationError as exc:
         # Same reasoning as verifier_node's catch above.

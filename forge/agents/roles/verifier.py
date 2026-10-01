@@ -689,6 +689,7 @@ async def run_verifier(
     story_worktrees: dict[str, Any] | None = None,
     default_label: str = "",
     declared_unchanged: dict[str, str] | None = None,
+    project_id: int | None = None,
 ) -> dict[str, Any]:
     """prior_build_runner: kept as the historical param/field name for
     minimal churn to the LangGraph state schema (FeatureRunState.dev_build_runner) —
@@ -758,6 +759,7 @@ async def run_verifier(
             response_schema=_VERIFIER_JSON_SCHEMA,
             response_schema_name="verifier_review",
             run_id=run_id, phase="verifier", label="verifier",
+            project_id=project_id,
         )
         if run_id and llm_report.get("reasoning"):
             append_activity(run_id, type="thinking", phase="verifier", title="Verifier reasoning", detail=str(llm_report.get("reasoning"))[:4000])

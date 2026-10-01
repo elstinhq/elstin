@@ -163,6 +163,7 @@ async def run_epic_qa(
     worktree_path: str = "",
     project_path: str,
     run_id: str | None = None,
+    project_id: int | None = None,
 ) -> dict[str, Any]:
     """`qa_story` is the validation ticket being worked; `dev_stories` are
     the epic's implementation stories in wave order; `branch_diff` is
@@ -237,6 +238,7 @@ async def run_epic_qa(
             run_id=run_id,
             phase="qa",
             label="epic_qa",
+            project_id=project_id,
         )
 
         # The deterministic suite result outranks the model's own verdict: if

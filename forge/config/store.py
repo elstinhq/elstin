@@ -25,7 +25,9 @@ class ConfigField:
     label: str
     secret: bool
     default: str | None
-    type: Literal["string", "bool"]
+    # "model" is a string the settings screens offer the provider's models for
+    # (GET /api/config/models) and that a project may override.
+    type: Literal["string", "bool", "model"]
 
 
 CONFIG_FIELDS: tuple[ConfigField, ...] = (
@@ -126,7 +128,7 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         "After a story that needed retries lands, propose short lessons for a person to accept into the project guide (one extra model call; nothing reaches an agent until accepted)",
         False, "false", "bool",
     ),
-    ConfigField("dev_sdk_model", "Dev agent model", False, "gpt-5.1", "string"),
+    ConfigField("dev_sdk_model", "Dev agent model", False, "gpt-5.1", "model"),
     ConfigField(
         "dev_web_access_enabled",
         "Let the dev agent search the web and fetch public pages (docs, package READMEs); internal/private addresses are always refused",
@@ -146,7 +148,7 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         "This is the base for a small plan; a plan touching many files gets more (+1 per 2 extra files, up to 4x)",
         False, "4", "string",
     ),
-    ConfigField("planner_sdk_model", "Planner agent model", False, "gpt-5.1", "string"),
+    ConfigField("planner_sdk_model", "Planner agent model", False, "gpt-5.1", "model"),
     ConfigField("planner_sdk_effort", "Planner agent reasoning effort (low/medium/high/xhigh/max)", False, "medium", "string"),
     ConfigField("planner_sdk_max_turns", "Planner agent max turns per run (0 = unbounded)", False, "40", "string"),
     ConfigField("planner_sdk_max_retries", "Planner agent retries on a transient SDK error", False, "2", "string"),
@@ -166,7 +168,7 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
     ConfigField(
         "planner_explorer_model",
         "Model for investigation agents (blank = use the planner model; a cheaper model usually suffices for reading code)",
-        False, None, "string",
+        False, None, "model",
     ),
     ConfigField(
         "agent_compaction_token_threshold",
@@ -183,7 +185,7 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         "counts what the provider reports it billed, else the forge/llm/pricing.py estimate",
         False, "0", "string",
     ),
-    ConfigField("verifier_qa_model", "Verifier/QA review model", False, "gpt-5.1-mini", "string"),
+    ConfigField("verifier_qa_model", "Verifier/QA review model", False, "gpt-5.1-mini", "model"),
     ConfigField("verifier_skip_llm_trivial_chars", "Skip LLM review below this diff size in chars (0 = never skip)", False, "0", "string"),
 )
 
@@ -270,9 +272,11 @@ def list_config_categories() -> list[dict]:
         {"id": c.id, "title": c.title, "description": c.description, "keys": list(c.keys)} for c in CONFIG_CATEGORIES
     ]
 
-# The subset of CONFIG_FIELDS a project can override — JIRA connection +
-# the three approval gates. Everything else (the LLM provider/key, GitHub,
-# model config, worktree/data dirs) stays global, shared across all projects.
+# The subset of CONFIG_FIELDS a project can override — JIRA connection, the
+# approval gates, the LangSmith switch, and the model side: which provider,
+# endpoint and key its calls use and which model each role runs on.
+# Everything else (GitHub, the other agent limits, worktree/data dirs) stays
+# global, shared across all projects.
 PROJECT_OVERRIDABLE_KEYS = frozenset({
     "jira_base_url",
     "jira_email",
@@ -286,6 +290,19 @@ PROJECT_OVERRIDABLE_KEYS = frozenset({
     "manage_gitignore",
     "langsmith_tracing_enabled",
     "langsmith_project",
+    # Which model each role runs on. A project that sets none uses the global
+    # value (resolve_text), so a project can move one role without pinning
+    # the rest.
+    "planner_sdk_model",
+    "planner_explorer_model",
+    "dev_sdk_model",
+    "verifier_qa_model",
+    # Where its model calls go and as whom (forge/llm/registry.py). A project
+    # that points at another endpoint must bring its own key: the global key
+    # is never sent to an endpoint it was not issued for.
+    "llm_provider",
+    "llm_base_url",
+    "openai_api_key",
 })
 
 _cache_lock = threading.Lock()
@@ -437,6 +454,22 @@ def resolve_config(key: str, project_id: int | None) -> str | None:
         if override is not None:
             return override
     return get_config(key)
+
+
+def resolve_text(key: str, project_id: int | None) -> str | None:
+    """A text setting as this project sees it: its own override, else the
+    global value. None when neither is set, for the caller to default. A blank
+    override counts as no override — the global value wins, never an empty
+    model id or key."""
+    return project_override(key, project_id) or (get_config(key) or "").strip() or None
+
+
+def project_override(key: str, project_id: int | None) -> str | None:
+    """What the project itself set for `key` — not the global fallback. None
+    when it set nothing, or only a blank."""
+    if project_id is None:
+        return None
+    return (get_project_config(project_id, key) or "").strip() or None
 
 
 def resolve_bool_config(key: str, project_id: int | None) -> bool:

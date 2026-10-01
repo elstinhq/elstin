@@ -386,7 +386,7 @@ async def generate_repo_guide(project_id: int, repo_id: int) -> dict:
             status_code=409, detail=f"This repo already has its own {own[0]}; forge only writes a guide for one that has none"
         )
     try:
-        guide = await generate_project_guide(repo["path"])
+        guide = await generate_project_guide(repo["path"], project_id)
     except GuideError as exc:
         raise HTTPException(status_code=502, detail=f"Could not generate a guide: {exc}") from exc
     sm.set_project_repo_guide(repo_id, guide)

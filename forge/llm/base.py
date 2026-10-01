@@ -50,3 +50,9 @@ class LlmProvider(Protocol):
     capabilities: Capabilities
 
     async def complete(self, request: LlmRequest) -> LlmResponse: ...
+
+    async def list_models(self) -> list[str]:
+        """The model ids this provider serves, sorted; [] when it has no
+        listing. Raises the LlmError family like `complete` does. Feeds the
+        settings screens' model pickers (forge/services/model_options.py)."""
+        ...

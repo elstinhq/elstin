@@ -31,7 +31,7 @@ import logging
 import re
 from typing import Any
 
-from forge.config.store import get_config, resolve_bool_config
+from forge.config.store import resolve_bool_config, resolve_text
 from forge.llm.registry import LlmNotConfiguredError
 from forge.services.generation import GenerationError, chat_completion_json
 from forge.services.run_activity import list_activity
@@ -217,12 +217,13 @@ def validate_lessons(raw: Any, evidence: str) -> list[dict[str, Any]]:
     return kept
 
 
-def _lesson_model() -> str | None:
-    """The planner's model, like the guide's: the lessons end up in the same
-    authoritative document, and the small verifier/QA model is chosen for
-    pass/fail review, not for writing instructions. None falls back to that
-    default when no planner model is set."""
-    return (get_config("planner_sdk_model") or "").strip() or None
+def _lesson_model(project_id: int | None = None) -> str | None:
+    """The planner's model — the project's own choice, else the global one —
+    like the guide's: the lessons end up in the same authoritative document,
+    and the small verifier/QA model is chosen for pass/fail review, not for
+    writing instructions. None falls back to that default when no planner
+    model is set."""
+    return resolve_text("planner_sdk_model", project_id)
 
 
 async def capture_story_lessons(sm, epic: dict, story: dict) -> list[dict]:
@@ -254,7 +255,8 @@ async def capture_story_lessons(sm, epic: dict, story: dict) -> list[dict]:
                 # the story's spend, and a story that used its whole ceiling
                 # should still be learned from.
                 label="lesson extraction",
-                model=_lesson_model(),
+                model=_lesson_model(project_id),
+                project_id=project_id,
             )
         except (GenerationError, LlmNotConfiguredError) as exc:
             logger.warning("lessons: not captured for %s: %s", story_key, exc)

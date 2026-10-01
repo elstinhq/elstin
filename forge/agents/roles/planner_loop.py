@@ -52,7 +52,7 @@ from forge.agents.roles import explorer as explorer_defaults
 from forge.agents.roles.explorer import gather_exploration
 from forge.agents.roles.plan_gate import blocking, check_plan, check_questions, format_plan_feedback, normalize_plan
 from forge.agents.roles.planner import _format_prior_work_block, build_planner_system
-from forge.config.store import get_bool_config, get_config, get_float_config, get_int_config
+from forge.config.store import get_bool_config, get_config, get_float_config, get_int_config, resolve_text
 from forge.llm.errors import LlmError
 from forge.llm.registry import LlmNotConfiguredError, get_provider
 from forge.llm.types import ImageBlock, LlmResponse, Message, ResponseFormat, TextBlock
@@ -260,12 +260,13 @@ async def run_planner(
     sdk_model: str | None = None,
     sdk_effort: str | None = None,
     answers_from_earlier_run: bool = False,
+    project_id: int | None = None,
 ) -> dict[str, Any]:
     if run_id:
         append_activity(run_id, type="status", phase="planner", title="Planning started", detail=user_request[:200])
 
     try:
-        provider = get_provider()
+        provider = get_provider(project_id)
     except LlmNotConfiguredError as exc:
         raise PlannerLoopError(str(exc)) from exc
 
@@ -280,7 +281,8 @@ async def run_planner(
         )
 
     phase_started_at = time.monotonic()
-    resolved_model = sdk_model or get_config("planner_sdk_model")
+    # The project's own choice, else the global setting (resolve_text).
+    resolved_model = sdk_model or resolve_text("planner_sdk_model", project_id)
     usage_totals = {"input_tokens": 0, "output_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 0}
     usage_cost_usd: float | None = None
     # Summed across every attempt below, so a retried plan's provider time
@@ -360,7 +362,7 @@ async def run_planner(
                 provider=provider,
                 # A cheaper model is usually enough to read code and report
                 # back; falls back to the planner's own model when unset.
-                model=get_config("planner_explorer_model") or resolved_model,
+                model=resolve_text("planner_explorer_model", project_id) or resolved_model,
                 project_path=project_path,
                 user_request=user_request,
                 repo_roots=repo_roots,

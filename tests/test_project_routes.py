@@ -330,7 +330,7 @@ def test_project_config_rejects_non_overridable_key():
     project_id = StateManager().create_project("Widgets")
 
     with _client() as client:
-        response = client.put(f"/api/projects/{project_id}/config/openai_api_key", json={"value": "sk-openai-x"})
+        response = client.put(f"/api/projects/{project_id}/config/github_token", json={"value": "ghp-x"})
         assert response.status_code == 400
 
 

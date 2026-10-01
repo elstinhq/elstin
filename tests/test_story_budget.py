@@ -151,7 +151,7 @@ async def test_dev_refuses_to_start_when_the_ceiling_is_exhausted(git_repo, monk
 
     set_config("openai_api_key", "sk-test")
     _exhaust("ENG-1")
-    monkeypatch.setattr(dev_loop_module, "get_provider", lambda: FakeProvider(script=[]))
+    monkeypatch.setattr(dev_loop_module, "get_provider", lambda *_args, **_kwargs: FakeProvider(script=[]))
 
     with pytest.raises(DevLoopError, match="spend ceiling"):
         await run_dev(plan={}, context_bundle={}, worktree_path=git_repo, project_path=git_repo, run_id="ENG-1")
@@ -163,7 +163,7 @@ async def test_planner_refuses_to_start_when_the_ceiling_is_exhausted(git_repo, 
 
     set_config("openai_api_key", "sk-test")
     _exhaust("ENG-1")
-    monkeypatch.setattr(planner_module, "get_provider", lambda: FakeProvider(script=[]))
+    monkeypatch.setattr(planner_module, "get_provider", lambda *_args, **_kwargs: FakeProvider(script=[]))
 
     with pytest.raises(PlannerLoopError, match="spend ceiling"):
         await run_planner(user_request="Add a widget", project_path=git_repo, run_id="ENG-1")
@@ -177,7 +177,7 @@ async def test_verifier_and_qa_are_skipped_when_the_ceiling_is_exhausted(monkeyp
 
     set_config("openai_api_key", "sk-test")
     _exhaust("ENG-1")
-    monkeypatch.setattr(generation, "get_provider", lambda: FakeProvider(script=[]))
+    monkeypatch.setattr(generation, "get_provider", lambda *_args, **_kwargs: FakeProvider(script=[]))
 
     with pytest.raises(GenerationError, match="spend ceiling"):
         await generation.chat_completion_json(messages=[{"role": "user", "content": "review"}], run_id="ENG-1")
@@ -193,7 +193,7 @@ async def test_dev_runs_normally_with_budget_remaining(git_repo, monkeypatch):
     _spend("ENG-1", 0.10)
     monkeypatch.setattr(
         dev_loop_module, "get_provider",
-        lambda: FakeProvider(script=[LlmResponse(content=[TextBlock(text="nothing to change")], stop_reason="end_turn", usage=Usage(), model="gpt-5.1")]),
+        lambda *_args, **_kwargs: FakeProvider(script=[LlmResponse(content=[TextBlock(text="nothing to change")], stop_reason="end_turn", usage=Usage(), model="gpt-5.1")]),
     )
 
     result = await run_dev(plan={}, context_bundle={}, worktree_path=git_repo, project_path=git_repo, run_id="ENG-1")

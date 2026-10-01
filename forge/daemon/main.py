@@ -1112,6 +1112,8 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
             patch = {
                 "worktree_path": worktree_path,
                 "story_kind": story_kind,
+                # Also for a run checkpointed before the id was carried.
+                "project_id": epic["project_id"],
                 "repo_roots": repo_roots,
                 "read_roots": read_roots,
                 "story_base_refs": story_base_refs,
@@ -1160,6 +1162,7 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
             )
             state["story_worktrees"] = known_worktrees
             state["story_kind"] = story_kind
+            state["project_id"] = epic["project_id"]
             # Decisions a person already made survive a fresh run — Retry
             # after a failure starts one, and MKT2-866's re-plan otherwise
             # exported the column its answer had left out. A re-plan that
