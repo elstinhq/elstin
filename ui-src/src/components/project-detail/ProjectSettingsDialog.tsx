@@ -1,10 +1,12 @@
-import { useState } from "react";
-import { SettingsField } from "../settings/SettingsField";
+import { useMemo, useState } from "react";
+import { SettingsSection } from "../settings/SettingsSection";
 import { DeleteProjectSection } from "./DeleteProjectSection";
-import { useClearProjectConfig, useProjectConfig, useSetProjectConfig } from "../../hooks/useProjectConfig";
+import { useClearProjectConfig, useConfigCategories, useProjectConfig, useSetProjectConfig } from "../../hooks/useProjectConfig";
 import { useSetTicketSource } from "../../hooks/useProjects";
+import { buildSections } from "../../lib/settingsSections";
 import { TICKET_SOURCES } from "../../lib/ticketSource";
 import { useToast } from "../../lib/toast";
+import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Label } from "../ui/label";
@@ -20,10 +22,46 @@ interface ProjectSettingsDialogProps {
 export function ProjectSettingsDialog({ projectId, ticketSource, open, onClose }: ProjectSettingsDialogProps) {
   const setSource = useSetTicketSource(projectId);
   const configQuery = useProjectConfig(projectId);
+  const categoriesQuery = useConfigCategories();
   const setConfig = useSetProjectConfig(projectId);
   const clearConfig = useClearProjectConfig(projectId);
   const { showToast } = useToast();
   const [savingKey, setSavingKey] = useState<string | null>(null);
+  // null until a person opens or closes one: then the sections that hold an
+  // override start open, so what this project customizes is visible at once.
+  const [openIds, setOpenIds] = useState<Set<string> | null>(null);
+
+  // A GitHub project has no use for the JIRA connection fields.
+  const sections = useMemo(
+    () =>
+      buildSections(
+        (configQuery.data ?? []).filter((field) => !(ticketSource === "github" && field.key.startsWith("jira_"))),
+        categoriesQuery.data,
+      ),
+    [configQuery.data, categoriesQuery.data, ticketSource],
+  );
+  const withOverrides = useMemo(
+    () => new Set(sections.filter((s) => s.fields.some((f) => f.overridden)).map((s) => s.id)),
+    [sections],
+  );
+  const openSections = openIds ?? withOverrides;
+
+  // A project that sends its calls to its own endpoint must bring its own key —
+  // the global key is never sent to an endpoint it was not issued for
+  // (forge/llm/registry.py) — so say so here, not when its first run fails.
+  const byKey = new Map((configQuery.data ?? []).map((field) => [field.key, field]));
+  const own = (key: string) => (byKey.get(key)?.overridden ? (byKey.get(key)?.value ?? "").trim() : "");
+  const ownsEndpoint = own("llm_base_url") !== "" || (own("llm_provider") !== "" && own("llm_provider").toLowerCase() !== "openai");
+  const ownsKey = Boolean(byKey.get("openai_api_key")?.overridden && byKey.get("openai_api_key")?.is_set);
+
+  function setSectionOpen(id: string, next: boolean) {
+    setOpenIds((current) => {
+      const ids = new Set(current ?? withOverrides);
+      if (next) ids.add(id);
+      else ids.delete(id);
+      return ids;
+    });
+  }
 
   function handleSave(key: string, value: string) {
     setSavingKey(key);
@@ -39,7 +77,7 @@ export function ProjectSettingsDialog({ projectId, ticketSource, open, onClose }
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
-      <DialogContent>
+      <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>Settings</DialogTitle>
         </DialogHeader>
@@ -77,17 +115,25 @@ export function ProjectSettingsDialog({ projectId, ticketSource, open, onClose }
               Where "Add ticket" and the ticket filter look. GitHub Issues uses the GitHub token from global settings.
             </p>
           </div>
-          <form className="flex flex-col gap-4" onSubmit={(e) => e.preventDefault()}>
-            {/* A GitHub project has no use for the JIRA connection fields. */}
-            {(configQuery.data ?? [])
-              .filter((field) => !(ticketSource === "github" && field.key.startsWith("jira_")))
-              .map((field) => (
-              <SettingsField
-                key={field.key}
-                field={field}
-                saving={savingKey === field.key}
+          {ownsEndpoint && !ownsKey ? (
+            <Alert variant="destructive">
+              <AlertDescription>
+                This project sends its model calls to its own endpoint but has no API key of its own, so its runs will
+                stop until you set one under Model provider. The global key is never sent to another endpoint.
+              </AlertDescription>
+            </Alert>
+          ) : null}
+          <form className="flex flex-col gap-3" onSubmit={(e) => e.preventDefault()}>
+            {sections.map((section) => (
+              <SettingsSection
+                key={section.id}
+                section={section}
+                open={openSections.has(section.id)}
+                onOpenChange={(next) => setSectionOpen(section.id, next)}
+                savingKey={savingKey}
                 onSave={handleSave}
-                override={{ onReset: () => clearConfig.mutate(field.key) }}
+                projectId={projectId}
+                overrideFor={(field) => ({ onReset: () => clearConfig.mutate(field.key) })}
               />
             ))}
           </form>

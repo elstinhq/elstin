@@ -1,15 +1,9 @@
 import { ChevronRight } from "lucide-react";
 import type { ConfigField } from "../../types/api";
+import type { SettingsSectionData } from "../../lib/settingsSections";
 import { Badge } from "../ui/badge";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../ui/collapsible";
 import { SettingsField } from "./SettingsField";
-
-export interface SettingsSectionData {
-  id: string;
-  title: string;
-  description: string;
-  fields: ConfigField[];
-}
 
 interface SettingsSectionProps {
   section: SettingsSectionData;
@@ -17,12 +11,16 @@ interface SettingsSectionProps {
   onOpenChange: (open: boolean) => void;
   savingKey: string | null;
   onSave: (key: string, value: string) => void;
+  /** Project settings only: how a field goes back to inheriting the global value. */
+  overrideFor?: (field: ConfigField) => { onReset: () => void };
+  /** Project settings only: the project whose provider lists the models a model field suggests. */
+  projectId?: number;
 }
 
 // One collapsible group of settings. The whole header row is the button, so
 // the target is large; the heading wraps it so the page still has an outline
 // for a screen reader to jump through.
-export function SettingsSection({ section, open, onOpenChange, savingKey, onSave }: SettingsSectionProps) {
+export function SettingsSection({ section, open, onOpenChange, savingKey, onSave, overrideFor, projectId }: SettingsSectionProps) {
   const count = section.fields.length;
   return (
     <Collapsible open={open} onOpenChange={onOpenChange} asChild>
@@ -50,7 +48,13 @@ export function SettingsSection({ section, open, onOpenChange, savingKey, onSave
             <div className="divide-border divide-y">
               {section.fields.map((field) => (
                 <div key={field.key} className="max-w-xl py-3.5">
-                  <SettingsField field={field} saving={savingKey === field.key} onSave={onSave} />
+                  <SettingsField
+                    field={field}
+                    saving={savingKey === field.key}
+                    onSave={onSave}
+                    override={overrideFor?.(field)}
+                    projectId={projectId}
+                  />
                 </div>
               ))}
             </div>

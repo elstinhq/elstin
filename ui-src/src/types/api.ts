@@ -431,11 +431,21 @@ export interface Epic {
 export interface ConfigField {
   key: string;
   label: string;
-  type: "bool" | "string";
+  // "model" is a string the screens offer the provider's models for.
+  type: "bool" | "string" | "model";
   secret: boolean;
   value: string | null;
   is_set: boolean;
   overridden?: boolean; // only present on project-scoped config
+}
+
+/** GET /api/config/models: suggestions for a model setting. */
+export interface ModelOptions {
+  models: string[];
+  /** "provider" = the provider's own listing; "known" = models forge has prices for. */
+  source: "provider" | "known";
+  /** Why the provider's listing was not used, when it was not. */
+  error: string | null;
 }
 
 /** A section of the settings screen (GET /api/config/categories). */

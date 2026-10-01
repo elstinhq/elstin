@@ -1,6 +1,7 @@
 import type {
   ConfigCategory,
   ConfigField,
+  ModelOptions,
   Epic,
   EpicUsage,
   ExternalChangeAction,
@@ -142,6 +143,9 @@ export const api = {
   // -- global config -----------------------------------------------------
   getGlobalConfig: () => request<ConfigField[]>("/api/config"),
   getConfigCategories: () => request<ConfigCategory[]>("/api/config/categories"),
+  // With a project id, the suggestions come from that project's own provider.
+  getModelOptions: (projectId?: number) =>
+    request<ModelOptions>(projectId === undefined ? "/api/config/models" : `/api/config/models?project_id=${projectId}`),
   setGlobalConfig: (key: string, value: string) =>
     request<{ key: string; updated: boolean }>(`/api/config/${encodeURIComponent(key)}`, put({ value })),
 

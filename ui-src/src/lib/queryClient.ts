@@ -13,6 +13,7 @@ export const queryKeys = {
   ticketFilter: (id: number) => ["projects", id, "ticket-filter"] as const,
   globalConfig: () => ["config"] as const,
   configCategories: () => ["config-categories"] as const,
+  modelOptions: (projectId?: number) => ["model-options", projectId ?? "global"] as const,
   epicUsage: (epicKey: string) => ["epics", epicKey, "usage"] as const,
   storyUsage: (storyKey: string) => ["stories", storyKey, "usage"] as const,
   storyPlan: (storyKey: string) => ["stories", storyKey, "plan"] as const,

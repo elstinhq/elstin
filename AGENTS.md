@@ -1097,7 +1097,9 @@ project's provider's own `/models` listing (`LlmProvider.list_models`), else the
 models `llm/pricing.py` has prices for, with `error` saying why. Cached
 (`services/model_options.py`), keyed by the resolved connection, so two projects
 never share a listing. They are suggestions, not a whitelist: any model id can be
-typed.
+typed. `components/shared/ModelCombobox.tsx` shows the whole list until you type
+(a native `<datalist>` narrows to the text already in the box, hiding every
+other model), caps it at 200 rows, and is keyboard operable.
 
 ## Config and migrations
 
@@ -1177,7 +1179,11 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
   since storage can be blocked), `/settings#tracing` opens and scrolls to a
   section, and filtering opens every section that has a match. Underscores
   and spaces match each other, so a key and its label find the same setting.
-  `SettingsField` is shared with the project settings dialog.
+  `SettingsField` is shared with the project settings dialog, which is built
+  from the same sections (only the project-overridable fields, each with its
+  "Using global default" / "Reset" hint; sections holding an override start
+  open). A field you leave unchanged saves nothing — in a project that would
+  pin today's global value as an override.
 - `ui-src/build.mjs` bundles all three entry points (esbuild, built-in
   JSX/TSX support) into `settings-ui/vendor/app-*.js`, then shells out to
   the Tailwind CLI to compile `src/styles/globals.css` into
@@ -1279,7 +1285,7 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | Live activity / streaming | `services/activity_stream.py`, `api/run_routes.py` |
 | LangSmith tracing (what is traced, settings, per-project switch) | `services/tracing.py`; call sites: `daemon/main.py`'s `_invoke_graph`, `agents/loop.py`'s `_call_tool`, `llm/openai_compat.py` |
 | Graph routing / gates | `orchestration/graph.py`, `config/store.py` |
-| Per-project provider / models, the model picker | `llm/registry.py` (`get_provider`), `config/store.py` (`resolve_text`, `PROJECT_OVERRIDABLE_KEYS`), `services/model_options.py` |
+| Per-project provider / models, the model picker | `llm/registry.py` (`get_provider`), `config/store.py` (`resolve_text`, `PROJECT_OVERRIDABLE_KEYS`), `services/model_options.py`, `components/shared/ModelCombobox.tsx` |
 | Retry: plan again vs. resume at dev | `daemon/main.py`'s `arm_resume_at_dev`, `state/manager_story.py`'s `retry_story`, `api/run_routes.py` |
 | Dispatch / PR / CI | `daemon/main.py`, `orchestration/integration.py` |
 | Where a branch starts (existing work for a ticket) | `services/prior_work.py` (git), `daemon/prior_work_lookup.py` (when, storage, planner view) |

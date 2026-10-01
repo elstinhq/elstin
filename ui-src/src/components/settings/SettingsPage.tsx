@@ -4,10 +4,10 @@ import { AppShell } from "../shared/AppShell";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { SettingsSection, type SettingsSectionData } from "./SettingsSection";
+import { SettingsSection } from "./SettingsSection";
 import { useConfigCategories, useGlobalConfig, useSetGlobalConfig } from "../../hooks/useProjectConfig";
+import { buildSections } from "../../lib/settingsSections";
 import { useToast } from "../../lib/toast";
-import type { ConfigCategory, ConfigField } from "../../types/api";
 
 const STORAGE_KEY = "forge.settings.open";
 
@@ -35,29 +35,6 @@ function writeOpenIds(ids: Set<string>) {
   }
 }
 
-// The server owns which section a field is in and the order inside it
-// (forge/config/store.py's CONFIG_CATEGORIES). A saved value with no section
-// of its own still has to be reachable, so it lands in a last one.
-function buildSections(fields: ConfigField[], categories: ConfigCategory[] | undefined): SettingsSectionData[] {
-  const byKey = new Map(fields.map((field) => [field.key, field]));
-  const placed = new Set<string>();
-  const sections: SettingsSectionData[] = [];
-  for (const category of categories ?? []) {
-    const inSection = category.keys.map((key) => byKey.get(key)).filter((field): field is ConfigField => field !== undefined);
-    for (const field of inSection) placed.add(field.key);
-    sections.push({ id: category.id, title: category.title, description: category.description, fields: inSection });
-  }
-  const rest = fields.filter((field) => !placed.has(field.key));
-  if (rest.length > 0) {
-    sections.push(
-      categories
-        ? { id: "other", title: "Other", description: "Saved values that have no section of their own.", fields: rest }
-        : { id: "all", title: "All settings", description: "", fields: rest },
-    );
-  }
-  return sections;
-}
-
 export function SettingsPage() {
   const configQuery = useGlobalConfig();
   const categoriesQuery = useConfigCategories();
@@ -79,16 +56,15 @@ export function SettingsPage() {
     );
   }
 
-  function updateOpen(next: Set<string>) {
-    setOpenIds(next);
-    writeOpenIds(next);
-  }
+  useEffect(() => writeOpenIds(openIds), [openIds]);
 
   function setOpen(id: string, open: boolean) {
-    const next = new Set(openIds);
-    if (open) next.add(id);
-    else next.delete(id);
-    updateOpen(next);
+    setOpenIds((current) => {
+      const next = new Set(current);
+      if (open) next.add(id);
+      else next.delete(id);
+      return next;
+    });
   }
 
   const loading = configQuery.isLoading || categoriesQuery.isLoading;
@@ -152,10 +128,10 @@ export function SettingsPage() {
           </div>
           {!filtering && !sectionsMissing ? (
             <div className="flex items-center gap-1">
-              <Button variant="ghost" size="sm" onClick={() => updateOpen(new Set(sections.map((section) => section.id)))}>
+              <Button variant="ghost" size="sm" onClick={() => setOpenIds(new Set(sections.map((section) => section.id)))}>
                 Expand all
               </Button>
-              <Button variant="ghost" size="sm" onClick={() => updateOpen(new Set())}>
+              <Button variant="ghost" size="sm" onClick={() => setOpenIds(new Set())}>
                 Collapse all
               </Button>
             </div>
