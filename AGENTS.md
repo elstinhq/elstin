@@ -1032,6 +1032,36 @@ prompt or threshold change. These counters exist so that a real task set
 and a real baseline can be assembled from merged stories later, instead of
 tuning against invented tasks now.
 
+## Redaction
+
+`services/redaction.py`. Tool output is not curated — a command that prints its
+environment, a file read that turns out to be a `.env`, a build log that echoes a
+token — and forge persists it (the activity feed, re-read and streamed to the UI)
+and, with tracing on, sends it to LangSmith. Both pass through `redact` first:
+
+- **By value, then by shape.** Exact values forge holds: every secret setting
+  (`config/store.py`'s `secret_values()` — global and any project's override) and
+  the host's credential-named environment variables, plus `DATABASE_URL`. Then
+  well-known token formats (GitHub, OpenAI/OpenRouter, Anthropic, AWS, Google,
+  Slack, GitLab, Atlassian, LangSmith, npm, JWTs, private-key blocks, `Bearer`
+  headers, the password in a `scheme://user:password@host` URL).
+- **Short values are not scrubbed by value** (`MIN_SECRET_LEN`, 12): a short
+  "secret" is usually a common word, and replacing it everywhere damages ordinary
+  output. Shapes still catch short-but-real tokens.
+- **Where:** `run_activity.append_activity` (title, detail, meta — so the stored
+  row, the API and the live stream agree) and the LangSmith client's `anonymizer`
+  (`tracing._client`), which covers model messages, graph state, tool spans,
+  errors and metadata alike. The model itself still sees the raw tool result: the
+  agent needs it to work.
+- **The secret values are cached for 30 s**; a key saved at /settings is covered
+  within that. An unreadable settings table falls back to shapes alone — redaction
+  never fails a run.
+- **Best effort, not a guarantee**: a credential that is neither a value forge
+  holds nor a known shape gets through. Rows written before this existed are not
+  rewritten.
+- `SECRET_NAME_RE` (`tools/agent_env.py`) is shared with the environment filter,
+  so what a command is refused and what is scrubbed are decided by one pattern.
+
 ## Tracing (LangSmith)
 
 `services/tracing.py`. Off by default and opt-in, because a trace carries
@@ -1306,6 +1336,7 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | Filter-based ingestion | `services/jira_filter.py`, `daemon/ticket_sync.py` |
 | Which system tickets come from (source per project, neutral `Ticket`) | `services/ticket_source.py` — sync code calls `get_ticket_source(project_id)`, never `JiraService` directly |
 | Live activity / streaming | `services/activity_stream.py`, `api/run_routes.py` |
+| Scrubbing credentials from persisted/traced output | `services/redaction.py`; applied in `services/run_activity.py` and `services/tracing.py`'s client |
 | LangSmith tracing (what is traced, settings, per-project switch) | `services/tracing.py`; call sites: `daemon/main.py`'s `_invoke_graph`, `agents/loop.py`'s `_call_tool`, `llm/openai_compat.py` |
 | Graph routing / gates | `orchestration/graph.py`, `config/store.py` |
 | Per-project provider / models, the model picker | `llm/registry.py` (`get_provider`), `config/store.py` (`resolve_text`, `PROJECT_OVERRIDABLE_KEYS`), `services/model_options.py`, `components/shared/ModelCombobox.tsx` |

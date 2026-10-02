@@ -26,6 +26,7 @@ from forge.llm.openai_compat import OpenAiCompatProvider
 from forge.llm.types import LlmRequest, text_message
 from forge.orchestration.graph import checkpointer_from_url, compile_graph
 from forge.orchestration.state import initial_state
+from forge.services.redaction import redact_value
 from forge.state.manager import StateManager
 
 pytestmark = pytest.mark.usefixtures("forge_db")
@@ -195,9 +196,11 @@ def test_the_client_is_built_from_the_settings_and_reused(monkeypatch):
     other = tracing._client(tracing.TracingSettings("another-key", "forge", "https://eu.api.smith.langchain.com", None))
 
     assert first is again and first is not other
+    # Every client scrubs credentials out of what it sends (forge/services/redaction.py).
+    scrub = redact_value
     assert built == [
-        {"api_url": "https://eu.api.smith.langchain.com", "api_key": "ls-key", "workspace_id": "ws-1"},
-        {"api_url": "https://eu.api.smith.langchain.com", "api_key": "another-key"},
+        {"api_url": "https://eu.api.smith.langchain.com", "api_key": "ls-key", "anonymizer": scrub, "workspace_id": "ws-1"},
+        {"api_url": "https://eu.api.smith.langchain.com", "api_key": "another-key", "anonymizer": scrub},
     ]
 
 

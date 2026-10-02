@@ -12,6 +12,9 @@ write to Postgres stays the durable record and the source of truth for a
 fresh page load; the fan-out is only a shortcut that removes the poll
 interval between an agent doing something and a human seeing it.
 
+Text is passed through forge/services/redaction.py before it is written, so a
+credential an agent's tool output happened to print never reaches the feed.
+
 append_activity()/list_activity() keep their original signatures and return
 shape on purpose: every call site across forge/agents/roles/*.py,
 forge/orchestration/graph.py, and forge/tools/dart_tools.py, plus the API
@@ -27,6 +30,7 @@ from sqlalchemy import select
 from forge.db.engine import session_scope
 from forge.db.models import ActivityEvent
 from forge.services.activity_stream import publish
+from forge.services.redaction import redact, redact_value
 
 ActivityType = Literal["status", "thinking", "tool", "llm", "token"]
 ActivityPhase = Literal["planner", "dev", "verifier", "qa", "system"]
@@ -63,6 +67,12 @@ def append_activity(
 ) -> dict[str, Any]:
     if not run_id:
         return {}
+
+    # Tool output is stored and streamed as the agent produced it, so a command
+    # that printed a credential would otherwise keep it in the feed for good.
+    title = redact(title)
+    detail = redact(detail) if detail else detail
+    meta = redact_value(meta) if meta else meta
 
     with session_scope() as session:
         row = ActivityEvent(

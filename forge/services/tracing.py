@@ -41,6 +41,7 @@ from langsmith.run_helpers import trace
 from langsmith.utils import tracing_is_enabled
 
 from forge.config.store import get_config, resolve_bool_config, resolve_config
+from forge.services.redaction import redact_value
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +104,10 @@ def _client(settings: TracingSettings) -> Client:
         client = _clients.get(key)
         if client is None:
             extra = {"workspace_id": settings.workspace_id} if settings.workspace_id else {}
-            client = Client(api_url=settings.endpoint, api_key=settings.api_key, **extra)
+            # The anonymizer runs over every run's inputs and outputs before they
+            # are sent — model messages, graph state and tool spans alike — so a
+            # credential in tool output never leaves the machine.
+            client = Client(api_url=settings.endpoint, api_key=settings.api_key, anonymizer=redact_value, **extra)
             _clients[key] = client
         return client
 

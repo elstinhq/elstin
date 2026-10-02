@@ -449,6 +449,24 @@ def set_project_config(project_id: int, key: str, value: str | None) -> None:
             row.secret = resolved_secret
 
 
+def secret_values() -> set[str]:
+    """The current value of every secret setting — global and any project's
+    override — for forge/services/redaction.py, which scrubs them from what is
+    persisted or sent to a third party. A row counts as secret when it is
+    flagged so or when its key is a declared secret field, so a value saved
+    before the flag existed is still covered. Blank values are left out."""
+    declared = {f.key for f in CONFIG_FIELDS if f.secret}
+    values: set[str] = set()
+    with session_scope() as session:
+        for row in session.execute(select(AppConfig)).scalars():
+            if (row.secret or row.key in declared) and row.value and row.value.strip():
+                values.add(row.value.strip())
+        for row in session.execute(select(ProjectConfig)).scalars():
+            if (row.secret or row.key in declared) and row.value and row.value.strip():
+                values.add(row.value.strip())
+    return values
+
+
 def clear_project_config(project_id: int, key: str) -> None:
     """Removes the override — the project reverts to the global value."""
     with session_scope() as session:
