@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from sqlalchemy import select
 
 from forge.db.engine import session_scope
@@ -84,7 +86,8 @@ class _StoryMixin:
             return True
 
     def set_story_status(
-        self, jira_key: str, status: str, *, parked_reason: str | None = None, failure_stage: str | None = None
+        self, jira_key: str, status: str, *, parked_reason: str | None = None, failure_stage: str | None = None,
+        retry_at: datetime | None = None,
     ) -> None:
         with session_scope() as session:
             story = session.get(Story, jira_key)
@@ -95,6 +98,27 @@ class _StoryMixin:
                 # preserved — a status transition away from "failed" means
                 # whatever failure caused it no longer applies.
                 story.failure_stage = failure_stage
+                story.retry_at = retry_at
+
+    def list_stories_waiting_on_a_limit(self, now: datetime | None = None) -> list[dict]:
+        """Failed stories parked on a provider limit whose retry time has come
+        (parked_reason "usage_limit", retry_at <= now), oldest first — what the
+        daemon retries on its own. A story with no retry_at is not here: the
+        provider did not say when, so only a person can."""
+        moment = now or datetime.now(timezone.utc)
+        with session_scope() as session:
+            rows = session.execute(
+                select(Story)
+                .where(
+                    Story.status == "failed",
+                    Story.parked_reason == "usage_limit",
+                    Story.failure_stage == "run",
+                    Story.retry_at.is_not(None),
+                    Story.retry_at <= moment,
+                )
+                .order_by(Story.retry_at)
+            ).scalars().all()
+            return [_story_to_dict(session, row) for row in rows]
 
     def set_story_thread_id(self, jira_key: str, thread_id: str) -> None:
         with session_scope() as session:
@@ -378,6 +402,7 @@ class _StoryMixin:
             stage = story.failure_stage
             story.retry_count += 1
             story.parked_reason = None
+            story.retry_at = None
             story.failure_stage = None
             story.merge_attempts = 0
             if stage == "merge":
@@ -450,6 +475,7 @@ def _story_to_dict(session, story: Story) -> dict:
         "worktree_path": story.worktree_path,
         "branch": story.branch,
         "parked_reason": story.parked_reason,
+        "retry_at": story.retry_at.isoformat() if story.retry_at else None,
         "gate_approved": story.gate_approved,
         "clarification_questions": list(story.clarification_questions or []),
         "clarification_answers": list(story.clarification_answers or []),

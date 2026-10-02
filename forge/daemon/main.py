@@ -73,6 +73,7 @@ from forge.services.run_activity import append_activity, last_event_at
 from forge.services.ticket_source import get_ticket_source, ticket_source_configured
 from forge.services.usage import record_run_outcome
 from forge.daemon.worktree_retention import maybe_reclaim
+from forge.services.provider_limit import USAGE_LIMIT_REASON, plan_parking
 from forge.state.manager import StateManager
 from forge.tools.codebase_skeleton import build_workspace_skeleton
 from forge.tools.git_tools import (
@@ -1232,9 +1233,22 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
     # "ready_to_merge" on success), so retry_story's recovery for this stage
     # starts the run again: a full redispatch, or — when it failed in dev —
     # a resume at dev (arm_resume_at_dev). See forge/state/manager_story.py.
+    # A run that failed because the provider refused calls on a limit is parked,
+    # not just failed: when the provider said when it lifts, the daemon retries
+    # the story then (_resume_stories_past_their_limit).
+    parking = None
+    if new_status == "failed" and result.get("provider_limit"):
+        parking = plan_parking(
+            result["provider_limit"], retry_count=int(story.get("retry_count") or 0),
+            auto_resume=resolve_bool_config("auto_run_enabled", epic["project_id"]),
+        )
+        finished_reason = USAGE_LIMIT_REASON
     sm.set_story_status(
         story_key, new_status, parked_reason=finished_reason, failure_stage="run" if new_status == "failed" else None,
+        retry_at=parking.retry_at if parking else None,
     )
+    if parking:
+        append_activity(story_key, type="status", phase="system", title=parking.title, detail=parking.detail[:1000])
     # The graph's own status, not new_status: "awaiting_clarification" and a
     # plain "awaiting_approval" both collapse to "awaiting_plan_approval"
     # above, but only the former has a question worth showing. Set on every
@@ -1800,14 +1814,19 @@ async def _apply_resume_patch(graph, config: dict, patch: dict) -> None:
     "developing" there. Any other checkpoint is left to the inference it always
     used."""
     snapshot = await graph.aget_state(config)
-    at_dev_again = tuple(snapshot.next) == ("dev",) and (snapshot.values or {}).get("status") == "developing"
-    await graph.aupdate_state(config, patch, as_node="gate" if at_dev_again else None)
+    status = (snapshot.values or {}).get("status")
+    at_dev_again = tuple(snapshot.next) == ("dev",) and status == "developing"
+    # Re-opened at review (`arm_resume_after_failure`): waiting on the gate with
+    # dev's work done. Dev is the writer that leads there.
+    at_review_again = tuple(snapshot.next) == ("gate",) and status == "verifying"
+    writer = "gate" if at_dev_again else "dev" if at_review_again else None
+    await graph.aupdate_state(config, patch, as_node=writer)
 
 
-def _ended_failed_in_dev(history: list) -> bool:
+def _ended_failed_at(history: list, node: str) -> bool:
     """`history`: the story's checkpoints, newest first (two are enough). True
-    when the run finished `failed` having last run dev — the checkpoint before
-    the final one was waiting on dev — with a plan in its state. That is a
+    when the run finished `failed` having last run `node` — the checkpoint before
+    the final one was waiting on it — with a plan in its state. For dev that is a
     run whose planning is done and worth keeping.
 
     Read off the checkpoint sequence, not the state: a failed state does not
@@ -1818,13 +1837,55 @@ def _ended_failed_in_dev(history: list) -> bool:
         return False
     last, before = history[0], history[1]
     values = last.values or {}
-    return not last.next and tuple(before.next) == ("dev",) and values.get("status") == "failed" and bool(values.get("plan"))
+    return not last.next and tuple(before.next) == (node,) and values.get("status") == "failed" and bool(values.get("plan"))
+
+
+def _ended_failed_in_dev(history: list) -> bool:
+    return _ended_failed_at(history, "dev")
 
 
 def _worktrees_intact(entries: list[dict]) -> bool:
     """The story has worktrees and every one is still on disk on its branch —
     what dev needs to carry on from where it was."""
     return bool(entries) and all(_reusable_worktree(entry["repo_path"], entry) for entry in entries)
+
+
+async def _arm_resume(sm: StateManager, epic: dict, story: dict, *, at_review: bool) -> str | None:
+    """Re-open a failed run's finished graph where it stopped: "dev", "review",
+    or None having changed nothing (planning should happen again). See
+    `arm_resume_at_dev` and `arm_resume_after_failure`."""
+    story_key = story["jira_key"]
+    if story.get("kind") == "qa" or story.get("external_pending") is not None:
+        return None
+    entries = await asyncio.to_thread(sm.list_story_worktrees, story_key)
+    if not await asyncio.to_thread(_worktrees_intact, entries):
+        return None
+    if await asyncio.to_thread(_plan_predates_done_work, sm, epic, story_key):
+        return None
+    config = {"configurable": {"thread_id": story_key}}
+    async with checkpointer_from_url(get_database_url()) as checkpointer:
+        graph = compile_graph(checkpointer, require_plan_approval=False)
+        history = [snapshot async for snapshot in graph.aget_state_history(config, limit=2)]
+        if _ended_failed_in_dev(history):
+            # A fresh gate budget: the failure was dev's, not a run of gate fails.
+            await graph.aupdate_state(
+                config, {"status": "developing", "error": None, "gate_attempts": 0, "provider_limit": None},
+                as_node="gate",
+            )
+            logger.info("story %s: re-armed at dev — the earlier plan is kept", story_key)
+            return "dev"
+        # Review only for a failure the provider caused: dev's work is done and a
+        # re-run of the gate and the review is exactly what is missing. A review
+        # that ran and rejected (retries exhausted, nothing to verify) would only
+        # reject again, so that keeps the full redispatch.
+        if at_review and _ended_failed_at(history, "verifier") and (history[0].values or {}).get("provider_limit"):
+            await graph.aupdate_state(
+                config, {"status": "verifying", "error": None, "gate_attempts": 0, "provider_limit": None},
+                as_node="dev",
+            )
+            logger.info("story %s: re-armed at review — dev's work is kept", story_key)
+            return "review"
+    return None
 
 
 async def arm_resume_at_dev(sm: StateManager, epic: dict, story: dict) -> bool:
@@ -1850,24 +1911,57 @@ async def arm_resume_at_dev(sm: StateManager, epic: dict, story: dict) -> bool:
       same staleness that sends a plan waiting for approval back to planning;
     * the ticket's text changed in its source and is waiting on a person
       (`external_pending`) — the plan may no longer say what it asks."""
-    story_key = story["jira_key"]
-    if story.get("kind") == "qa" or story.get("external_pending") is not None:
-        return False
-    entries = await asyncio.to_thread(sm.list_story_worktrees, story_key)
-    if not await asyncio.to_thread(_worktrees_intact, entries):
-        return False
-    if await asyncio.to_thread(_plan_predates_done_work, sm, epic, story_key):
-        return False
-    config = {"configurable": {"thread_id": story_key}}
-    async with checkpointer_from_url(get_database_url()) as checkpointer:
-        graph = compile_graph(checkpointer, require_plan_approval=False)
-        history = [snapshot async for snapshot in graph.aget_state_history(config, limit=2)]
-        if not _ended_failed_in_dev(history):
-            return False
-        # A fresh gate budget: the failure was dev's, not a run of gate fails.
-        await graph.aupdate_state(config, {"status": "developing", "error": None, "gate_attempts": 0}, as_node="gate")
-    logger.info("story %s: re-armed at dev — the earlier plan is kept", story_key)
-    return True
+    return await _arm_resume(sm, epic, story, at_review=False) == "dev"
+
+
+async def arm_resume_after_failure(sm: StateManager, epic: dict, story: dict) -> str | None:
+    """`arm_resume_at_dev`, and also for a review the provider failed to complete
+    (a limit or an outage during the verifier's call): dev's work is done, so the
+    run is re-opened ahead of the gate and goes through it and the review again
+    rather than being planned and built a second time. "dev", "review", or None
+    — planning again — on the same conditions."""
+    return await _arm_resume(sm, epic, story, at_review=True)
+
+
+# What a person is told when Retry (or the daemon, after a limit) resumed rather than re-planned.
+RESUME_NOTES = {
+    "dev": ("continuing at development with the earlier plan",
+            "Planning had finished and the run failed in development, so it is not planned again."),
+    "review": ("continuing at review with development's work",
+               "Development had finished and the provider failed during review, so only the checks and the review run again."),
+}
+
+
+async def _resume_stories_past_their_limit(sm: StateManager) -> list[str]:
+    """Retry, on the daemon's own authority, the stories parked on a provider
+    limit whose retry time has come — what a person would do by pressing Retry
+    after the limit lifted. Only projects that run work on their own: in a manual
+    project the person who started the run presses Retry. Returns the keys it
+    retried."""
+    due = await asyncio.to_thread(sm.list_stories_waiting_on_a_limit)
+    retried: list[str] = []
+    for story in due:
+        key = story["jira_key"]
+        if key in live_run_keys() or key in _background:
+            continue
+        epic = await asyncio.to_thread(sm.get_epic, story["epic_key"])
+        if epic is None or not resolve_bool_config("auto_run_enabled", epic["project_id"]):
+            continue
+        stage = None
+        try:
+            stage = await arm_resume_after_failure(sm, epic, story)
+        except Exception:  # noqa: BLE001 — a saving, never a reason to leave the story failed
+            logger.exception("story %s: could not resume where it stopped — retrying with a fresh plan", key)
+        await asyncio.to_thread(sm.retry_story, key, resume_at_dev=stage is not None)
+        note = RESUME_NOTES.get(stage)
+        await asyncio.to_thread(
+            append_activity, key, type="status", phase="system",
+            title="Provider limit has lifted — retrying automatically" + (f": {note[0]}" if note else ""),
+            detail=note[1] if note else "The run is started again from planning.",
+        )
+        logger.info("story %s: provider limit lifted — retried (%s)", key, stage or "from planning")
+        retried.append(key)
+    return retried
 
 
 def _abort_merge_in_progress(worktree_path: str) -> None:
@@ -1931,6 +2025,12 @@ async def poll_once(sm: StateManager | None = None, *, wait: bool = False) -> No
     run of this one. `wait=True` awaits what this pass started (tests)."""
     sm = sm or StateManager()
     launched: list[asyncio.Task] = []
+    # Stories parked on a provider limit that has since lifted go back first, so
+    # they and their epic are picked up by this very pass.
+    try:
+        await _resume_stories_past_their_limit(sm)
+    except Exception:  # noqa: BLE001 — retried next poll; never a reason to stall the others
+        logger.exception("could not retry the stories waiting on a provider limit")
     # No OpenAI-key gate here: dispatch itself (creating a worktree,
     # advancing a story's status) never touches forge/llm/registry.py —
     # only the planner/dev/verifier/qa role functions do, once dispatched,

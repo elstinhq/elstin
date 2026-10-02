@@ -126,6 +126,12 @@ class FeatureRunState(TypedDict, total=False):
     # involve, which the story's own plan may not name.
     integration_paths: list[str]
     error: str | None
+    # Set on a run that failed because the provider refused calls on a limit
+    # (forge/llm/errors.py's ProviderLimit.as_state): {"kind": "rate"|"quota",
+    # "reset_at": epoch seconds or None, "message"}. The daemon parks such a
+    # story until the limit lifts instead of leaving it failed. Cleared when the
+    # run is re-armed.
+    provider_limit: dict[str, Any] | None
     approved: bool
     rejected: bool
     merge_report: dict[str, Any]

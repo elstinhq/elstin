@@ -122,9 +122,9 @@ def _stub_arm(monkeypatch, result: bool) -> list[str]:
 
     async def fake_arm(sm, epic_row, story):
         asked.append(story["jira_key"])
-        return result
+        return "dev" if result else None
 
-    monkeypatch.setattr("forge.api.run_routes.arm_resume_at_dev", fake_arm)
+    monkeypatch.setattr("forge.api.run_routes.arm_resume_after_failure", fake_arm)
     return asked
 
 
@@ -165,7 +165,7 @@ def test_retry_still_works_when_the_resume_check_itself_fails(epic, monkeypatch)
     async def broken(sm, epic_row, story):
         raise RuntimeError("the checkpoint store is unreachable")
 
-    monkeypatch.setattr("forge.api.run_routes.arm_resume_at_dev", broken)
+    monkeypatch.setattr("forge.api.run_routes.arm_resume_after_failure", broken)
     epic.set_story_status("ENG-2", "failed", failure_stage="run")
 
     with _client() as client:

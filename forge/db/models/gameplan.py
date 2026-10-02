@@ -203,6 +203,14 @@ class Story(Base):
 
     parked_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)  # e.g. "plan_approval_gate", "pr_review_gate"
 
+    # When a story that failed on a provider limit (parked_reason ==
+    # "usage_limit") is retried automatically — the instant the provider said
+    # the limit lifts. NULL: no retry is scheduled (the provider did not say
+    # when, or the story failed some other way). Cleared by every status
+    # transition, like parked_reason. See forge/daemon/main.py's
+    # _resume_stories_past_their_limit.
+    retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # Set when the verifier's only blocker across every iteration was a
     # coverage-threshold miss (tests passed; coverage percentage below the
     # repo's bar) — see forge/tools/vue_tools.py's coverage-only-failure

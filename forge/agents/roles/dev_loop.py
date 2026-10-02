@@ -60,7 +60,7 @@ from forge.agents.roles.dev import (
     build_dev_system,
 )
 from forge.config.store import get_bool_config, get_config, get_float_config, get_int_config, resolve_text
-from forge.llm.errors import LlmError
+from forge.llm.errors import LlmError, ProviderLimit, provider_limit_of
 from forge.llm.registry import LlmNotConfiguredError, get_provider
 from forge.llm.types import ContentBlock, LlmResponse, history_from_json, history_to_json, text_message
 from forge.services.lessons import format_lessons_block, plan_paths
@@ -84,7 +84,15 @@ _SOFT_STOP_REASONS = frozenset({TERMINAL_MAX_TURNS, TERMINAL_MAX_BUDGET, TERMINA
 class DevLoopError(RuntimeError):
     """A hard failure from the dev agent loop — missing/invalid provider
     config, a provider rejection, or a run that ended in error. Never
-    raised for a turn/budget cap."""
+    raised for a turn/budget cap.
+
+    `limit` is set when the cause was a provider limit (rate or quota), with the
+    instant it lifts when the provider said so: the story is then parked until
+    then rather than left failed (forge/daemon/main.py)."""
+
+    def __init__(self, message: str = "", *, limit: ProviderLimit | None = None) -> None:
+        super().__init__(message)
+        self.limit = limit
 
 
 def classify_loop_result(terminal_reason: str | None, is_error: bool) -> DevLoopOutcome:
@@ -492,7 +500,7 @@ async def run_dev(
         try:
             result = await run_agent_loop(config, initial_messages)
         except LlmError as exc:
-            raise DevLoopError(f"Dev agent loop failed: {exc}") from exc
+            raise DevLoopError(f"Dev agent loop failed: {exc}", limit=provider_limit_of(exc)) from exc
 
         api_duration_ms = result.api_duration_ms
         outcome = classify_loop_result(result.terminal_reason, result.is_error)
@@ -515,7 +523,8 @@ async def run_dev(
 
         if outcome == "hard_failure":
             raise DevLoopError(
-                f"Dev agent loop ended in an unrecoverable error: {result.error_message or 'no error detail reported'} (terminal_reason={result.terminal_reason!r})."
+                f"Dev agent loop ended in an unrecoverable error: {result.error_message or 'no error detail reported'} (terminal_reason={result.terminal_reason!r}).",
+                limit=result.limit,
             )
 
         truncated = outcome == "soft_stop"

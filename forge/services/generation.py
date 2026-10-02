@@ -23,7 +23,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from forge.config.store import resolve_text
-from forge.llm.errors import LlmError
+from forge.llm.errors import LlmError, ProviderLimit, provider_limit_of
 from forge.llm.registry import get_provider
 from forge.llm.types import LlmRequest, ResponseFormat, text_message
 from forge.services.run_activity import append_activity
@@ -45,7 +45,14 @@ class GenerationError(RuntimeError):
     one in run_forever that abandons the whole cycle. One chatty model
     reply was therefore enough to skip every epic queued behind this one
     until the next tick. See forge/orchestration/graph.py's dev_node for
-    the same reasoning applied to DevLoopError."""
+    the same reasoning applied to DevLoopError.
+
+    `limit` is set when the provider call failed on a limit (rate or quota); see
+    forge/agents/roles/dev_loop.py's DevLoopError."""
+
+    def __init__(self, message: str = "", *, limit: ProviderLimit | None = None) -> None:
+        super().__init__(message)
+        self.limit = limit
 
 
 def get_verifier_qa_model(project_id: int | None = None) -> str:
@@ -193,7 +200,7 @@ async def chat_completion_json(
             LlmRequest(model=model, system=system, messages=[text_message("user", prompt)], response_format=response_format)
         )
     except LlmError as exc:
-        raise GenerationError(f"{label} failed via {provider.name}: {exc}") from exc
+        raise GenerationError(f"{label} failed via {provider.name}: {exc}", limit=provider_limit_of(exc)) from exc
     api_duration_ms = int((time.monotonic() - started_at) * 1000)
 
     content = response.text()

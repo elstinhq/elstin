@@ -74,6 +74,9 @@ export const PARKED_REASON_LABEL: Record<string, string> = {
   // forge/services/external_sync.py: set aside while the source has it On
   // Hold (or another ticket_hold_statuses status), back to pending after.
   on_hold_in_source: "on hold in the source — picked up once it is not",
+  // forge/services/provider_limit.py: the provider refused calls on a rate or
+  // quota limit. With a retry time forge retries the story itself then.
+  usage_limit: "provider limit",
 };
 
 export const ACTIVITY_TYPE_LABEL: Record<string, string> = {

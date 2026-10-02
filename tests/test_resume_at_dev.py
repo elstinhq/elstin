@@ -13,6 +13,7 @@ redispatch would pay for the planner a second time.
 from __future__ import annotations
 
 import shutil
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -21,9 +22,12 @@ import pytest
 import forge.orchestration.graph as graph_module
 from forge.agents.roles.dev_loop import DevLoopError
 from forge.agents.roles.planner_loop import PlannerLoopError
-from forge.daemon.main import _apply_resume_patch, _ended_failed_in_dev, arm_resume_at_dev
+from forge.daemon.main import (
+    _apply_resume_patch, _ended_failed_in_dev, arm_resume_after_failure, arm_resume_at_dev,
+)
 from forge.db.engine import session_scope
 from forge.db.models import Story
+from forge.llm.errors import ProviderLimit
 from forge.orchestration.graph import checkpointer_from_url, compile_graph
 from forge.orchestration.state import initial_state
 from forge.services.generation import GenerationError
@@ -298,3 +302,99 @@ def _snapshot(*, next: tuple, status: str | None = "failed", plan: dict | None =
 )
 async def test_ended_failed_in_dev_reads_the_checkpoint_sequence(history, expected):
     assert _ended_failed_in_dev(history) is expected
+
+
+# --- a review the provider could not complete ----------------------------------------
+#
+# Dev's work is done and a re-run of the gate and the review is exactly what is
+# missing. Only for a failure the provider caused: a review that ran and rejected
+# would only reject again.
+
+
+def _review_fails_once(run: Run, monkeypatch: pytest.MonkeyPatch, *, limit: ProviderLimit | None) -> dict:
+    calls = {"n": 0}
+    working = graph_module.run_verifier
+
+    async def flaky_review(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise GenerationError("the provider refused", limit=limit)
+        return await working(**kwargs)
+
+    monkeypatch.setattr(graph_module, "run_verifier", flaky_review)
+    return calls
+
+
+LIMIT = ProviderLimit(kind="rate", reset_at=time.time() + 60, message="slow down")
+
+
+async def test_a_review_the_provider_refused_on_a_limit_continues_at_review_without_redoing_dev(run: Run, monkeypatch):
+    reviews = _review_fails_once(run, monkeypatch, limit=LIMIT)
+
+    failed = await run.start()
+    assert failed["status"] == "failed" and failed["provider_limit"]["kind"] == "rate"
+    assert (run.planner_calls, run.dev_calls) == (1, 1)
+
+    story, epic = run.sm.get_story(STORY), run.sm.get_epic("ENG-1")
+    assert await arm_resume_after_failure(run.sm, epic, story) == "review"
+
+    armed = await run.snapshot()
+    assert armed.next == ("gate",)  # ahead of the gate: dev's work is kept
+    assert armed.values["status"] == "verifying"
+    assert armed.values["error"] is None and armed.values["provider_limit"] is None
+
+    final = await run.resume()
+
+    assert final["status"] == "completed"
+    assert (run.planner_calls, run.dev_calls) == (1, 1)  # neither planned nor built a second time
+    assert reviews["n"] == 2
+
+
+async def test_the_resume_patch_keeps_a_run_re_armed_at_review_waiting_at_the_gate(run: Run, monkeypatch):
+    _review_fails_once(run, monkeypatch, limit=LIMIT)
+    await run.start()
+    assert await arm_resume_after_failure(run.sm, run.sm.get_epic("ENG-1"), run.sm.get_story(STORY)) == "review"
+
+    async with checkpointer_from_url(run.postgres_url) as checkpointer:
+        graph = compile_graph(checkpointer, require_plan_approval=False)
+        await _apply_resume_patch(graph, run.config, {"worktree_path": run.worktree_path})
+
+        assert (await graph.aget_state(run.config)).next == ("gate",)
+
+
+async def test_a_review_that_failed_for_another_reason_plans_again_even_by_this_road(run: Run, monkeypatch):
+    """No limit on it: the review may have rejected, or failed in a way a re-run
+    would repeat."""
+    _review_fails_once(run, monkeypatch, limit=None)
+    await run.start()
+
+    story, epic = run.sm.get_story(STORY), run.sm.get_epic("ENG-1")
+    assert await arm_resume_after_failure(run.sm, epic, story) is None
+    assert (await run.snapshot()).next == ()
+
+
+async def test_the_dev_only_road_never_resumes_at_review(run: Run, monkeypatch):
+    _review_fails_once(run, monkeypatch, limit=LIMIT)
+    await run.start()
+
+    assert await run.arm() is False  # arm_resume_at_dev keeps its contract
+    assert (await run.snapshot()).next == ()
+
+
+async def test_a_dev_failure_resumes_at_dev_by_the_wider_road_too_and_clears_the_limit(run: Run, monkeypatch):
+    working_dev = graph_module.run_dev
+
+    async def refused_once(**kwargs):
+        if run.dev_calls == 0:
+            run.dev_calls += 1
+            raise DevLoopError("daily limit", limit=LIMIT)
+        return await working_dev(**kwargs)
+
+    monkeypatch.setattr(graph_module, "run_dev", refused_once)
+    failed = await run.start()
+    assert failed["provider_limit"]["kind"] == "rate"
+
+    story, epic = run.sm.get_story(STORY), run.sm.get_epic("ENG-1")
+    assert await arm_resume_after_failure(run.sm, epic, story) == "dev"
+    assert (await run.snapshot()).values["provider_limit"] is None
+    assert (await run.resume())["status"] == "completed"

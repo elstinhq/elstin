@@ -279,6 +279,9 @@ export interface Story {
   worktree_path: string | null;
   branch: string | null;
   parked_reason: string | null;
+  // When forge retries a story parked on a provider limit (ISO); null when no
+  // retry is scheduled — the provider did not say when the limit lifts.
+  retry_at: string | null;
   gate_approved: boolean;
   clarification_questions: ClarificationQuestion[];
   clarification_answers: ClarificationAnswer[];

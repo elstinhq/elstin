@@ -75,6 +75,13 @@ DEFAULT_MAX_VERIFIER_ITERATIONS = 3
 DEFAULT_MAX_GATE_ATTEMPTS = 3
 
 
+def _limit_state(exc: BaseException) -> dict | None:
+    """The provider limit a role's error carries, as run state (see
+    FeatureRunState.provider_limit), or None for any other failure."""
+    limit = getattr(exc, "limit", None)
+    return limit.as_state() if limit is not None else None
+
+
 async def planner_node(state: FeatureRunState) -> dict:
     run_id = state.get("run_id", "")
     logger.info("planner starting run_id=%s", run_id)
@@ -119,7 +126,7 @@ async def planner_node(state: FeatureRunState) -> dict:
         logger.error("planner failed run_id=%s: %s", run_id, exc)
         if run_id:
             append_activity(run_id, type="status", phase="planner", title="Planning failed", detail=str(exc)[:1000])
-        return {"status": "failed", "error": str(exc), "messages": []}
+        return {"status": "failed", "error": str(exc), "messages": [], "provider_limit": _limit_state(exc)}
     questions = result.get("questions") or []
     if questions:
         logger.info("planner awaiting clarification run_id=%s questions=%d", run_id, len(questions))
@@ -199,7 +206,10 @@ async def dev_node(state: FeatureRunState) -> dict:
         logger.error("dev failed run_id=%s reason=provider_error: %s", run_id, exc)
         if run_id:
             append_activity(run_id, type="status", phase="dev", title="Development failed", detail=str(exc))
-        return {"status": "failed", "error": str(exc), "messages": [], "gate_feedback": None}
+        return {
+            "status": "failed", "error": str(exc), "messages": [], "gate_feedback": None,
+            "provider_limit": _limit_state(exc),
+        }
     logger.info("dev success run_id=%s file_changes=%d", run_id, len(result.get("file_changes", [])))
     return {
         "status": "verifying",
@@ -352,7 +362,10 @@ async def verifier_node(state: FeatureRunState) -> dict:
         logger.error("verifier failed run_id=%s reason=generation_error: %s", run_id, exc)
         if run_id:
             append_activity(run_id, type="status", phase="verifier", title="Verification failed", detail=str(exc)[:1000])
-        return {"status": "failed", "error": f"Verifier review could not be completed: {exc}", "messages": []}
+        return {
+            "status": "failed", "error": f"Verifier review could not be completed: {exc}", "messages": [],
+            "provider_limit": _limit_state(exc),
+        }
     report = result["verifier_report"]
     # A rejection here is a build that cleared Tier 1 and the reviewer
     # still judged incomplete — the counter that says whether the gate is
@@ -440,7 +453,10 @@ async def qa_node(state: FeatureRunState) -> dict:
         logger.error("qa failed run_id=%s reason=generation_error: %s", run_id, exc)
         if run_id:
             append_activity(run_id, type="status", phase="qa", title="Epic QA failed", detail=str(exc)[:1000])
-        return {"status": "failed", "error": f"Epic QA review could not be completed: {exc}", "messages": []}
+        return {
+            "status": "failed", "error": f"Epic QA review could not be completed: {exc}", "messages": [],
+            "provider_limit": _limit_state(exc),
+        }
     report = result.get("qa_report", {})
 
     # A failing full test suite on the merged branch is deterministic

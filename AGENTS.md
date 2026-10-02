@@ -858,7 +858,7 @@ last run dev** with a plan (`_ended_failed_in_dev`, read off the checkpoint
 sequence: the final checkpoint has nothing `next` and the one before it was
 waiting on `dev`; LangGraph no longer records the writing node in a
 checkpoint's metadata). Everything else keeps the full redispatch: a planner,
-gate or review failure, a cancelled run, a QA story, a merge failure, a story
+gate or review failure (bar one review case, below), a cancelled run, a QA story, a merge failure, a story
 with no recorded worktrees or one whose worktree is gone, a plan started
 before done work last merged into the epic branch (`_plan_predates_done_work`,
 the rule `_replan_behind_done_work` applies), and a ticket whose changed text
@@ -867,9 +867,12 @@ the plan itself was the problem. The route decides, not the daemon: the
 external-change "replan" also sends a failed story to `pending`, and the
 daemon could not tell the two apart.
 
-A failure at *review* (the verifier's provider call) is not covered: dev's
-work is done and resuming at dev would redo it. Resuming at the verifier is the
-natural next step.
+A failure at *review* is covered only when the provider caused it (a limit —
+see "Provider limits"): dev's work is done, so `arm_resume_after_failure` re-opens
+the run ahead of the gate (`as_node="dev"`, `status="verifying"`) and it goes
+through the gate and the review again. Any other review failure keeps the full
+redispatch: resuming at dev would redo dev's work, and a review that rejected would
+only reject again.
 
 ## Tools and languages
 
@@ -996,6 +999,48 @@ like a credential (`SECRET_NAME_RE`). A profile's `command_env` is applied on to
   `forge/tools/vue_tools.py`'s coverage-only-failure detection) no longer
   stops a story: it merges, and the gap is called out in the epic's pull
   request.
+
+## Provider limits
+
+A model call refused because the account is rate-limited or out of quota used to
+end the run as a plain `failed` story until a person noticed. When the provider
+says when it will accept calls again there is nothing for a person to decide, so
+forge parks the story and retries it itself.
+
+- **Classified at the adapter** (`llm/errors.py`, `llm/openai_compat.py`):
+  `LlmRateLimitError` (429; retryable) and `LlmQuotaError` (out of credit or
+  quota — OpenAI's `insufficient_quota`, a 402 from a gateway, "usage limit
+  reached"; **not** retryable, waiting seconds cannot help). Both are
+  `LlmLimitError` and carry `retry_after_seconds`, read from `Retry-After(-Ms)`,
+  OpenAI's `x-ratelimit-reset-*`, or the wait the message names ("try again in
+  7m12s"). `provider_limit_of` turns one into a `ProviderLimit(kind, reset_at,
+  message)`; a reset more than a week away counts as unknown.
+- **The loop** (`agents/loop.py`): a wait of up to 120 s that the provider asked
+  for is slept in place (its figure, not our backoff guess); a longer one ends the
+  loop at once, with `LoopResult.limit` set, rather than three attempts against a
+  shut window or a worker asleep for an hour.
+- **Carried out of the run:** `DevLoopError`, `PlannerLoopError` and
+  `GenerationError` take `limit=`; each graph node's failure puts it in
+  `FeatureRunState.provider_limit` (a dict, since state is checkpointed).
+- **Parked, not rescheduled by the reconciler.** `_execute_story_run` ends the
+  story `failed` / `failure_stage="run"` with `parked_reason="usage_limit"` and
+  `stories.retry_at` (migration `20260930_0032`), and writes an activity line
+  saying when. It stays `failed`, so nothing downstream starts, exactly as before;
+  the reconciler is untouched. `services/provider_limit.py`'s `plan_parking` is the
+  (pure) decision.
+- **Retried by the daemon:** `poll_once` first runs
+  `_resume_stories_past_their_limit`, which retries every such story whose
+  `retry_at` has passed — what a person pressing Retry would do (it shares
+  `arm_resume_after_failure`), so a run that failed in dev continues at dev and one
+  whose review the provider refused continues ahead of the gate, neither paying for
+  the work again. Only in projects with `auto_run_enabled`; in a manual project the
+  person presses Retry.
+- **Never guessed:** a limit with no recoverable reset time (a quota, usually) gets
+  no `retry_at`; the story says so ("add credit, then Retry"). At most
+  `MAX_AUTO_LIMIT_RETRIES` (20) automatic retries per story (`retry_count`).
+- **Retry now resumes at review too**, but only after a provider limit: a review
+  that ran and rejected (retries exhausted, nothing to verify) would only reject
+  again, so that keeps the full redispatch. `arm_resume_at_dev` is unchanged.
 
 ## Spend caps
 
@@ -1364,7 +1409,8 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | LangSmith tracing (what is traced, settings, per-project switch) | `services/tracing.py`; call sites: `daemon/main.py`'s `_invoke_graph`, `agents/loop.py`'s `_call_tool`, `llm/openai_compat.py` |
 | Graph routing / gates | `orchestration/graph.py`, `config/store.py` |
 | Per-project provider / models, the model picker | `llm/registry.py` (`get_provider`), `config/store.py` (`resolve_text`, `PROJECT_OVERRIDABLE_KEYS`), `services/model_options.py`, `components/shared/ModelCombobox.tsx` |
-| Retry: plan again vs. resume at dev | `daemon/main.py`'s `arm_resume_at_dev`, `state/manager_story.py`'s `retry_story`, `api/run_routes.py` |
+| A model call refused on a rate/quota limit (classification, parking, auto-retry) | `llm/errors.py`, `llm/openai_compat.py`, `agents/loop.py`, `services/provider_limit.py`, `daemon/main.py`'s `_resume_stories_past_their_limit` |
+| Retry: plan again vs. resume at dev/review | `daemon/main.py`'s `arm_resume_after_failure` (`arm_resume_at_dev`), `state/manager_story.py`'s `retry_story`, `api/run_routes.py` |
 | Dispatch / PR / CI | `daemon/main.py`, `orchestration/integration.py` |
 | Where a branch starts (existing work for a ticket) | `services/prior_work.py` (git), `daemon/prior_work_lookup.py` (when, storage, planner view) |
 | Read-only repos and reference folders (what runs read, what plans may change) | `tools/reference_folder.py`, `tools/workspace.py`'s `Workspace.read_only`, `agents/roles/plan_gate.py`, `daemon/main.py`'s `_workspace_roots` |

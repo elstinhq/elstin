@@ -127,7 +127,9 @@ from typing import Any, Callable, Literal
 
 from forge.agents.tool_arguments import argument_errors, repair_arguments
 from forge.llm.base import LlmProvider
-from forge.llm.errors import LlmContextOverflowError, LlmError, LlmTimeoutError, is_retryable
+from forge.llm.errors import (
+    LlmContextOverflowError, LlmError, LlmRateLimitError, LlmTimeoutError, ProviderLimit, is_retryable, provider_limit_of,
+)
 from forge.llm.pricing import estimate_cost_usd
 from forge.llm.types import (
     ContentBlock,
@@ -240,6 +242,12 @@ _MAX_TRANSIENT_RETRIES = 3
 _MAX_TIMEOUT_RETRIES = 1
 _RETRY_BASE_DELAY_SECONDS = 2.0
 _RETRY_CEILING_SECONDS = 30.0
+# A rate limit that says when it lifts is waited out in place when that is soon
+# (the delay is the provider's own figure, not our backoff guess). A longer wait
+# is not: the loop stops at once with the limit on its result, and the story is
+# parked until then (forge/daemon/main.py) rather than holding a worker, and a
+# run's claim on a slot, asleep for an hour.
+_MAX_INLINE_LIMIT_WAIT_SECONDS = 120.0
 
 # A sync tool function, matching the shape forge/tools/dev_tools.py's
 # make_dev_tools() already returns — kwargs in, string result out. Always
@@ -296,6 +304,10 @@ class LoopResult:
     # reminders out of the middle of that prefix (forge/agents/roles/
     # explorer.py's `_wrap_up`). Never for persisting or resuming.
     sent_history: list[Message] = field(default_factory=list)
+    # Set when the run ended because the provider refused calls on a limit (rate
+    # or quota), with the instant it lifts when the provider said so. Lets the
+    # caller park the story until then instead of failing it outright.
+    limit: ProviderLimit | None = None
 
 
 @dataclass
@@ -425,6 +437,10 @@ async def _complete_with_retry(config: LoopConfig, request: LlmRequest) -> tuple
             if attempt >= _MAX_TRANSIENT_RETRIES or not is_retryable(exc) or timeouts > _MAX_TIMEOUT_RETRIES:
                 break
             delay = retry_backoff_seconds(attempt)
+            if isinstance(exc, LlmRateLimitError) and exc.retry_after_seconds is not None:
+                if exc.retry_after_seconds > _MAX_INLINE_LIMIT_WAIT_SECONDS:
+                    break  # too long to sit through here; the caller parks the story
+                delay = max(delay, exc.retry_after_seconds + 1.0)
             logger.warning("Transient LLM error (attempt %d/%d): %s — retrying in %.0fs", attempt, _MAX_TRANSIENT_RETRIES, exc, delay)
             if config.on_retry:
                 try:
@@ -799,6 +815,7 @@ async def run_agent_loop(config: LoopConfig, initial_messages: list[Message]) ->
                 history=caller_history(), sent_history=list(history), usage=usage_total, terminal_reason=TERMINAL_ERROR, is_error=True,
                 turns_used=turn, api_duration_ms=api_duration_ms,
                 error_message=str(last_error) if last_error else "unknown provider error",
+                limit=provider_limit_of(last_error),
             )
 
         overflow_retried = False

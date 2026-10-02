@@ -54,9 +54,12 @@ are decisions, and the fresh run is given them (forge/daemon/main.py).
 
 Retry: POST /{key}/retry recovers a failed story. A run that failed in dev
 after planning finished picks up at dev with its plan (forge/daemon/main.py's
-arm_resume_at_dev) rather than paying for the planner again; any other
-failure starts over from planning. `?replan=true` forces the fresh plan even
-then — the way to say the plan itself is what went wrong.
+arm_resume_after_failure) rather than paying for the planner again, and one
+whose review the provider failed to complete (a limit, an outage) picks up
+ahead of the gate with dev's work; any other failure starts over from
+planning. `?replan=true` forces the fresh plan even then — the way to say the
+plan itself is what went wrong. A story the daemon parked on a provider limit
+is retried the same way by the daemon itself once the limit lifts.
 
 Plan: the planner's structured plan (feature_summary, plan_markdown,
 files_to_create/modify, acceptance_criteria, ...) lives only inside the
@@ -81,7 +84,9 @@ from jira import JIRAError
 from pydantic import BaseModel
 
 from forge.config.store import resolve_bool_config
-from forge.daemon.main import arm_resume_at_dev, cancel_run, check_story_action, execute_story_action, live_run_keys
+from forge.daemon.main import (
+    RESUME_NOTES, arm_resume_after_failure, cancel_run, check_story_action, execute_story_action, live_run_keys,
+)
 from forge.db.engine import get_database_url
 from forge.orchestration.graph import checkpointer_from_url, compile_graph
 from forge.orchestration.reconciler import Blocked
@@ -309,7 +314,7 @@ async def retry_story(story_key: str, background_tasks: BackgroundTasks, replan:
     _maybe_trigger_manual_run drives it immediately since nothing else will.
 
     A run failure whose planning is still good — it ended failed in dev — is
-    re-armed at dev first (arm_resume_at_dev) and resumed instead of
+    re-armed at dev first (arm_resume_after_failure) and resumed instead of
     redispatched, so the plan is not paid for twice. `replan` skips that.
     `async` because reading the checkpoint is: the blocking calls go through
     `to_thread`, as everywhere else in this module."""
@@ -322,19 +327,18 @@ async def retry_story(story_key: str, background_tasks: BackgroundTasks, replan:
             status_code=409,
             detail=f"{story_key} is not failed (status={story['status']}) — nothing to retry",
         )
-    resume_at_dev = False
+    stage = None
     if not replan and story.get("failure_stage") in (None, "run"):
         epic = await asyncio.to_thread(sm.get_epic, story["epic_key"])
         try:
-            resume_at_dev = await arm_resume_at_dev(sm, epic, story)
+            stage = await arm_resume_after_failure(sm, epic, story)
         except Exception:  # noqa: BLE001 — a saving, never a reason to leave the story failed
-            logger.exception("story %s: could not resume at dev — retrying with a fresh plan", story_key)
-    await asyncio.to_thread(sm.retry_story, story_key, resume_at_dev=resume_at_dev)
-    if resume_at_dev:
+            logger.exception("story %s: could not resume where it stopped — retrying with a fresh plan", story_key)
+    await asyncio.to_thread(sm.retry_story, story_key, resume_at_dev=stage is not None)
+    if stage:
+        title, detail = RESUME_NOTES[stage]
         await asyncio.to_thread(
-            append_activity, story_key, type="status", phase="system",
-            title="Retry: continuing at development with the earlier plan",
-            detail="Planning had finished and the run failed in development, so it is not planned again.",
+            append_activity, story_key, type="status", phase="system", title=f"Retry: {title}", detail=detail,
         )
     await asyncio.to_thread(_maybe_trigger_manual_run, sm, story_key, background_tasks)
     return await asyncio.to_thread(_story_with_pr, sm, story_key)

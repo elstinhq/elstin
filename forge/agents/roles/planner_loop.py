@@ -53,7 +53,7 @@ from forge.agents.roles.explorer import gather_exploration
 from forge.agents.roles.plan_gate import blocking, check_plan, check_questions, format_plan_feedback, normalize_plan
 from forge.agents.roles.planner import _format_prior_work_block, build_planner_system
 from forge.config.store import get_bool_config, get_config, get_float_config, get_int_config, resolve_text
-from forge.llm.errors import LlmError
+from forge.llm.errors import LlmError, ProviderLimit, provider_limit_of
 from forge.llm.registry import LlmNotConfiguredError, get_provider
 from forge.llm.types import ImageBlock, LlmResponse, Message, ResponseFormat, TextBlock
 from forge.services.lessons import format_lessons_block
@@ -142,7 +142,14 @@ _PLAN_JSON_SCHEMA: dict[str, Any] = {
 
 class PlannerLoopError(RuntimeError):
     """A hard failure from the planner agent loop. Always hard: there is
-    no partial-plan artifact worth proceeding with."""
+    no partial-plan artifact worth proceeding with.
+
+    `limit` is set when the cause was a provider limit (rate or quota); see
+    forge/agents/roles/dev_loop.py's DevLoopError."""
+
+    def __init__(self, message: str = "", *, limit: ProviderLimit | None = None) -> None:
+        super().__init__(message)
+        self.limit = limit
 
 
 def _build_prompt_text(
@@ -444,7 +451,7 @@ async def run_planner(
             try:
                 result = await run_agent_loop(config, [Message(role="user", content=blocks)])
             except LlmError as exc:
-                raise PlannerLoopError(f"Planner agent loop failed: {exc}") from exc
+                raise PlannerLoopError(f"Planner agent loop failed: {exc}", limit=provider_limit_of(exc)) from exc
 
             api_duration_ms += result.api_duration_ms
             record_run_outcome(run_id, planner_turns=result.turns_used)
@@ -509,7 +516,7 @@ async def run_planner(
                 last_detail = result.error_message or f"no structured plan produced (terminal_reason={result.terminal_reason!r})"
                 if result.is_error:
                     logger.warning("Planner attempt %d/%d failed run_id=%s: %s", attempt, max_attempts, run_id, last_detail)
-                    raise PlannerLoopError(f"Planner agent loop failed: {last_detail}")
+                    raise PlannerLoopError(f"Planner agent loop failed: {last_detail}", limit=result.limit)
 
             logger.warning("Planner attempt %d/%d failed run_id=%s: %s", attempt, max_attempts, run_id, last_detail)
             if attempt >= max_attempts:

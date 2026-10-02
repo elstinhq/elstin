@@ -400,6 +400,13 @@ function StoryDetailBody({ projectId, story, activityEnabled }: { projectId: num
       <DetailRow label="Parent story">{story.parent_key || "— (top-level)"}</DetailRow>
       <DetailRow label="Wave">{`W${story.wave}`}</DetailRow>
       {story.parked_reason ? <DetailRow label="Parked reason">{story.parked_reason}</DetailRow> : null}
+      {story.parked_reason === "usage_limit" ? (
+        <DetailRow label="Provider limit">
+          {story.retry_at
+            ? `The provider said the limit lifts at ${new Date(story.retry_at).toLocaleString()}; forge retries this story then. The story stays failed until it does.`
+            : "The provider did not say when the limit lifts, so nothing is scheduled. Retry once it has (or add credit)."}
+        </DetailRow>
+      ) : null}
       <DetailRow label="Branch">{story.branch}</DetailRow>
       <PriorWorkRow prior={story.prior_work} />
       <DetailRow label="Gate approved">{story.gate_approved ? "Yes" : "No"}</DetailRow>

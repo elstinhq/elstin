@@ -41,10 +41,13 @@ from forge.llm.errors import (
     LlmConnectionError,
     LlmContextOverflowError,
     LlmError,
+    LlmQuotaError,
     LlmRateLimitError,
     LlmServerError,
     LlmTimeoutError,
     is_context_overflow_message,
+    is_quota_message,
+    retry_after_seconds,
 )
 from forge.llm.types import (
     ContentBlock,
@@ -122,6 +125,19 @@ def resolve_reasoning_effort(model: str, effort: str | None) -> str | None:
     return None
 
 
+def _limit_error(exc: APIStatusError, *, quota: bool = False) -> LlmQuotaError | LlmRateLimitError:
+    """A 429 (or 402) as the limit it is. OpenAI answers an account with no
+    credit left with a 429 too, coded `insufficient_quota`: waiting seconds
+    cannot fix that, so it is told apart from a rate limit, which can. The
+    reset time, when the provider gives one, comes from its headers or message."""
+    message = str(exc)
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    wait = retry_after_seconds(headers, message)
+    if quota or getattr(exc, "code", None) == "insufficient_quota" or is_quota_message(message):
+        return LlmQuotaError(message, retry_after_seconds=wait)
+    return LlmRateLimitError(message, retry_after_seconds=wait)
+
+
 class OpenAiCompatProvider:
     """Adapter for OpenAI's own API and any OpenAI-compatible endpoint
     (pass `base_url` to reach one). One instance per (api_key, base_url)
@@ -176,7 +192,7 @@ class OpenAiCompatProvider:
         except AuthenticationError as exc:
             raise LlmAuthError(str(exc)) from exc
         except RateLimitError as exc:
-            raise LlmRateLimitError(str(exc)) from exc
+            raise _limit_error(exc) from exc
         except APITimeoutError as exc:
             raise LlmTimeoutError(str(exc)) from exc
         except APIConnectionError as exc:
@@ -188,6 +204,9 @@ class OpenAiCompatProvider:
         except APIStatusError as exc:
             if exc.status_code >= 500:
                 raise LlmServerError(str(exc)) from exc
+            # 402: a gateway out of credit for this key (OpenRouter's answer).
+            if exc.status_code == 402:
+                raise _limit_error(exc, quota=True) from exc
             # 413: the request body itself is too big for the gateway —
             # the same remedy (a smaller history) applies.
             if exc.status_code == 413 or is_context_overflow_message(str(exc)):
