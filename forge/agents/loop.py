@@ -357,6 +357,12 @@ class LoopConfig:
     # final user message and never kept in `history`. Return "" to append
     # nothing this turn. See point 5 in the module docstring.
     trailing_reminder: Callable[[], str] | None = None
+    # Called at the start of every turn, off the event loop; each string it
+    # returns joins the conversation as a user message before that turn's request
+    # and — unlike the trailing reminder — stays in `history`, so it is part of
+    # what a resumed run sees. How a person's message reaches an agent that is
+    # already working (forge/services/guidance.py). Must not raise.
+    pending_messages: Callable[[], list[str]] | None = None
     on_block: ActivityCallback | None = None
     on_turn: TurnCallback | None = None
     # Called before each retry of a failed model call: (attempt that failed,
@@ -744,6 +750,15 @@ async def run_agent_loop(config: LoopConfig, initial_messages: list[Message]) ->
             history, pruned = _compact_history(history, config.compaction_keep_recent_turns, reminder_indexes=reminder_indexes)
             if pruned:
                 logger.info("Compacted history: tombstoned %d block(s) older than the last %d turn(s)", pruned, config.compaction_keep_recent_turns)
+
+        if config.pending_messages:
+            try:
+                incoming = await asyncio.to_thread(config.pending_messages)
+            except Exception:  # noqa: BLE001 — a caller's hook is never worth the run
+                logger.warning("pending_messages raised — continuing without it this turn", exc_info=True)
+                incoming = []
+            for text in incoming:
+                history.append(Message(role="user", content=[TextBlock(text=text)]))
 
         reminder = ""
         if config.trailing_reminder:

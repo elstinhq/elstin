@@ -20,6 +20,7 @@ import { Button } from "../ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Label } from "../ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
+import { GuidanceForm } from "./GuidanceForm";
 
 export interface DetailTarget {
   kind: "epic" | "story";
@@ -424,6 +425,7 @@ function StoryDetailBody({ projectId, story, activityEnabled }: { projectId: num
         </DetailRow>
       ) : null}
       <StoryUsagePanel storyKey={story.jira_key} />
+      {story.status === "dispatched" && story.kind !== "qa" ? <GuidanceForm storyKey={story.jira_key} /> : null}
       <ActivityFeed storyKey={story.jira_key} enabled={activityEnabled} />
     </>
   );

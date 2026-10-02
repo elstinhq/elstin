@@ -443,6 +443,38 @@ dev did.
   5 minutes, off the event loop, and never raises. It does not reclaim the epic's
   integration worktrees.
 
+## Messaging a running agent
+
+`services/guidance.py`. Cancel used to be the only control on a running story: a
+person who watched dev head the wrong way could stop it, not say "use the helper
+that already exists".
+
+- **Send:** `POST /api/stories/{key}/guidance {message}` (the "Message the agent"
+  box in the story's details while it runs). `409` unless the story is
+  `dispatched` **and** its run is live in this process (`live_run_keys()` — a
+  crashed daemon leaves stories `dispatched` with nobody reading), or it is a QA
+  story (a single review call, no agent loop). At most `MAX_GUIDANCE_CHARS` (4000)
+  per message and `MAX_PENDING_GUIDANCE` (10) unread per story.
+- **Queue:** `stories.pending_guidance` (`[{text, at}]`, migration `20260930_0033`),
+  filled and drained through StateManager (`add_story_guidance`,
+  `take_story_guidance`; row-locked, so a message is delivered once and never lost).
+  Durable, so nothing lives in the process's memory.
+- **Delivery:** `LoopConfig.pending_messages` is called at the start of every turn
+  (off the event loop); each string joins the conversation as a user message
+  *before* that turn's request and — unlike the trailing reminder — stays in
+  `history`, so a resumed run still has it. Dev and the planner wire it
+  (`take_guidance`, which also writes "The agent read N messages from a person" to
+  the feed); explorers do not. A message lands between two steps, never mid-thought.
+- **Advice, not authority.** The message is framed so: dev can still write only the
+  files its plan names (`path_guard`), and is told to answer in words when asked for
+  something outside them. Nothing about scope, gates or budgets changes.
+- **What was never read** (the run ended first) is cleared in `_run_or_resume_story`'s
+  `finally` and reported in the feed, text included, so the person can send it again
+  where it still applies. It is never carried into a retry or fix round, where it
+  would be stale.
+- The message goes through `redact` (it is in the activity feed); the agent is shown
+  it as typed.
+
 ## Cancelling a run
 
 `POST /api/stories/{key}/cancel` (the **Cancel run** button on a running story)
@@ -1252,7 +1284,7 @@ LangGraph checkpointer creates its own tables on first use
 | Config | `/api/config` | Global settings CRUD |
 | Projects | `/api/projects` | Projects (DELETE removes one and everything forge holds for it), repos (cloned from a URL or attached from a local folder — `forge/services/repo_clone.py`), overrides, ticket filter (+ `/preview`, `/sync`) |
 | Epics | `/api/epics` | Sync from JIRA, assign repo, manual gate |
-| Stories | `/api/stories` | Approve gate, re-plan a plan waiting for approval (`/replan`, answers kept), set kind, get story, get plan |
+| Stories | `/api/stories` | Approve gate, re-plan a plan waiting for approval (`/replan`, answers kept), set kind, get story, get plan, message the running agent (`/guidance`) |
 
 There is no “start run” endpoint: sync epic (by key, or by the project's
 ticket filter) → assign repo → daemon dispatches when reconciler says ready
@@ -1420,6 +1452,7 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | Deleting a project (its tickets, clones, settings — local only) | `daemon/project_removal.py`, `state/manager_project.py`'s `delete_project_records` |
 | What the agents are told about a repo (its AGENTS.md, or one forge generates) | `services/project_guide.py`; routes in `api/project_routes.py` |
 | Lessons proposed from finished runs | `services/lessons.py` (capture), `state/manager_lesson.py` |
+| A person's message to a running agent | `services/guidance.py`, `agents/loop.py`'s `pending_messages`, `api/run_routes.py`'s `send_guidance`, `state/manager_story.py` |
 | Persistence API | `state/manager_*.py` + Alembic |
 | UI | `ui-src/src/` (React/TS); rebuild with `cd ui-src && npm run build` |
 | Tests | Mirror package under `tests/`; extend `fake_agents` if graph entry points change |

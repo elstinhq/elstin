@@ -61,6 +61,11 @@ planning. `?replan=true` forces the fresh plan even then — the way to say the
 plan itself is what went wrong. A story the daemon parked on a provider limit
 is retried the same way by the daemon itself once the limit lifts.
 
+Guidance: POST /{key}/guidance sends a message to the agent while it works. It
+waits in the story's queue and the agent reads it at the start of its next turn
+(forge/services/guidance.py); advice, not authority — dev still writes only the
+plan's files. 409 when no agent run is in progress to read it.
+
 Plan: the planner's structured plan (feature_summary, plan_markdown,
 files_to_create/modify, acceptance_criteria, ...) lives only inside the
 story's LangGraph checkpoint (forge/db/models/gameplan.py's docstring on
@@ -81,7 +86,7 @@ from typing import Literal
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from jira import JIRAError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from forge.config.store import resolve_bool_config
 from forge.daemon.main import (
@@ -92,9 +97,11 @@ from forge.orchestration.graph import checkpointer_from_url, compile_graph
 from forge.orchestration.reconciler import Blocked
 from forge.services.activity_stream import iter_events
 from forge.services.epic_sync import relevel_epic, sync_story_from_jira
+from forge.services.guidance import MAX_GUIDANCE_CHARS
 from forge.services.run_activity import append_activity, list_activity
 from forge.services.usage import get_run_outcome, get_story_usage
 from forge.state.manager import StateManager
+from forge.state.manager_story import GuidanceQueueFull
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +135,10 @@ class PriorBranchPickRequest(BaseModel):
     # A branch the prior-work lookup offered for that repo, or None to start
     # fresh from the epic branch.
     branch: str | None = None
+
+
+class GuidanceRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=MAX_GUIDANCE_CHARS)
 
 
 class ClarificationAnswerRequest(BaseModel):
@@ -300,6 +311,35 @@ async def cancel_story_run(story_key: str) -> dict:
     if not await cancel_run(story_key):
         raise HTTPException(status_code=409, detail=f"{story_key} has no run in progress")
     return _story_with_pr(sm, story_key)
+
+
+@router.post("/{story_key}/guidance")
+def send_guidance(story_key: str, body: GuidanceRequest) -> dict:
+    """Send a message to the agent working on this story. It is read at the start
+    of the agent's next turn, so it lands between two steps, not mid-thought. 409
+    when there is no agent run in progress in this process to read it — a story
+    waiting for approval, merging, or finished has nothing to steer, and a QA run
+    has no agent loop (it is a single review call)."""
+    sm = StateManager()
+    story = sm.get_story(story_key)
+    if story is None:
+        raise HTTPException(status_code=404, detail=f"No such story: {story_key}")
+    text = body.message.strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="The message is empty")
+    if story.get("kind") == "qa":
+        raise HTTPException(status_code=409, detail=f"{story_key} is a QA story: its review has no agent to message")
+    if story["status"] != "dispatched" or story_key not in live_run_keys():
+        raise HTTPException(status_code=409, detail=f"{story_key} has no agent run in progress to message")
+    try:
+        pending = sm.add_story_guidance(story_key, text)
+    except GuidanceQueueFull:
+        raise HTTPException(
+            status_code=409,
+            detail="The agent has not read the messages already waiting for it — wait for it to catch up",
+        ) from None
+    append_activity(story_key, type="status", phase="system", title="Message sent to the agent", detail=text)
+    return {"story_key": story_key, "pending": pending}
 
 
 @router.post("/{story_key}/retry")

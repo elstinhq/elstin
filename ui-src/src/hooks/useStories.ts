@@ -66,6 +66,14 @@ export function useCancelStory(projectId: number) {
   });
 }
 
+// Not followed by a refetch of the epic list: a message changes nothing on the
+// board, only the story's activity feed, which is pushed.
+export function useSendGuidance() {
+  return useMutation({
+    mutationFn: ({ storyKey, message }: { storyKey: string; message: string }) => api.sendGuidance(storyKey, message),
+  });
+}
+
 export function useSetStoryKind(projectId: number) {
   const queryClient = useQueryClient();
   return useMutation({

@@ -8,6 +8,16 @@ from forge.db.engine import session_scope
 from forge.db.models import Epic, ProjectRepo, Story, StoryWorktree
 
 
+# Messages a person may have waiting for one story's agent at once. The agent
+# reads them at the start of its next turn; a run that has not got to its next
+# turn in this many messages is not one a person is steering.
+MAX_PENDING_GUIDANCE = 10
+
+
+class GuidanceQueueFull(Exception):
+    """The story already has MAX_PENDING_GUIDANCE unread messages."""
+
+
 class _StoryMixin:
     def create_story(
         self,
@@ -99,6 +109,33 @@ class _StoryMixin:
                 # whatever failure caused it no longer applies.
                 story.failure_stage = failure_stage
                 story.retry_at = retry_at
+
+    def add_story_guidance(self, jira_key: str, text: str) -> int | None:
+        """Queue a person's message for the story's running agent; returns how
+        many are now waiting, or None for an unknown story. Raises
+        GuidanceQueueFull past MAX_PENDING_GUIDANCE."""
+        with session_scope() as session:
+            story = session.get(Story, jira_key, with_for_update=True)
+            if story is None:
+                return None
+            pending = list(story.pending_guidance or [])
+            if len(pending) >= MAX_PENDING_GUIDANCE:
+                raise GuidanceQueueFull(jira_key)
+            pending.append({"text": text, "at": datetime.now(timezone.utc).isoformat()})
+            story.pending_guidance = pending  # a new list: in-place changes to a JSON column are not tracked
+            return len(pending)
+
+    def take_story_guidance(self, jira_key: str) -> list[dict]:
+        """Remove and return every message waiting for the story's agent, oldest
+        first. Atomic: a message added while this runs is in this batch or the
+        next, never lost and never delivered twice."""
+        with session_scope() as session:
+            story = session.get(Story, jira_key, with_for_update=True)
+            if story is None or not story.pending_guidance:
+                return []
+            taken = list(story.pending_guidance)
+            story.pending_guidance = None
+            return taken
 
     def list_stories_waiting_on_a_limit(self, now: datetime | None = None) -> list[dict]:
         """Failed stories parked on a provider limit whose retry time has come

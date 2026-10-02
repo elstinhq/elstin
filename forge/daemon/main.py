@@ -903,8 +903,27 @@ async def _run_or_resume_story(sm: StateManager, epic: dict, story: dict, *, res
             _unwind_failed_run(sm, story_key, previous)
             raise
     finally:
+        _discard_unread_guidance(sm, story_key)
         release_run(story_key)
     return True
+
+
+def _discard_unread_guidance(sm: StateManager, story_key: str) -> None:
+    """Messages a person sent to the agent that it had not read when the run
+    ended arrived too late to matter, and a later pass (a retry, a fix round)
+    would find them stale. They are cleared, and the activity feed says so and
+    keeps the text, so the person can send it again where it still applies."""
+    try:
+        unread = sm.take_story_guidance(story_key)
+        if unread:
+            append_activity(
+                story_key, type="status", phase="system",
+                title=f"{len(unread)} message{'s' if len(unread) != 1 else ''} to the agent arrived after its last turn and "
+                      f"{'were' if len(unread) != 1 else 'was'} not read",
+                detail="\n\n".join(item["text"] for item in unread)[:4000],
+            )
+    except Exception:  # noqa: BLE001 — housekeeping; the run's own outcome stands
+        logger.exception("story %s: could not clear the unread messages to its agent", story_key)
 
 
 def _unwind_failed_run(sm: StateManager, story_key: str, previous: tuple[str, str | None, bool]) -> None:

@@ -186,6 +186,9 @@ export const api = {
   replanStory: (storyKey: string) => request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/replan`, { method: "POST" }),
   // Stops a run in flight; the story is left failed ("cancelled") so Retry starts it over.
   cancelStory: (storyKey: string) => request<Story>(`/api/stories/${encodeURIComponent(storyKey)}/cancel`, { method: "POST" }),
+  // A message to the agent working on a story; it reads it at the start of its next turn.
+  sendGuidance: (storyKey: string, message: string) =>
+    request<{ story_key: string; pending: number }>(`/api/stories/${encodeURIComponent(storyKey)}/guidance`, json({ message })),
   setStoryKind: (storyKey: string, kind: string) =>
     request<{ story_key: string; kind: string; epic_key: string }>(
       `/api/stories/${encodeURIComponent(storyKey)}/kind`,

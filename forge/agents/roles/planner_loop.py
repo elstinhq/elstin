@@ -56,6 +56,7 @@ from forge.config.store import get_bool_config, get_config, get_float_config, ge
 from forge.llm.errors import LlmError, ProviderLimit, provider_limit_of
 from forge.llm.registry import LlmNotConfiguredError, get_provider
 from forge.llm.types import ImageBlock, LlmResponse, Message, ResponseFormat, TextBlock
+from forge.services.guidance import take_guidance
 from forge.services.lessons import format_lessons_block
 from forge.services.run_activity import append_activity
 from forge.services.usage import effective_budget_usd, record_phase_usage, record_run_outcome, turn_usage_meta
@@ -436,6 +437,9 @@ async def run_planner(
             # concurrently. No progress_tools/max_idle_turns: planning
             # never modifies files, so an idle-turn budget is meaningless.
             read_only_tools=READ_ONLY_TOOLS,
+            # A person's messages to this run, read at the start of the next
+            # turn (forge/services/guidance.py).
+            pending_messages=(lambda: take_guidance(run_id, phase="planner")) if run_id else None,
             on_block=_on_block,
             on_turn=_on_turn,
             on_retry=_on_retry,

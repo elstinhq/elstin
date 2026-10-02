@@ -211,6 +211,12 @@ class Story(Base):
     # _resume_stories_past_their_limit.
     retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Messages a person sent to this story's running agent that it has not read
+    # yet — [{text, at}], oldest first. The agent takes them at the start of its
+    # next turn (forge/services/guidance.py); whatever is left when the run ends is
+    # cleared and reported. NULL: nothing waiting.
+    pending_guidance: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
     # Set when the verifier's only blocker across every iteration was a
     # coverage-threshold miss (tests passed; coverage percentage below the
     # repo's bar) — see forge/tools/vue_tools.py's coverage-only-failure
