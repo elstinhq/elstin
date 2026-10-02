@@ -66,6 +66,7 @@ from forge.agents.roles.qa import run_epic_qa
 from forge.agents.roles.verifier import format_gate_feedback, run_deterministic_gate, run_verifier
 from forge.orchestration.state import FeatureRunState
 from forge.services.generation import GenerationError
+from forge.services.memory_usage import measured
 from forge.services.run_activity import append_activity
 from forge.services.usage import record_run_outcome
 
@@ -244,16 +245,19 @@ async def gate_node(state: FeatureRunState) -> dict:
     attempts = state.get("gate_attempts", 0)
     max_attempts = state.get("max_gate_attempts") or DEFAULT_MAX_GATE_ATTEMPTS
 
-    gate = await run_deterministic_gate(
-        plan=state.get("plan", {}),
-        worktree_path=worktree_path,
-        file_changes=state.get("file_changes", []),
-        project_path=state.get("project_path"),
-        run_id=run_id or None,
-        prior_build_runner=state.get("dev_build_runner") or None,
-        story_worktrees=state.get("story_worktrees") or None,
-        default_label=state.get("default_repo_label") or "",
-        declared_unchanged=state.get("declared_unchanged") or None,
+    gate = await measured(
+        run_id or None,
+        run_deterministic_gate(
+            plan=state.get("plan", {}),
+            worktree_path=worktree_path,
+            file_changes=state.get("file_changes", []),
+            project_path=state.get("project_path"),
+            run_id=run_id or None,
+            prior_build_runner=state.get("dev_build_runner") or None,
+            story_worktrees=state.get("story_worktrees") or None,
+            default_label=state.get("default_repo_label") or "",
+            declared_unchanged=state.get("declared_unchanged") or None,
+        ),
     )
 
     record_run_outcome(run_id, gate_runs=1, gate_failures=0 if gate.get("passed") else 1)
@@ -510,16 +514,19 @@ async def qa_node(state: FeatureRunState) -> dict:
         append_activity(run_id, type="status", phase="qa", title="Entering epic QA")
 
     try:
-        result = await run_epic_qa(
-            qa_story=qa_context.get("qa_story", {}),
-            epic=qa_context["epic"],
-            dev_stories=qa_context.get("dev_stories", []),
-            branch_diff=qa_context.get("branch_diff", {}),
-            other_repo_diffs=qa_context.get("other_repo_diffs") or None,
-            worktree_path=worktree_path,
-            project_path=state["project_path"],
-            run_id=run_id or None,
-            project_id=state.get("project_id"),
+        result = await measured(
+            run_id or None,
+            run_epic_qa(
+                qa_story=qa_context.get("qa_story", {}),
+                epic=qa_context["epic"],
+                dev_stories=qa_context.get("dev_stories", []),
+                branch_diff=qa_context.get("branch_diff", {}),
+                other_repo_diffs=qa_context.get("other_repo_diffs") or None,
+                worktree_path=worktree_path,
+                project_path=state["project_path"],
+                run_id=run_id or None,
+                project_id=state.get("project_id"),
+            ),
         )
     except GenerationError as exc:
         # Same reasoning as verifier_node's catch above.

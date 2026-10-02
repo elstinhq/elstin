@@ -20,6 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from forge.tools import process_monitor
 from forge.tools.agent_env import agent_environment
 
 
@@ -364,14 +365,12 @@ def build_output_patterns(worktree_path: str) -> list[str]:
 def run(cmd: list[str], *, cwd: str, timeout: int, input: str | None = None) -> dict:
     """Shared subprocess runner for per-language hooks (dart_tools.py,
     java_tools.py, vue_tools.py) — consistent timeout/output-capping
-    behavior, and the environment the worktree's profiles ask for
-    (`profile_command_env`).
+    behavior, the environment the worktree's profiles ask for
+    (`profile_command_env`), and a measurement of the memory the command's
+    process tree used (forge/tools/process_monitor.py).
     `input` is sent on stdin."""
     try:
-        proc = subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True, check=False, timeout=timeout, env=profile_command_env(cwd),
-            input=input,
-        )
+        proc = process_monitor.run(cmd, cwd=cwd, timeout=timeout, env=profile_command_env(cwd), input=input)
     except subprocess.TimeoutExpired as exc:
         return {
             "passed": False,

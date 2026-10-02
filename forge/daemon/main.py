@@ -74,6 +74,7 @@ from forge.services.ticket_source import get_ticket_source, ticket_source_config
 from forge.services.usage import record_run_outcome
 from forge.daemon.worktree_retention import maybe_reclaim
 from forge.services.provider_limit import USAGE_LIMIT_REASON, plan_parking
+from forge.services.memory_usage import measured
 from forge.state.manager import StateManager
 from forge.tools.codebase_skeleton import build_workspace_skeleton
 from forge.tools.git_tools import (
@@ -1718,15 +1719,18 @@ async def _land_story(sm: StateManager, epic: dict, story: dict) -> None:
     # 2. Verify the combined code — only when something new came in: with
     #    nothing new, the gate the story already passed saw exactly this.
     if updated:
-        gate = await run_deterministic_gate(
-            plan=state.get("plan") or {},
-            worktree_path=state.get("worktree_path") or targets[0]["worktree_path"],
-            file_changes=state.get("file_changes") or [],
-            run_id=story_key,
-            prior_build_runner=state.get("dev_build_runner") or None,
-            story_worktrees=state.get("story_worktrees") or None,
-            default_label=default_label,
-            declared_unchanged=state.get("declared_unchanged") or None,
+        gate = await measured(
+            story_key,
+            run_deterministic_gate(
+                plan=state.get("plan") or {},
+                worktree_path=state.get("worktree_path") or targets[0]["worktree_path"],
+                file_changes=state.get("file_changes") or [],
+                run_id=story_key,
+                prior_build_runner=state.get("dev_build_runner") or None,
+                story_worktrees=state.get("story_worktrees") or None,
+                default_label=default_label,
+                declared_unchanged=state.get("declared_unchanged") or None,
+            ),
         )
         if not gate.get("passed"):
             attempt = int(story.get("merge_attempts") or 0) + 1

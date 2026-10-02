@@ -78,6 +78,16 @@ class StoryRunOutcome(Base):
     # Tier 1 and the reviewer still judged incomplete.
     verifier_rejections: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
+    # --- machine load ---
+    # The most memory one command of this run's reached — the child and every
+    # process it spawned, resident memory summed — and the command that reached
+    # it (forge/tools/process_monitor.py, forge/services/memory_usage.py). What
+    # `max_parallel_stories` should be set from: three runs peaking at 3 GB do not
+    # fit on a 8 GB machine. NULL is "not measured", never "zero" — a run from before
+    # this existed, or one that ran no command.
+    peak_memory_mb: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    peak_memory_command: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
     # The last RunStatus this run reported (forge/orchestration/state.py).
     # Nullable because a run abandoned mid-flight never reports one, and
     # that absence is itself a signal worth keeping.

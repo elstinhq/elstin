@@ -43,6 +43,7 @@ from typing import Any
 from forge.agents.roles.dev_loop import run_dev
 from forge.agents.roles.verifier import run_deterministic_gate
 from forge.config.store import get_config, resolve_text
+from forge.services.memory_usage import measured
 from forge.services.run_activity import activity_label, append_activity
 from forge.tools.workspace import labels_in_plan
 from forge.tools.worktree import WorktreeError, create_scratch_worktree, discard_worktree, run_git, variant_worktree_path
@@ -262,12 +263,15 @@ async def run_dev_variants(
             if attempt.result is None:
                 continue
             try:
-                attempt.gate = await run_deterministic_gate(
-                    plan=plan, worktree_path=attempt.worktree_path, file_changes=attempt.result.get("file_changes") or [],
-                    project_path=project_path, run_id=None,
-                    prior_build_runner=attempt.result.get("dev_build_runner") or None,
-                    story_worktrees={default_label: {**story_entry, "worktree_path": attempt.worktree_path}},
-                    default_label=default_label, declared_unchanged=attempt.result.get("declared_unchanged") or None,
+                attempt.gate = await measured(
+                    run_id,
+                    run_deterministic_gate(
+                        plan=plan, worktree_path=attempt.worktree_path, file_changes=attempt.result.get("file_changes") or [],
+                        project_path=project_path, run_id=None,
+                        prior_build_runner=attempt.result.get("dev_build_runner") or None,
+                        story_worktrees={default_label: {**story_entry, "worktree_path": attempt.worktree_path}},
+                        default_label=default_label, declared_unchanged=attempt.result.get("declared_unchanged") or None,
+                    ),
                 )
             except asyncio.CancelledError:
                 raise

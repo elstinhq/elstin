@@ -1172,6 +1172,31 @@ StateManager (hard constraint #1's documented exception):
   "measured as zero" are different claims and the UI must not conflate
   them.
 
+A third thing is recorded on the same `story_run_outcomes` row: **how heavy the run's
+commands were** (`peak_memory_mb`, `peak_memory_command`). forge runs up to
+`max_parallel_stories` stories at once and each runs builds — a JVM, a Node process and
+whatever they spawn — so whether three fit on the machine is a question about memory.
+
+- **Measured by** `tools/process_monitor.py`'s `run`: `subprocess.run` (same result, same
+  `TimeoutExpired`, same kill on a timeout) that also samples the child's whole process
+  tree every 0.5 s with `psutil` and keeps the highest sum of resident set sizes. Shared
+  pages count once per process, so it is an upper bound on what the tree adds — the right
+  one for "will three of these fit". A spike shorter than the interval can be missed.
+- **Attributed** with `services/memory_usage.py`'s `measured(run_id, awaitable)` /
+  `measured_run(run_id)`, a ContextVar that follows the work into `asyncio.to_thread`:
+  the gate (`gate_node`, the merge-time re-check, a competing attempt's judging), the dev
+  loop and its finalising hooks, and epic QA. Commands run through `language_hooks.run`,
+  `safe_shell.run_safe_command` and the Dart profile all go through it; outside a
+  measured run nothing is sampled.
+- **Kept as a maximum** (`usage.record_run_peak_memory`, migration `20260930_0034`),
+  with the command that reached it, shown in the story's details. `NULL` is "not
+  measured" — a run from before this, or one that ran no command — never zero.
+- **Only measured.** Nothing is paused, throttled or killed for using memory. A ceiling
+  belongs here once these numbers show where it should sit; until then they are for
+  setting `max_parallel_stories`.
+- `psutil` is a dependency; a host where it cannot read a process measures nothing and
+  the command is unaffected.
+
 `gate_failures` vs `verifier_rejections` is the pair to watch. Tier 1
 exists to catch a broken build before the LLM reviewer is paid for one, so
 it is working when the first is high and the second is low. If neither
@@ -1462,7 +1487,9 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
     it, never a branch inside it.
 12. Commands that execute a worktree's code take their environment from
     `language_hooks.profile_command_env` (`tools/agent_env.py`), never the
-    daemon's by omission. Enforced by `tests/test_architecture.py`.
+    daemon's by omission — and run through `tools/process_monitor.run` (which
+    requires `env=`) so their memory is measured. Enforced by
+    `tests/test_architecture.py`.
 
 ## Not built yet (do not assume)
 
@@ -1483,6 +1510,7 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | Goal | Start here |
 |------|------------|
 | New language support | `tools/*_tools.py` + `language_hooks.py` |
+| How much memory a run's commands used (peak per run) | `tools/process_monitor.py`, `services/memory_usage.py`, `services/usage.py`'s `record_run_peak_memory` |
 | What environment a build/test/agent command sees | `tools/agent_env.py`, `language_hooks.profile_command_env` |
 | Sync / levels / kind | `services/epic_sync.py`, `services/story_kind.py` |
 | Filter-based ingestion | `services/jira_filter.py`, `daemon/ticket_sync.py` |

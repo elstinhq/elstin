@@ -188,14 +188,19 @@ def test_tools_that_run_repo_code_always_pass_an_environment():
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
+            # process_monitor.run is subprocess.run that also measures memory
+            # (forge/tools/process_monitor.py): the same rule applies to it.
+            spawners = {
+                "subprocess": ("run", "Popen", "check_output", "check_call"),
+                "process_monitor": ("run",),
+            }
             is_spawn = (
                 isinstance(func, ast.Attribute)
                 and isinstance(func.value, ast.Name)
-                and func.value.id == "subprocess"
-                and func.attr in ("run", "Popen", "check_output", "check_call")
+                and func.attr in spawners.get(func.value.id, ())
             )
             if is_spawn and not any(kw.arg == "env" for kw in node.keywords):
-                offenders.append(f"forge/{rel_module}:{node.lineno}: subprocess.{func.attr} without env=")
+                offenders.append(f"forge/{rel_module}:{node.lineno}: {func.value.id}.{func.attr} without env=")
     assert offenders == [], (
         "Commands that run repo code must pass env=language_hooks.profile_command_env(<worktree>). "
         f"Offenders: {offenders}"

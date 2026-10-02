@@ -196,6 +196,25 @@ def record_run_outcome(
     logger.info("run outcome run_id=%s %s", run_id, counters)
 
 
+def record_run_peak_memory(run_id: str | None, *, peak_memory_mb: int, command: str) -> None:
+    """Keep the highest memory any command of this run has reached. A maximum,
+    not a counter: a smaller figure never replaces a larger one. Best-effort like
+    the counters beside it — telemetry never fails a run."""
+    if not run_id or peak_memory_mb <= 0:
+        return
+    try:
+        with session_scope() as session:
+            row = session.execute(select(StoryRunOutcome).where(StoryRunOutcome.run_id == run_id)).scalar_one_or_none()
+            if row is None:
+                row = StoryRunOutcome(run_id=run_id, **{name: 0 for name in _OUTCOME_COUNTERS})
+                session.add(row)
+            if row.peak_memory_mb is None or peak_memory_mb > row.peak_memory_mb:
+                row.peak_memory_mb = peak_memory_mb
+                row.peak_memory_command = command[:200]
+    except Exception as exc:  # noqa: BLE001 — telemetry must not fail a run
+        logger.warning("could not record peak memory for run_id=%s: %s", run_id, exc)
+
+
 def get_run_outcome(run_id: str) -> dict[str, Any] | None:
     """This run's work counters, or None when nothing was ever recorded.
 
@@ -215,6 +234,9 @@ def get_run_outcome(run_id: str) -> dict[str, Any] | None:
             **{name: getattr(row, name) for name in _OUTCOME_COUNTERS},
             "dev_terminal_reason": row.dev_terminal_reason,
             "outcome": row.outcome,
+            # None: not measured (see StoryRunOutcome.peak_memory_mb).
+            "peak_memory_mb": row.peak_memory_mb,
+            "peak_memory_command": row.peak_memory_command,
         }
 
 

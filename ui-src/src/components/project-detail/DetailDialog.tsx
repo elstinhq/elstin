@@ -320,6 +320,24 @@ function RunOutcomeRow({ story }: { story: Story }) {
   );
 }
 
+// The most memory one of this run's commands reached — the build or test run
+// and everything it spawned. What max_parallel_stories should be set from:
+// stories that peak at 3 GB each do not fit three at a time on an 8 GB machine.
+// A run that was never measured (older than the measurement, or ran no command)
+// shows nothing rather than "0".
+function PeakMemoryRow({ story }: { story: Story }) {
+  const mb = story.run_outcome?.peak_memory_mb;
+  if (mb == null) return null;
+  const size = mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`;
+  const command = story.run_outcome?.peak_memory_command;
+  return (
+    <DetailRow label="Peak memory">
+      {size}
+      {command ? <span className="text-muted-foreground font-mono text-xs"> — {command}</span> : null}
+    </DetailRow>
+  );
+}
+
 // "Not this plan", short of approving it: the story is planned again from
 // scratch. Answers already given are kept — they are decisions — and the new
 // run is given them.
@@ -417,6 +435,7 @@ function StoryDetailBody({ projectId, story, activityEnabled }: { projectId: num
       {story.pr_open_error ? <DetailRow label="PR not opened">{story.pr_open_error}</DetailRow> : null}
       {story.status === "failed" && story.failure_stage === "run" ? <RunOutcomeRow story={story} /> : null}
       {story.retry_count ? <DetailRow label="Retries">{String(story.retry_count)}</DetailRow> : null}
+      <PeakMemoryRow story={story} />
       {story.pull_request && story.pull_request.number ? (
         <DetailRow label="Pull request">
           <a className="text-primary underline underline-offset-2" href={story.pull_request.url || "#"} target="_blank" rel="noopener noreferrer">

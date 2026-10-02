@@ -123,6 +123,10 @@ export interface RunOutcome {
   verifier_rejections: number;
   dev_terminal_reason: string | null;
   outcome: string | null;
+  // The most memory one command of this run reached, and which (forge/tools/
+  // process_monitor.py). null: not measured — not "zero".
+  peak_memory_mb: number | null;
+  peak_memory_command: string | null;
 }
 
 export type StoryStatus =

@@ -65,6 +65,7 @@ from forge.llm.registry import LlmNotConfiguredError, get_provider
 from forge.llm.types import ContentBlock, LlmResponse, history_from_json, history_to_json, text_message
 from forge.services.guidance import take_guidance
 from forge.services.lessons import format_lessons_block, plan_paths
+from forge.services.memory_usage import measured
 from forge.services.run_activity import append_activity
 from forge.services.usage import effective_budget_usd, record_phase_usage, record_run_outcome, turn_usage_meta
 from forge.tools import language_hooks
@@ -514,7 +515,7 @@ async def run_dev(
         )
 
         try:
-            result = await run_agent_loop(config, initial_messages)
+            result = await measured(run_id, run_agent_loop(config, initial_messages))
         except LlmError as exc:
             raise DevLoopError(f"Dev agent loop failed: {exc}", limit=provider_limit_of(exc)) from exc
 
@@ -558,8 +559,8 @@ async def run_dev(
 
         logger.info("Dev loop finished run_id=%s truncated=%s turns=%d", run_id, truncated, result.turns_used)
 
-        file_changes, dev_verify_state = await asyncio.to_thread(
-            _finalize_dev_changes, write_roots, plan, default_label
+        file_changes, dev_verify_state = await measured(
+            run_id, asyncio.to_thread(_finalize_dev_changes, write_roots, plan, default_label),
         )
     finally:
         if run_id:
