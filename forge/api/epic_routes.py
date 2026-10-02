@@ -9,10 +9,13 @@ poll_once backfills any that still slip through) — the endpoint below only
 exists for a human override, never a required setup step."""
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from typing import Literal
+
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from jira import JIRAError
 from pydantic import BaseModel
 
+from forge.daemon.main import run_epic_finish
 from forge.daemon.ticket_removal import TicketBusy, TicketNotFound, TicketRemovalError, remove_epic as remove_epic_ticket
 from forge.orchestration.reconciler import display_epic_phase
 from forge.services.epic_sync import sync_epic_fields_from_jira, sync_epic_from_jira
@@ -33,6 +36,12 @@ class EpicRepoRequest(BaseModel):
 
 class EpicGateRequest(BaseModel):
     manual_gate: bool
+
+
+class EpicPrDecision(BaseModel):
+    # open: push the epic branch and open its pull request. skip: keep the branch
+    # local and complete the epic without one.
+    action: Literal["open", "skip"]
 
 
 def _story_with_pr(sm: StateManager, story_key: str) -> dict:
@@ -191,4 +200,23 @@ def set_epic_gate(epic_key: str, body: EpicGateRequest) -> dict:
     if sm.get_epic(epic_key) is None:
         raise HTTPException(status_code=404, detail=f"No such epic: {epic_key}")
     sm.set_epic_manual_gate(epic_key, body.manual_gate)
+    return get_epic(epic_key)
+
+
+@router.post("/{epic_key}/pr-approval")
+def decide_epic_pr(epic_key: str, body: EpicPrDecision, background_tasks: BackgroundTasks) -> dict:
+    """The person's answer to an epic waiting to open its pull request
+    (`require_pr_approval`, forge/daemon/main.py's _finish_epic). `open` pushes the
+    epic branch and opens the pull request — in the background, since a push can
+    take a while; the epic's `pr_approval` reads "approved" at once and the pull
+    request shows when it is open. `skip` completes the epic with its branch kept
+    local. 409 when the epic is not waiting for a decision."""
+    sm = StateManager()
+    epic = sm.get_epic(epic_key)
+    if epic is None:
+        raise HTTPException(status_code=404, detail=f"No such epic: {epic_key}")
+    if epic.get("pr_approval") != "awaiting":
+        raise HTTPException(status_code=409, detail=f"{epic_key} is not waiting for a decision about its pull request")
+    sm.set_epic_pr_approval(epic_key, "approved" if body.action == "open" else "skipped")
+    background_tasks.add_task(run_epic_finish, epic_key)
     return get_epic(epic_key)

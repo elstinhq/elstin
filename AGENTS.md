@@ -419,6 +419,36 @@ Before any of an epic's branches exist, forge looks (git only, no model —
   from the epic branch and goes back to `pending`
   (`send_back_to_planning`, questions and answers cleared).
 
+## The PR gate
+
+The epic's branch is the only thing forge pushes to GitHub, and a pull request is
+visible to other people. `require_pr_approval` (settings → Workflow; off by default,
+project-overridable) puts a person between "every story merged" and "the branch is
+pushed".
+
+- **Held:** `_finish_epic` parks the epic as `pr_approval = "awaiting"`
+  (`epics.pr_approval`, migration `20260930_0035`) instead of pushing, and writes
+  "All stories merged — waiting for approval to open the pull request" once. The epic
+  stays in its phase, so it keeps being polled and stays on the board with an
+  "Awaiting PR approval" tag and an Open / Keep local prompt. Nothing leaves the
+  machine; the branch is ready locally.
+- **Decided:** `POST /api/epics/{key}/pr-approval {action: "open" | "skip"}`. `open`
+  records `approved` and pushes and opens the PR in the background (a push can be
+  slow); an approved epic whose push fails stays approved and is retried by the poll,
+  never asked again. `skip` records `skipped` and completes the epic with its branch
+  kept local and no pull request. `409` unless the epic is awaiting; `404` / `422` as
+  usual.
+- **Only when there is something to ask:** no hold when GitHub is not configured (the
+  epic already ends "ready locally") or when no repo has commits to propose.
+- **Manual-run projects** have no poll, so the decision runs the finish itself
+  (`run_epic_finish`) — which is also how an approval is acted on at once in auto-run
+  ones.
+- **A person's `skip` is final:** the epic completes without a PR even if the setting is
+  turned off afterwards. Turning the setting off while an epic *waits* lets the poll open
+  its PR (a gate that is off no longer asks).
+- **Serialized per epic** under `_epic_merge_lock`, re-reading the epic inside it: the poll
+  and an approval can arrive together, and only one may open the pull request.
+
 ## Reclaiming finished worktrees
 
 `daemon/worktree_retention.py`. Every story gets a full checkout per repo it
@@ -1008,7 +1038,8 @@ like a credential (`SECRET_NAME_RE`). A profile's `command_env` is applied on to
   (`integration_paths`). `stories.merge_attempts` caps it at
   `_MAX_MERGE_ATTEMPTS`; then `failed` / `failure_stage="merge"`, whose
   Retry re-attempts only the landing.
-- **The epic's pull request** (`_finish_epic`): once every story is
+- **The epic's pull request** (`_finish_epic`; held for approval when
+  `require_pr_approval` is on — see "The PR gate"): once every story is
   merged/done/skipped, the epic branch is pushed and one PR opened into the
   default branch per repo with changes (`epic_pull_requests`); its body
   lists each story, coverage gaps, already-satisfied declarations and the
@@ -1359,7 +1390,7 @@ LangGraph checkpointer creates its own tables on first use
 |------|--------|----------|
 | Config | `/api/config` | Global settings CRUD |
 | Projects | `/api/projects` | Projects (DELETE removes one and everything forge holds for it), repos (cloned from a URL or attached from a local folder — `forge/services/repo_clone.py`), overrides, ticket filter (+ `/preview`, `/sync`) |
-| Epics | `/api/epics` | Sync from JIRA, assign repo, manual gate |
+| Epics | `/api/epics` | Sync from JIRA, assign repo, manual gate, decide the held pull request (`/pr-approval`) |
 | Stories | `/api/stories` | Approve gate, re-plan a plan waiting for approval (`/replan`, answers kept), set kind, get story, get plan, message the running agent (`/guidance`) |
 
 There is no “start run” endpoint: sync epic (by key, or by the project's
@@ -1523,6 +1554,7 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | Competing dev attempts after repeated gate failures | `agents/roles/dev_variants.py`, `orchestration/graph.py`'s `gate_node`/`variants_node`, `tools/worktree.py`'s `create_scratch_worktree` |
 | A model call refused on a rate/quota limit (classification, parking, auto-retry) | `llm/errors.py`, `llm/openai_compat.py`, `agents/loop.py`, `services/provider_limit.py`, `daemon/main.py`'s `_resume_stories_past_their_limit` |
 | Retry: plan again vs. resume at dev/review | `daemon/main.py`'s `arm_resume_after_failure` (`arm_resume_at_dev`), `state/manager_story.py`'s `retry_story`, `api/run_routes.py` |
+| Holding the epic's pull request for approval | `daemon/main.py`'s `_finish_epic`/`run_epic_finish`, `api/epic_routes.py`'s `decide_epic_pr`, `components/project-detail/PrApprovalPrompt.tsx` |
 | Dispatch / PR / CI | `daemon/main.py`, `orchestration/integration.py` |
 | Where a branch starts (existing work for a ticket) | `services/prior_work.py` (git), `daemon/prior_work_lookup.py` (when, storage, planner view) |
 | Read-only repos and reference folders (what runs read, what plans may change) | `tools/reference_folder.py`, `tools/workspace.py`'s `Workspace.read_only`, `agents/roles/plan_gate.py`, `daemon/main.py`'s `_workspace_roots` |

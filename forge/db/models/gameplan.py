@@ -79,6 +79,12 @@ class Epic(Base):
     # column default stays false for rows created before that contract.
     manual_gate: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
+    # Whether the epic's pull request may open, when `require_pr_approval` is on
+    # (forge/daemon/main.py's _finish_epic): NULL = not asked yet, "awaiting" =
+    # every story merged and a person has not decided, "approved" = open it,
+    # "skipped" = keep the branch local and complete without a pull request.
+    pr_approval: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
     # Where this ticket came from — see alembic revision 20260920_0020.
     # `external_source` is NULL for a ticket created natively on the board.
     # `external_hash` digests the content as last applied, so a later sync

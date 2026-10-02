@@ -428,6 +428,10 @@ export interface Epic {
   pull_requests: EpicPullRequest[];
   plan_approved: boolean;
   manual_gate: boolean;
+  // With "Hold the epic's pull request for approval" on: "awaiting" once every story
+  // has merged and nobody has decided yet; "approved" (open it) or "skipped" (keep the
+  // branch local) after. null when no decision was ever asked for.
+  pr_approval: "awaiting" | "approved" | "skipped" | null;
   external_source: string | null;
   external_id: string | null;
   external_status: string | null;

@@ -140,6 +140,15 @@ class _EpicMixin:
             if epic is not None:
                 epic.manual_gate = manual_gate
 
+    def set_epic_pr_approval(self, jira_key: str, value: str | None) -> None:
+        """"awaiting" | "approved" | "skipped" | None — see Epic.pr_approval."""
+        if value not in (None, "awaiting", "approved", "skipped"):
+            raise ValueError(f"unknown PR approval state: {value!r}")
+        with session_scope() as session:
+            epic = session.get(Epic, jira_key)
+            if epic is not None:
+                epic.pr_approval = value
+
     def set_epic_prior_work(self, jira_key: str, prior_work: dict | None) -> None:
         """The lookup for the epic's own key (forge/services/prior_work.py),
         or None to look again."""
@@ -192,6 +201,7 @@ def _epic_to_dict(session, epic: Epic) -> dict:
         "prior_work": epic.prior_work,
         "plan_approved": epic.plan_approved,
         "manual_gate": epic.manual_gate,
+        "pr_approval": epic.pr_approval,
         "external_source": epic.external_source,
         "external_id": epic.external_id,
         "external_synced_at": epic.external_synced_at.isoformat() if epic.external_synced_at else None,

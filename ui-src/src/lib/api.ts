@@ -161,6 +161,9 @@ export const api = {
     request<RemoveTicketReport>(`/api/epics/${encodeURIComponent(epicKey)}`, { method: "DELETE" }),
   setEpicGate: (epicKey: string, manualGate: boolean) =>
     request<Epic>(`/api/epics/${encodeURIComponent(epicKey)}/gate`, put({ manual_gate: manualGate })),
+  // The answer to an epic waiting to open its pull request: open it, or keep the branch local.
+  decideEpicPr: (epicKey: string, action: "open" | "skip") =>
+    request<Epic>(`/api/epics/${encodeURIComponent(epicKey)}/pr-approval`, json({ action })),
   // Forget what was found for tickets not started yet; the next poll looks again.
   refreshPriorWork: (epicKey: string) =>
     request<Epic>(`/api/epics/${encodeURIComponent(epicKey)}/prior-work/refresh`, { method: "POST" }),

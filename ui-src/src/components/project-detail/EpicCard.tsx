@@ -1,6 +1,7 @@
 import { Pause, Play, RefreshCw } from "lucide-react";
 import { PhaseTagFor, Tag } from "../shared/StatusTag";
 import { Twisty } from "../shared/Twisty";
+import { PrApprovalPrompt } from "./PrApprovalPrompt";
 import { RemoveEpicButton } from "./RemoveEpicButton";
 import { StoryRow } from "./StoryRow";
 import { useRefreshPriorWork, useSetEpicGate } from "../../hooks/useEpics";
@@ -124,6 +125,9 @@ export function EpicCard({
           )}
 
           {epic.manual_gate ? <Tag label="Paused" appearance="warning" /> : null}
+          {epic.pr_approval === "awaiting" ? (
+            <Tag label="Awaiting PR approval" appearance="warning" title="Every story has merged; nothing is pushed until you open the pull request or keep the branch local." />
+          ) : null}
           {epic.external_closed ? (
             <Tag label="closed in source" appearance="secondary" title="The source reports this epic closed, so forge put it on hold. Resume it to keep going." />
           ) : null}
@@ -146,6 +150,7 @@ export function EpicCard({
         </div>
 
         <div className={cn("flex flex-col gap-4", isCollapsed && "hidden")}>
+          <PrApprovalPrompt projectId={projectId} epic={epic} />
           <div className="flex items-center gap-3">
             <Progress value={pct} className="flex-1" indicatorClassName="bg-success" />
             <span className="text-muted-foreground text-xs whitespace-nowrap">

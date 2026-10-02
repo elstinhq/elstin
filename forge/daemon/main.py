@@ -1448,11 +1448,66 @@ async def _finish_epic(sm: StateManager, epic: dict) -> None:
     epic's phase to "pr_open" once its pull request is open, or "complete"
     when there is nothing to propose or nowhere to propose it (GitHub not
     configured) — the epic branch is then ready locally. A push or API
-    failure leaves the phase alone, so the next poll tries again."""
-    phase = await asyncio.to_thread(_open_epic_pull_requests, sm, epic)
-    if phase is not None:
-        sm.set_epic_phase(epic["jira_key"], phase)
-        logger.info("epic %s -> %s", epic["jira_key"], phase)
+    failure leaves the phase alone, so the next poll tries again.
+
+    With `require_pr_approval` on, nothing is pushed first: the epic parks as
+    "awaiting" until a person decides (`decide_epic_pr`) to open the pull request
+    or to keep the branch local. The decision is the person's alone — an epic
+    that is "skipped" completes without one even if the setting is turned off.
+
+    Serialized per epic: the poll and a person's approval can arrive together,
+    and two of them must not both open a pull request."""
+    epic_key = epic["jira_key"]
+    async with _epic_merge_lock(epic_key):
+        epic = await asyncio.to_thread(sm.get_epic, epic_key)
+        if epic is None or epic["phase"] in ("pr_open", "merged"):
+            return  # removed meanwhile, or another caller already opened it
+        branch = epic.get("integration_branch")
+        decision = epic.get("pr_approval")
+
+        if decision == "skipped":
+            append_activity(
+                epic_key, type="status", phase="system", title=f"Epic complete: {branch} kept locally",
+                detail="No pull request was opened, as chosen.",
+            )
+            sm.set_epic_phase(epic_key, "complete")
+            logger.info("epic %s -> complete (pull request skipped)", epic_key)
+            return
+
+        if (
+            decision != "approved"
+            and resolve_bool_config("require_pr_approval", epic["project_id"])
+            and GitHubService.is_configured()  # nowhere to propose it otherwise: nothing to ask about
+            and await asyncio.to_thread(_repos_worth_proposing, sm, epic)
+        ):
+            if decision != "awaiting":
+                sm.set_epic_pr_approval(epic_key, "awaiting")
+                append_activity(
+                    epic_key, type="status", phase="system",
+                    title="All stories merged — waiting for approval to open the pull request",
+                    detail=f"{branch} is ready locally and nothing has been pushed. Open the pull request, "
+                           "or keep the branch local and skip it.",
+                )
+                logger.info("epic %s: waiting for approval to open its pull request", epic_key)
+            return
+
+        phase = await asyncio.to_thread(_open_epic_pull_requests, sm, epic)
+        if phase is not None:
+            sm.set_epic_phase(epic_key, phase)
+            logger.info("epic %s -> %s", epic_key, phase)
+
+
+async def run_epic_finish(epic_key: str) -> None:
+    """`_finish_epic` for an API route's background task, after a person decided
+    about the pull request. Never raises: a failure is logged and the poll tries
+    again (an approved epic that did not open stays approved)."""
+    try:
+        sm = StateManager()
+        epic = await asyncio.to_thread(sm.get_epic, epic_key)
+        if epic is not None:
+            await _finish_epic(sm, epic)
+    except Exception:  # noqa: BLE001
+        logger.exception("epic %s: could not act on the pull request decision", epic_key)
 
 
 def _epic_repos(sm: StateManager, epic: dict) -> list[tuple[str, str]]:
@@ -1474,10 +1529,17 @@ def _commits_ahead(repo_path: str, branch: str) -> int:
     return int(count.stdout.strip() or 0) if count.returncode == 0 else 0
 
 
+def _repos_worth_proposing(sm: StateManager, epic: dict) -> list[tuple[str, str]]:
+    """(label, repo path) for each repo whose epic branch carries commits the
+    default branch lacks — the ones there is something to open a pull request for."""
+    branch = epic.get("integration_branch")
+    return [(label, path) for label, path in _epic_repos(sm, epic) if branch and _commits_ahead(path, branch)]
+
+
 def _open_epic_pull_requests(sm: StateManager, epic: dict) -> str | None:
     epic_key = epic["jira_key"]
     branch = epic.get("integration_branch")
-    worth = [(label, path) for label, path in _epic_repos(sm, epic) if branch and _commits_ahead(path, branch)]
+    worth = _repos_worth_proposing(sm, epic)
     if not worth:
         append_activity(epic_key, type="status", phase="system", title="Epic complete: no changes to propose")
         return "complete"

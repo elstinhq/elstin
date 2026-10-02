@@ -123,6 +123,14 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         False, "true", "bool",
     ),
     ConfigField("require_plan_approval", "Require plan approval before dev starts", False, "true", "bool"),
+    # forge/daemon/main.py's _finish_epic: the epic's branch is the only thing forge
+    # pushes to GitHub, and a pull request is visible to other people.
+    ConfigField(
+        "require_pr_approval",
+        "Hold the epic's pull request for approval: once every story has merged, the epic branch stays local and "
+        "nothing is pushed until someone chooses to open the pull request (or to keep the branch local and skip it)",
+        False, "false", "bool",
+    ),
     # Stories an epic's dependencies allow to run at once do run at once, up to
     # this many across every epic (runs and merges both count — each one runs
     # a build). The rest start on a later poll as slots free up.
@@ -258,7 +266,7 @@ CONFIG_CATEGORIES: tuple[ConfigCategory, ...] = (
     ),
     ConfigCategory(
         "workflow", "Workflow", "How stories are picked up, approved and run.",
-        ("auto_run_enabled", "require_plan_approval", "max_parallel_stories", "generate_project_guide", "capture_lessons"),
+        ("auto_run_enabled", "require_plan_approval", "require_pr_approval", "max_parallel_stories", "generate_project_guide", "capture_lessons"),
     ),
     ConfigCategory(
         "planner", "Planner", "Reads the code and writes the plan, with optional investigation agents.",
@@ -319,6 +327,7 @@ PROJECT_OVERRIDABLE_KEYS = frozenset({
     "jira_write_enabled",
     "auto_run_enabled",
     "require_plan_approval",
+    "require_pr_approval",
     "generate_project_guide",
     "capture_lessons",
     "ticket_hold_statuses",

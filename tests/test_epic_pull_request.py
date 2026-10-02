@@ -277,3 +277,230 @@ async def test_a_lessons_read_failure_never_costs_the_pull_request(git_repo, tmp
     body = daemon._epic_pr_body(sm, sm.get_epic("ENG-1"))
 
     assert "## How this was built" in body and "Lessons" not in body
+
+
+# --- the PR gate (`require_pr_approval`) ----------------------------------------------
+#
+# The epic branch is the only thing forge pushes to GitHub, and a pull request is
+# visible to other people. With the gate on, an epic whose stories have all merged
+# parks as "awaiting" and nothing leaves the machine until a person decides.
+
+
+def _client():
+    from fastapi.testclient import TestClient
+
+    from forge.app import create_app
+
+    return TestClient(create_app())
+
+
+def _decide(epic_key: str, action: str):
+    with _client() as client:
+        return client.post(f"/api/epics/{epic_key}/pr-approval", json={"action": action})
+
+
+async def _merged_and_held(sm: StateManager) -> None:
+    set_config("require_pr_approval", "true")
+    await _run_to_merged(sm)
+    await poll_once(sm, wait=True)  # every story merged -> the gate holds it
+
+
+def _titles(epic_key: str) -> list[str]:
+    from forge.services.run_activity import list_activity
+
+    return [e["title"] for e in list_activity(epic_key)]
+
+
+async def test_with_the_gate_on_nothing_is_pushed_and_the_epic_waits_for_a_person(git_repo, tmp_path, project_id, monkeypatch, github):
+    sm = _setup(tmp_path, project_id, git_repo, monkeypatch)
+
+    await _merged_and_held(sm)
+
+    assert _FakeGitHub.created == [] and github == []
+    epic = sm.get_epic("ENG-1")
+    assert epic["pr_approval"] == "awaiting" and epic["phase"] not in ("pr_open", "complete")
+    assert "ENG-1" in sm.list_active_epic_keys()
+    waiting = "All stories merged — waiting for approval to open the pull request"
+    assert _titles("ENG-1").count(waiting) == 1
+
+    await poll_once(sm, wait=True)
+    await poll_once(sm, wait=True)  # still waiting: asked once, not every poll
+    assert _titles("ENG-1").count(waiting) == 1 and _FakeGitHub.created == [] and github == []
+
+
+async def test_the_gate_is_off_by_default_and_the_pull_request_opens_as_before(git_repo, tmp_path, project_id, monkeypatch, github):
+    sm = _setup(tmp_path, project_id, git_repo, monkeypatch)
+    await _run_to_merged(sm)
+    await poll_once(sm, wait=True)
+    assert len(_FakeGitHub.created) == 1 and sm.get_epic("ENG-1")["pr_approval"] is None
+
+
+async def test_approving_opens_the_pull_request(git_repo, tmp_path, project_id, monkeypatch, github):
+    sm = _setup(tmp_path, project_id, git_repo, monkeypatch)
+    await _merged_and_held(sm)
+
+    response = _decide("ENG-1", "open")
+
+    assert response.status_code == 200 and response.json()["pr_approval"] == "approved"
+    assert len(_FakeGitHub.created) == 1 and github == [integration_branch_name("ENG-1")]
+    assert sm.get_epic("ENG-1")["phase"] == "pr_open"
+    [row] = sm.list_epic_pull_requests("ENG-1")
+    assert row["number"] == 1 and row["error"] is None
+
+
+async def test_declining_completes_the_epic_with_its_branch_kept_local(git_repo, tmp_path, project_id, monkeypatch, github):
+    sm = _setup(tmp_path, project_id, git_repo, monkeypatch)
+    await _merged_and_held(sm)
+
+    response = _decide("ENG-1", "skip")
+
+    assert response.status_code == 200 and response.json()["pr_approval"] == "skipped"
+    assert _FakeGitHub.created == [] and github == []
+    assert sm.get_epic("ENG-1")["phase"] == "complete"
+    assert "ENG-1" not in sm.list_active_epic_keys()
+    assert f"Epic complete: {integration_branch_name('ENG-1')} kept locally" in _titles("ENG-1")
+    assert sm.list_epic_pull_requests("ENG-1") == []
+    # the branch is still there, locally
+    import subprocess
+
+    branches = subprocess.run(["git", "-C", git_repo, "branch", "--list"], capture_output=True, text=True).stdout
+    assert integration_branch_name("ENG-1") in branches
+
+
+async def test_a_decline_stands_even_if_the_gate_is_turned_off_afterwards(git_repo, tmp_path, project_id, monkeypatch, github):
+    sm = _setup(tmp_path, project_id, git_repo, monkeypatch)
+    await _merged_and_held(sm)
+    sm.set_epic_pr_approval("ENG-1", "skipped")
+    set_config("require_pr_approval", "false")
+
+    await poll_once(sm, wait=True)
+
+    assert _FakeGitHub.created == [] and sm.get_epic("ENG-1")["phase"] == "complete"
+
+
+async def test_turning_the_gate_off_while_an_epic_waits_lets_it_open(git_repo, tmp_path, project_id, monkeypatch, github):
+    sm = _setup(tmp_path, project_id, git_repo, monkeypatch)
+    await _merged_and_held(sm)
+
+    set_config("require_pr_approval", "false")
+    await poll_once(sm, wait=True)
+
+    assert len(_FakeGitHub.created) == 1 and sm.get_epic("ENG-1")["phase"] == "pr_open"
+
+
+async def test_a_project_can_hold_its_pull_requests_while_others_do_not(git_repo, tmp_path, project_id, monkeypatch, github):
+    sm = _setup(tmp_path, project_id, git_repo, monkeypatch)
+    set_project_config(project_id, "require_pr_approval", "true")  # the global setting stays off
+    await _run_to_merged(sm)
+
+    await poll_once(sm, wait=True)
+
+    assert _FakeGitHub.created == [] and sm.get_epic("ENG-1")["pr_approval"] == "awaiting"
+
+
+async def test_a_project_can_opt_out_when_the_global_setting_holds_everything(git_repo, tmp_path, project_id, monkeypatch, github):
+    sm = _setup(tmp_path, project_id, git_repo, monkeypatch)
+    set_config("require_pr_approval", "true")
+    set_project_config(project_id, "require_pr_approval", "false")
+    await _run_to_merged(sm)
+
+    await poll_once(sm, wait=True)
+
+    assert len(_FakeGitHub.created) == 1
+
+
+async def test_with_no_github_there_is_nothing_to_approve(git_repo, tmp_path, project_id, monkeypatch, github):
+    """Nowhere to propose the branch: the epic ends ready locally as it always did,
+    without asking for permission to do nothing."""
+    _FakeGitHub.configured = False
+    sm = _setup(tmp_path, project_id, git_repo, monkeypatch)
+
+    await _merged_and_held(sm)
+
+    epic = sm.get_epic("ENG-1")
+    assert epic["phase"] == "complete" and epic["pr_approval"] is None
+
+
+async def test_with_nothing_to_propose_there_is_nothing_to_approve(git_repo, tmp_path, project_id, monkeypatch, github):
+    import forge.daemon.main as daemon
+
+    sm = _setup(tmp_path, project_id, git_repo, monkeypatch)
+    monkeypatch.setattr(daemon, "_repos_worth_proposing", lambda sm_, epic_: [])
+
+    await _merged_and_held(sm)
+
+    epic = sm.get_epic("ENG-1")
+    assert epic["phase"] == "complete" and epic["pr_approval"] is None
+    assert "Epic complete: no changes to propose" in _titles("ENG-1")
+
+
+async def test_an_approved_epic_whose_push_fails_stays_approved_and_is_retried(git_repo, tmp_path, project_id, monkeypatch, github):
+    import forge.daemon.main as daemon
+
+    sm = _setup(tmp_path, project_id, git_repo, monkeypatch)
+    await _merged_and_held(sm)
+    monkeypatch.setattr(daemon, "push_branch", lambda path, branch: (False, "permission denied"))
+
+    _decide("ENG-1", "open")
+
+    [row] = sm.list_epic_pull_requests("ENG-1")
+    assert row["error"] == "git push failed: permission denied"
+    assert sm.get_epic("ENG-1")["pr_approval"] == "approved"  # not asked again
+
+    monkeypatch.setattr(daemon, "push_branch", lambda path, branch: (True, None))
+    await poll_once(sm, wait=True)
+
+    assert len(_FakeGitHub.created) == 1 and sm.get_epic("ENG-1")["phase"] == "pr_open"
+    assert _titles("ENG-1").count("All stories merged — waiting for approval to open the pull request") == 1
+
+
+async def test_the_poll_and_an_approval_arriving_together_open_one_pull_request(git_repo, tmp_path, project_id, monkeypatch, github):
+    import asyncio
+
+    import forge.daemon.main as daemon
+
+    sm = _setup(tmp_path, project_id, git_repo, monkeypatch)
+    await _merged_and_held(sm)
+    sm.set_epic_pr_approval("ENG-1", "approved")
+
+    await asyncio.gather(*(daemon._finish_epic(sm, sm.get_epic("ENG-1")) for _ in range(4)))
+
+    assert len(_FakeGitHub.created) == 1 and len(github) == 1
+
+
+async def test_a_manual_run_project_is_held_too_and_approval_opens_it(git_repo, tmp_path, project_id, monkeypatch, github):
+    """No poll visits a manual project's epics, so the approval itself has to do the work."""
+    sm = _setup(tmp_path, project_id, git_repo, monkeypatch, stories=("ENG-2",))
+    set_project_config(project_id, "auto_run_enabled", "false")
+    set_config("require_pr_approval", "true")
+
+    for _ in range(2):  # dispatch, then merge
+        epic = sm.get_epic("ENG-1")
+        await execute_story_action(sm, epic, check_story_action(sm, epic, "ENG-2"))
+
+    assert sm.get_story("ENG-2")["status"] == "merged"
+    assert _FakeGitHub.created == [] and sm.get_epic("ENG-1")["pr_approval"] == "awaiting"
+
+    assert _decide("ENG-1", "open").status_code == 200
+
+    assert len(_FakeGitHub.created) == 1 and sm.get_epic("ENG-1")["phase"] == "pr_open"
+
+
+async def test_there_is_nothing_to_decide_unless_the_epic_is_waiting(git_repo, tmp_path, project_id, monkeypatch, github):
+    sm = _setup(tmp_path, project_id, git_repo, monkeypatch)
+
+    assert _decide("ENG-1", "open").status_code == 409  # still implementing
+    assert _decide("NOPE-1", "open").status_code == 404
+    await _merged_and_held(sm)
+    assert _decide("ENG-1", "maybe").status_code == 422
+    assert _decide("ENG-1", "open").status_code == 200
+    assert _decide("ENG-1", "skip").status_code == 409  # already decided
+    assert len(_FakeGitHub.created) == 1  # the second answer changed nothing
+
+
+async def test_the_setting_is_a_workflow_setting_a_project_may_override():
+    from forge.config.store import CONFIG_CATEGORIES, PROJECT_OVERRIDABLE_KEYS, get_config
+
+    assert get_config("require_pr_approval") == "false"
+    assert "require_pr_approval" in PROJECT_OVERRIDABLE_KEYS
+    assert "require_pr_approval" in next(c for c in CONFIG_CATEGORIES if c.id == "workflow").keys
