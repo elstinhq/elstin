@@ -58,6 +58,9 @@ from contextlib import asynccontextmanager
 from langgraph.graph import END, START, StateGraph
 
 from forge.agents.roles.dev_loop import DevLoopError, run_dev
+from forge.agents.roles.dev_variants import (
+    failures_before_variants, not_eligible_reason, run_dev_variants, variant_count,
+)
 from forge.agents.roles.planner_loop import PlannerLoopError, run_planner
 from forge.agents.roles.qa import run_epic_qa
 from forge.agents.roles.verifier import format_gate_feedback, run_deterministic_gate, run_verifier
@@ -302,13 +305,83 @@ async def gate_node(state: FeatureRunState) -> dict:
     feedback = format_gate_feedback(
         gate, attempt=attempts, max_attempts=max_attempts, wrote_nothing=not state.get("file_changes"),
     )
-    logger.warning("gate failed run_id=%s attempt=%d/%d -> dev: %s", run_id, attempts, max_attempts, "; ".join(map(str, blockers[:5])))
+    # Repairing the same attempt a third time rarely rescues a wrong approach.
+    # When the project asks for it (dev_variants, off by default), several fresh
+    # attempts run side by side instead, and the gate picks the best.
+    project_id = state.get("project_id")
+    compete = (
+        variant_count(project_id) >= 2
+        and attempts == failures_before_variants(project_id)
+        and not_eligible_reason(state) is None
+    )
+    logger.warning(
+        "gate failed run_id=%s attempt=%d/%d -> %s: %s", run_id, attempts, max_attempts,
+        "competing attempts" if compete else "dev", "; ".join(map(str, blockers[:5])),
+    )
     return {
         "status": "developing",
         "tier1_gate": gate,
         "gate_attempts": attempts,
         "gate_feedback": feedback,
+        "variants_pending": compete,
         "messages": [{"role": "gate", "content": f"Deterministic gate failed ({len(blockers)} blocker(s)); sent back to dev."}],
+    }
+
+
+async def variants_node(state: FeatureRunState) -> dict:
+    """Competing dev attempts after repeated gate failures (forge/agents/roles/
+    dev_variants.py). Returns to the gate with the winner adopted into the story
+    worktree, or — whenever anything goes wrong or nothing is adopted — to dev
+    exactly as the run would have gone without it. Never fails the run."""
+    run_id = state.get("run_id", "")
+    done = {"variants_pending": False, "variants_done": True}
+    reason = not_eligible_reason(state)
+    if reason:
+        logger.info("competing attempts skipped run_id=%s: %s", run_id, reason)
+        return done
+    project_id = state.get("project_id")
+    try:
+        outcome = await run_dev_variants(
+            count=variant_count(project_id),
+            plan=state.get("plan", {}),
+            context_bundle=state.get("context_bundle", {}),
+            worktree_path=state["worktree_path"],
+            project_path=state["project_path"],
+            run_id=run_id,
+            default_label=state.get("default_repo_label") or "",
+            story_worktrees=state.get("story_worktrees") or None,
+            repo_roots=state.get("repo_roots") or None,
+            read_roots=state.get("read_roots") or None,
+            read_only_labels=state.get("read_only_labels") or None,
+            story_base_refs=state.get("story_base_refs") or None,
+            sdk_model=state.get("sdk_model"),
+            sdk_effort=state.get("sdk_effort"),
+            project_id=project_id,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — a saving that failed is never a reason to fail the run
+        logger.exception("competing attempts failed run_id=%s", run_id)
+        if run_id:
+            append_activity(run_id, type="status", phase="dev", title="Competing attempts failed — carrying on with the same attempt", detail=str(exc)[:1000])
+        return done
+    if outcome is None:
+        return done
+    return {
+        **done,
+        "status": "verifying",
+        "file_changes": outcome.get("file_changes", []),
+        "truncated": outcome.get("truncated", False),
+        "messages": outcome.get("messages", []),
+        "dev_history": outcome.get("dev_history", []),
+        "dev_progress": outcome.get("dev_progress", []),
+        "declared_unchanged": outcome.get("declared_unchanged", {}),
+        "story_worktrees": outcome.get("story_worktrees", {}),
+        "dev_build_runner": outcome.get("dev_build_runner", {}),
+        # The winner earned a look, not a free pass: one more failure sends it
+        # back to dev once, a second fails the run (DEFAULT_MAX_GATE_ATTEMPTS).
+        "gate_attempts": 1,
+        "gate_feedback": None,
     }
 
 
@@ -526,10 +599,16 @@ def route_after_dev(state: FeatureRunState) -> str:
 def route_after_gate(state: FeatureRunState) -> str:
     status = state.get("status")
     if status == "developing":
-        return "dev"
+        return "variants" if state.get("variants_pending") else "dev"
     if status == "failed":
         return END
     return "verifier"
+
+
+def route_after_variants(state: FeatureRunState) -> str:
+    # An adopted winner goes through the gate in the real worktree; nothing
+    # adopted goes back to dev with the gate's feedback, as it would have.
+    return "gate" if state.get("status") == "verifying" else "dev"
 
 
 def route_after_verifier(state: FeatureRunState) -> str:
@@ -543,13 +622,17 @@ def build_graph() -> StateGraph:
     graph.add_node("planner", planner_node)
     graph.add_node("dev", dev_node)
     graph.add_node("gate", gate_node)
+    graph.add_node("variants", variants_node)
     graph.add_node("verifier", verifier_node)
     graph.add_node("qa", qa_node)
 
     graph.add_conditional_edges(START, route_entry, {"planner": "planner", "qa": "qa"})
     graph.add_conditional_edges("planner", route_after_planner, {"planner": "planner", "dev": "dev", END: END})
     graph.add_conditional_edges("dev", route_after_dev, {"gate": "gate", END: END})
-    graph.add_conditional_edges("gate", route_after_gate, {"verifier": "verifier", "dev": "dev", END: END})
+    graph.add_conditional_edges(
+        "gate", route_after_gate, {"verifier": "verifier", "dev": "dev", "variants": "variants", END: END},
+    )
+    graph.add_conditional_edges("variants", route_after_variants, {"gate": "gate", "dev": "dev"})
     graph.add_conditional_edges("verifier", route_after_verifier, {"dev": "dev", END: END})
     graph.add_edge("qa", END)
     return graph

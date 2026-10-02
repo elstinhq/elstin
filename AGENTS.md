@@ -850,6 +850,9 @@ state, not a bespoke table.
     the backend and rejected it for "no frontend diffs"), every file cut to
     its share of one budget (`_budgeted_diffs`) rather than a file count. Review fail →
     `dev` (verifier iteration budget, separate from the gate's).
+  - With `dev_variants` on, the gate failure that reaches the threshold routes to a
+    `variants` node (see "Competing dev attempts") instead of `dev`; it returns to the
+    `gate` with a winner adopted, or to `dev` having changed nothing.
   - A run that ended `completed` can be **re-entered at `dev`** by the merge
     queue: `graph.aupdate_state(..., as_node="gate")` with
     `status="developing"`, a `gate_feedback` brief and `integration_paths`,
@@ -1031,6 +1034,54 @@ like a credential (`SECRET_NAME_RE`). A profile's `command_env` is applied on to
   `forge/tools/vue_tools.py`'s coverage-only-failure detection) no longer
   stops a story: it merges, and the gap is called out in the epic's pull
   request.
+
+## Competing dev attempts
+
+`agents/roles/dev_variants.py`. A dev pass that fails the Tier 1 gate is sent back
+with the failures and repairs what it wrote. That works when the code is nearly
+right; when the approach is wrong, a second and third round on the same conversation
+rarely rescues it, and the story fails after paying for all of them. Sampling the
+model again from a clean start is a different bet, and the deterministic gate is
+exactly the judge it needs: free to run, and it says whether the code builds, passes
+the plan's tests and covers the planned files.
+
+- **Off by default** — it multiplies the dev spend of a story that is already
+  failing. `dev_variants` (1 = off, at most 4) and `dev_variants_after_gate_failures`
+  (default 2; the run fails at 3) are project-overridable.
+- **Trigger:** `gate_node` sets `variants_pending` on the failure that reaches the
+  threshold, and `route_after_gate` sends the run to the `variants` node instead of
+  back to the same conversation. At most once per run (`variants_done`).
+- **Where it is safe** (`not_eligible_reason`): a dev story, `started_clean` (the
+  daemon sets it on a fresh dispatch when the story's worktrees held no uncommitted
+  work from an earlier run — a Retry keeps that, and a scratch checkout would not
+  have it), not a landing round (`integration_paths` — the worktree holds a merge in
+  progress), and a plan that writes one repo. A run checkpointed before the flag
+  existed never competes.
+- **The attempts:** `count` detached scratch worktrees under
+  `worktrees_base_dir/_variants/` at the story branch's committed state, each with its
+  dependencies installed, and `run_dev` in each at once from the approved plan. Each
+  has its own baselines (`baseline_key`), a `1/count` share of what the story has left
+  to spend (`budget_share`, so together they stay inside `story_max_budget_usd`), does
+  not read a person's messages (`read_guidance=False`), writes to the feed under a
+  `[variant N]` label (`activity_label`, a ContextVar), and gets a different approach
+  hint so it is not the same sample twice. Their spend is recorded under the story's
+  own run id.
+- **Judging:** the gate, one attempt at a time (each is a build). Passing wins; then
+  fewer blocking issues; then the smaller change; then the lower number. Not a model —
+  it picks the attempt most likely to survive the review, not the best one.
+- **Adoption:** `adopt_changes` resets the story worktree to its committed state and
+  lays the winner's added, changed and deleted files over it (ignored files on either
+  side are left alone; a path that would leave the worktree is refused). The winner's
+  conversation becomes `dev_history`, the story's own worktree entry is put back, and
+  the run goes through the gate and the review in the real worktree. `gate_attempts` is
+  set to 1: the winner gets one repair round, not a fresh budget.
+- **Never fails the run:** a scratch worktree that will not install, every attempt
+  erroring, an exception in the node — the run carries on as it would have without it.
+  The scratch worktrees and baselines are removed in a `finally`, cancellation included.
+- **Cost to know:** each attempt installs the project's dependencies, and the attempts
+  multiply that story's dev spend by `dev_variants`. `story_run_outcomes` shows
+  `gate_failures` against `verifier_rejections` per story — the numbers that say whether
+  this is worth turning on for a project.
 
 ## Provider limits
 
@@ -1441,6 +1492,7 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | LangSmith tracing (what is traced, settings, per-project switch) | `services/tracing.py`; call sites: `daemon/main.py`'s `_invoke_graph`, `agents/loop.py`'s `_call_tool`, `llm/openai_compat.py` |
 | Graph routing / gates | `orchestration/graph.py`, `config/store.py` |
 | Per-project provider / models, the model picker | `llm/registry.py` (`get_provider`), `config/store.py` (`resolve_text`, `PROJECT_OVERRIDABLE_KEYS`), `services/model_options.py`, `components/shared/ModelCombobox.tsx` |
+| Competing dev attempts after repeated gate failures | `agents/roles/dev_variants.py`, `orchestration/graph.py`'s `gate_node`/`variants_node`, `tools/worktree.py`'s `create_scratch_worktree` |
 | A model call refused on a rate/quota limit (classification, parking, auto-retry) | `llm/errors.py`, `llm/openai_compat.py`, `agents/loop.py`, `services/provider_limit.py`, `daemon/main.py`'s `_resume_stories_past_their_limit` |
 | Retry: plan again vs. resume at dev/review | `daemon/main.py`'s `arm_resume_after_failure` (`arm_resume_at_dev`), `state/manager_story.py`'s `retry_story`, `api/run_routes.py` |
 | Dispatch / PR / CI | `daemon/main.py`, `orchestration/integration.py` |

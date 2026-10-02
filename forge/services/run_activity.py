@@ -23,6 +23,9 @@ route and the UI's rendering code, needed zero changes for this swap.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Literal
 
 from sqlalchemy import select
@@ -36,6 +39,21 @@ ActivityType = Literal["status", "thinking", "tool", "llm", "token"]
 ActivityPhase = Literal["planner", "dev", "verifier", "qa", "system"]
 
 logger = logging.getLogger("forge.activity")
+
+# Several attempts at one story can run at once (forge/agents/roles/dev_variants.py)
+# and write to the same feed. A label set around one attempt prefixes every title
+# it writes, so a reader can tell whose step is whose. A ContextVar, so it follows
+# the attempt's own task (and the threads it starts) and no other.
+_label: ContextVar[str] = ContextVar("activity_label", default="")
+
+
+@contextmanager
+def activity_label(label: str) -> Iterator[None]:
+    token = _label.set(label)
+    try:
+        yield
+    finally:
+        _label.reset(token)
 
 
 def _row_to_dict(row: ActivityEvent) -> dict[str, Any]:
@@ -70,7 +88,8 @@ def append_activity(
 
     # Tool output is stored and streamed as the agent produced it, so a command
     # that printed a credential would otherwise keep it in the feed for good.
-    title = redact(title)
+    label = _label.get()
+    title = redact(f"[{label}] {title}" if label else title)
     detail = redact(detail) if detail else detail
     meta = redact_value(meta) if meta else meta
 

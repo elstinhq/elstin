@@ -207,8 +207,18 @@ async def run_dev(
     sdk_model: str | None = None,
     sdk_effort: str | None = None,
     project_id: int | None = None,
+    baseline_key: str | None = None,
+    budget_share: float = 1.0,
+    read_guidance: bool = True,
 ) -> dict[str, Any]:
-    """gate_feedback: the Tier 1 deterministic gate's own fix message
+    """baseline_key / budget_share / read_guidance: for one of several attempts
+    at a story running at once (forge/agents/roles/dev_variants.py). Each needs
+    its own folder of file baselines (`baseline_key`, else the run id) so they do
+    not overwrite each other's; takes only `budget_share` of what the story has
+    left to spend, so together they stay inside the ceiling; and leaves a person's
+    messages for the run's main pass instead of one attempt taking them all.
+
+    gate_feedback: the Tier 1 deterministic gate's own fix message
     (forge/orchestration/graph.py's gate_node, formatted by
     forge/agents/roles/verifier.py's format_gate_feedback). When set it IS
     this iteration's brief — a ready-made "tests failed with N errors in
@@ -270,6 +280,8 @@ async def run_dev(
             "Raise the ceiling at /settings and retry the story to continue."
         )
 
+    if 0 < budget_share < 1 and dev_budget > 0:
+        dev_budget *= budget_share
     phase_started_at = time.monotonic()
     usage_totals = {"input_tokens": 0, "output_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 0}
     usage_cost_usd: float | None = None
@@ -448,7 +460,7 @@ async def run_dev(
         prompt = _build_prompt(continuing=continuing, plan=plan, context_bundle=context_bundle, brief=brief)
 
         data_dir = get_config("data_dir") or "/data"
-        baseline_dir = f"{data_dir}/baselines/{run_id}" if run_id else None
+        baseline_dir = f"{data_dir}/baselines/{baseline_key or run_id}" if (baseline_key or run_id) else None
         # Seeded from the plan on a first pass; carried forward verbatim on
         # a fix round. Mutated in place by update_progress_tool, read back
         # out below for the next round.
@@ -495,7 +507,7 @@ async def run_dev(
             trailing_reminder=lambda: render_progress(progress_items),
             # A person's messages to this run, read at the start of the next
             # turn (forge/services/guidance.py).
-            pending_messages=(lambda: take_guidance(run_id, phase="dev")) if run_id else None,
+            pending_messages=(lambda: take_guidance(run_id, phase="dev")) if run_id and read_guidance else None,
             on_block=_on_block,
             on_turn=_on_turn,
             on_retry=_on_retry,

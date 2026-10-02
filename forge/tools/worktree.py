@@ -418,6 +418,35 @@ def add_to_gitignore(worktree_path: str, entries: list[str]) -> str:
     return path
 
 
+def variant_worktree_path(worktrees_base_dir: str, story_key: str, index: int) -> str:
+    """Where a scratch worktree for one of a story's competing attempts lives:
+    under `_variants`, beside the other folders forge keeps there that are not a
+    story's own (`_reference`, `_integration-<epic>`)."""
+    return os.path.realpath(os.path.join(worktrees_base_dir, "_variants", f"{story_key.lower()}-v{index}"))
+
+
+def create_scratch_worktree(project_path: str, worktree_path: str, ref: str) -> dict:
+    """A checkout of `ref` with no branch of its own (detached), dependencies
+    installed — somewhere to try an approach that is thrown away whatever the
+    outcome. Nothing in the repo's branches changes. Raises WorktreeError when it
+    cannot be made; the caller removes it with `discard_worktree(..., None)`."""
+    if not os.path.exists(os.path.join(project_path, ".git")):
+        raise WorktreeError(f"Not a git repository: {project_path}")
+    with _repo_lock(project_path):
+        os.makedirs(os.path.dirname(worktree_path), exist_ok=True)
+        if os.path.exists(worktree_path):
+            _git(project_path, "worktree", "remove", "--force", worktree_path, check=False)
+            shutil.rmtree(worktree_path, ignore_errors=True)
+            _git(project_path, "worktree", "prune", check=False)
+        _git(project_path, "worktree", "add", "--detach", worktree_path, ref)
+        exclude_build_output(project_path, (worktree_path,))
+    dependencies = ensure_dependencies(worktree_path)
+    if not dependencies.get("passed", True):
+        detail = dependencies.get("stderr") or dependencies.get("stdout") or "dependency install failed"
+        raise WorktreeError(f"Failed to prepare scratch worktree dependencies: {detail.strip()}")
+    return {"worktree_path": worktree_path, "ref": ref, "dependencies": dependencies}
+
+
 def remove_worktree(project_path: str, worktree_path: str) -> None:
     with _repo_lock(project_path):
         _git(project_path, "worktree", "remove", "--force", worktree_path, check=False)

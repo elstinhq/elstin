@@ -398,3 +398,20 @@ async def test_a_dev_failure_resumes_at_dev_by_the_wider_road_too_and_clears_the
     assert await arm_resume_after_failure(run.sm, epic, story) == "dev"
     assert (await run.snapshot()).values["provider_limit"] is None
     assert (await run.resume())["status"] == "completed"
+
+
+async def test_the_resume_patch_leaves_a_run_waiting_on_the_competing_attempts_where_it_is(run: Run):
+    """A crash while the variants node ran leaves the checkpoint waiting on it,
+    entered from the gate like dev. Patched with no writer named, LangGraph would
+    guess a node and could move past it."""
+    await run.start(worktree_path=run.worktree_path)
+    async with checkpointer_from_url(run.postgres_url) as checkpointer:
+        graph = compile_graph(checkpointer, require_plan_approval=False)
+        await graph.aupdate_state(
+            run.config, {"status": "developing", "variants_pending": True, "gate_attempts": 2}, as_node="gate",
+        )
+        assert (await graph.aget_state(run.config)).next == ("variants",)
+
+        await _apply_resume_patch(graph, run.config, {"worktree_path": run.worktree_path})
+
+        assert (await graph.aget_state(run.config)).next == ("variants",)

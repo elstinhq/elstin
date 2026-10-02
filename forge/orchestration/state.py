@@ -132,6 +132,15 @@ class FeatureRunState(TypedDict, total=False):
     # story until the limit lifts instead of leaving it failed. Cleared when the
     # run is re-armed.
     provider_limit: dict[str, Any] | None
+    # Competing dev attempts (forge/agents/roles/dev_variants.py). `started_clean`:
+    # when the run began, the story's worktrees held no uncommitted work from an
+    # earlier run, so a winner may replace what is there (set by the daemon on a
+    # fresh dispatch; absent on a run checkpointed before it existed, which then
+    # never competes). `variants_pending`: the gate asked for them; the graph
+    # routes to the variants node. `variants_done`: tried once already this run.
+    started_clean: bool
+    variants_pending: bool
+    variants_done: bool
     approved: bool
     rejected: bool
     merge_report: dict[str, Any]

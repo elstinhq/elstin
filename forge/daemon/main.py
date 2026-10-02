@@ -1184,6 +1184,11 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
             state["story_worktrees"] = known_worktrees
             state["story_kind"] = story_kind
             state["project_id"] = epic["project_id"]
+            # Whether this run starts with nothing uncommitted in the story's
+            # worktrees from an earlier one (a Retry keeps them): only then may
+            # competing dev attempts replace what is there with a winner's files
+            # (forge/agents/roles/dev_variants.py).
+            state["started_clean"] = not earlier
             # Decisions a person already made survive a fresh run — Retry
             # after a failure starts one, and MKT2-866's re-plan otherwise
             # exported the column its answer had left out. A re-plan that
@@ -1834,7 +1839,9 @@ async def _apply_resume_patch(graph, config: dict, patch: dict) -> None:
     used."""
     snapshot = await graph.aget_state(config)
     status = (snapshot.values or {}).get("status")
-    at_dev_again = tuple(snapshot.next) == ("dev",) and status == "developing"
+    # Waiting on the variants node (a crash while it ran) is waiting on dev's
+    # work too: both are entered from the gate with status "developing".
+    at_dev_again = tuple(snapshot.next) in (("dev",), ("variants",)) and status == "developing"
     # Re-opened at review (`arm_resume_after_failure`): waiting on the gate with
     # dev's work done. Dev is the writer that leads there.
     at_review_again = tuple(snapshot.next) == ("gate",) and status == "verifying"

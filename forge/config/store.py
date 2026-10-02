@@ -158,6 +158,21 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         "By default they get PATH, HOME, locale, proxy and toolchain variables and nothing that looks like a credential",
         False, None, "string",
     ),
+    # forge/agents/roles/dev_variants.py: off (1) unless asked for, because it
+    # multiplies the dev spend of a story that is already failing.
+    ConfigField(
+        "dev_variants",
+        "Competing dev attempts (1 = off, up to 4). When the deterministic gate has failed repeatedly, instead of "
+        "repairing the same attempt again, this many fresh attempts run side by side in scratch worktrees and the gate "
+        "picks the best. Multiplies dev spend for those stories; each attempt gets a share of what the story has left, "
+        "and each installs the project's dependencies",
+        False, "1", "string",
+    ),
+    ConfigField(
+        "dev_variants_after_gate_failures",
+        "How many gate failures in a row bring in the competing attempts (default 2; the run fails at 3)",
+        False, "2", "string",
+    ),
     ConfigField("dev_sdk_effort", "Dev agent reasoning effort (low/medium/high/xhigh/max)", False, "medium", "string"),
     ConfigField("dev_sdk_max_turns", "Dev agent max turns per run (0 = unbounded)", False, "80", "string"),
     ConfigField("dev_sdk_max_budget_usd", "Dev agent max spend per run in USD (0 = unbounded)", False, "0", "string"),
@@ -258,6 +273,7 @@ CONFIG_CATEGORIES: tuple[ConfigCategory, ...] = (
         (
             "dev_sdk_model", "dev_sdk_effort", "dev_sdk_max_turns", "dev_sdk_max_budget_usd",
             "dev_sdk_max_idle_turns", "dev_web_access_enabled", "brave_search_api_key", "agent_env_passthrough",
+            "dev_variants", "dev_variants_after_gate_failures",
         ),
     ),
     ConfigCategory(
@@ -316,6 +332,9 @@ PROJECT_OVERRIDABLE_KEYS = frozenset({
     "planner_explorer_model",
     "dev_sdk_model",
     "verifier_qa_model",
+    # Whether the project pays for competing dev attempts (a cost decision).
+    "dev_variants",
+    "dev_variants_after_gate_failures",
     # Where its model calls go and as whom (forge/llm/registry.py). A project
     # that points at another endpoint must bring its own key: the global key
     # is never sent to an endpoint it was not issued for.
