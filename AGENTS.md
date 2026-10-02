@@ -903,6 +903,25 @@ and three things about the toolchain itself:
   output, with `jdk.describe` saying which JDK was used or that the stated
   one is not installed. The gate stops the run on it (above).
 
+**Environment for agent commands** (`forge/tools/agent_env.py`). Everything
+run in a worktree on an agent's behalf — the dev step's allowlisted shell, the
+gate's build/lint/test commands, the Dart analysis server — executes code the
+agent may have just written, so it gets a **minimal** environment, not the
+daemon's: `PATH`, `HOME`, locale, proxy/CA settings and the toolchain families
+(`JAVA_*`, `GRADLE_*`, `NODE_*`, `ANDROID_*`, …), minus anything whose name looks
+like a credential (`SECRET_NAME_RE`). A profile's `command_env` is applied on top.
+
+- `agent_env_passthrough` (settings → Dev agent) lists extra host variables to
+  forward (`NPM_TOKEN`, `ARTIFACTORY_*`); a listed name is forwarded even when it
+  looks like a secret, because a person asked for it by name. `DATABASE_URL` is
+  never forwarded, listed or not.
+- The setting is global, not per project: the commands run below the layer that
+  knows a project.
+- All of it goes through `language_hooks.profile_command_env(worktree)`; a new
+  subprocess in a toolchain module that omits `env=` fails
+  `tests/test_architecture.py` (hard constraint #12).
+- Forge's own git and ripgrep calls are unaffected — they execute no repo code.
+
 ## Reconciler and daemon
 
 - `forge/orchestration/reconciler.py` is a **pure** function: snapshots in,
@@ -1259,6 +1278,9 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
     `openai_compat.py` is the only module in it that may import `openai`
     — every other adapter (present or future) gets its own module next to
     it, never a branch inside it.
+12. Commands that execute a worktree's code take their environment from
+    `language_hooks.profile_command_env` (`tools/agent_env.py`), never the
+    daemon's by omission. Enforced by `tests/test_architecture.py`.
 
 ## Not built yet (do not assume)
 
@@ -1279,6 +1301,7 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | Goal | Start here |
 |------|------------|
 | New language support | `tools/*_tools.py` + `language_hooks.py` |
+| What environment a build/test/agent command sees | `tools/agent_env.py`, `language_hooks.profile_command_env` |
 | Sync / levels / kind | `services/epic_sync.py`, `services/story_kind.py` |
 | Filter-based ingestion | `services/jira_filter.py`, `daemon/ticket_sync.py` |
 | Which system tickets come from (source per project, neutral `Ticket`) | `services/ticket_source.py` — sync code calls `get_ticket_source(project_id)`, never `JiraService` directly |

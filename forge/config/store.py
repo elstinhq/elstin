@@ -139,6 +139,16 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         "Brave Search API key for the dev agent's web search (blank = fall back to DuckDuckGo, which is unofficial and can rate-limit)",
         True, None, "string",
     ),
+    # forge/tools/agent_env.py: builds, tests and the dev shell get a minimal
+    # environment, so a credential in the daemon's own never reaches code the
+    # agent wrote. A private registry's token is the usual reason to list one.
+    ConfigField(
+        "agent_env_passthrough",
+        "Extra environment variables that builds, tests and the dev agent's commands may see "
+        "(comma-separated names, a trailing * matches a prefix; e.g. NPM_TOKEN, ARTIFACTORY_*). "
+        "By default they get PATH, HOME, locale, proxy and toolchain variables and nothing that looks like a credential",
+        False, None, "string",
+    ),
     ConfigField("dev_sdk_effort", "Dev agent reasoning effort (low/medium/high/xhigh/max)", False, "medium", "string"),
     ConfigField("dev_sdk_max_turns", "Dev agent max turns per run (0 = unbounded)", False, "80", "string"),
     ConfigField("dev_sdk_max_budget_usd", "Dev agent max spend per run in USD (0 = unbounded)", False, "0", "string"),
@@ -238,7 +248,7 @@ CONFIG_CATEGORIES: tuple[ConfigCategory, ...] = (
         "dev", "Dev agent", "Writes the code from the approved plan.",
         (
             "dev_sdk_model", "dev_sdk_effort", "dev_sdk_max_turns", "dev_sdk_max_budget_usd",
-            "dev_sdk_max_idle_turns", "dev_web_access_enabled", "brave_search_api_key",
+            "dev_sdk_max_idle_turns", "dev_web_access_enabled", "brave_search_api_key", "agent_env_passthrough",
         ),
     ),
     ConfigCategory(

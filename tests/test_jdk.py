@@ -91,7 +91,8 @@ def test_every_command_in_a_java_worktree_runs_on_that_jdk(tmp_path, jdks):
 
     assert language_hooks.run(["./mvnw", "compile"], cwd=str(tmp_path), timeout=10)["stdout"].strip() == jdks["21"]
     assert safe_shell.run_safe_command(str(tmp_path), "./mvnw compile").stdout.strip() == jdks["21"]
-    assert language_hooks.profile_command_env(str(tmp_path / "elsewhere")) is None  # no profile: inherit
+    # No profile adds anything there: the minimal environment, with no JDK pinned.
+    assert language_hooks.profile_command_env(str(tmp_path / "elsewhere")).get("JAVA_HOME") is None
 
 
 # --- a failure that is the toolchain, not the code ------------------------------

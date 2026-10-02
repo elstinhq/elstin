@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from forge.tools.language_hooks import profile_command_env
+
 DART_BIN = "dart"
 LSP_TIMEOUT_SECONDS = 30
 USE_LSP = True
@@ -63,6 +65,7 @@ class DartLspSession:
             stderr=subprocess.PIPE,
             text=True,
             cwd=self.project_path,
+            env=profile_command_env(self.project_path),
         )
         root_uri = abs_path_to_uri(self.project_path)
         self._request(

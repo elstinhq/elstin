@@ -20,6 +20,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from forge.tools.agent_env import agent_environment
+
 
 @dataclass
 class VerifyContext:
@@ -339,15 +341,16 @@ def _default_verify(profile: LanguageProfile, ctx: VerifyContext) -> dict:
     }
 
 
-def profile_command_env(worktree_path: str) -> dict[str, str] | None:
-    """The environment commands in `worktree_path` run with: the process's
-    own plus every matching profile's `command_env`. None when no profile
-    adds anything, meaning "inherit"."""
+def profile_command_env(worktree_path: str) -> dict[str, str]:
+    """The environment commands in `worktree_path` run with: the process's own
+    cut down to what a toolchain needs (forge/tools/agent_env.py — no
+    credentials, no `DATABASE_URL`), plus every matching profile's
+    `command_env` on top."""
     extra: dict[str, str] = {}
     for profile in detect_profiles(worktree_path):
         if profile.command_env is not None:
             extra.update(profile.command_env(worktree_path))
-    return {**os.environ, **extra} if extra else None
+    return agent_environment(extra=extra)
 
 
 def build_output_patterns(worktree_path: str) -> list[str]:
@@ -361,7 +364,8 @@ def build_output_patterns(worktree_path: str) -> list[str]:
 def run(cmd: list[str], *, cwd: str, timeout: int, input: str | None = None) -> dict:
     """Shared subprocess runner for per-language hooks (dart_tools.py,
     java_tools.py, vue_tools.py) — consistent timeout/output-capping
-    behavior, and the environment the worktree's profiles ask for.
+    behavior, and the environment the worktree's profiles ask for
+    (`profile_command_env`).
     `input` is sent on stdin."""
     try:
         proc = subprocess.run(

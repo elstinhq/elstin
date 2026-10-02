@@ -18,7 +18,7 @@ import re
 import subprocess
 from typing import Any
 
-from forge.tools.language_hooks import LanguageProfile, VerifyContext
+from forge.tools.language_hooks import LanguageProfile, VerifyContext, profile_command_env
 
 DART_BIN = "dart"
 FLUTTER_BIN = "flutter"
@@ -89,7 +89,10 @@ def ensure_pub_dependencies(worktree_path: str) -> dict:
     cmd = [FLUTTER_BIN, "pub", "get"] if is_flutter_project(worktree_path) else [DART_BIN, "pub", "get"]
 
     try:
-        proc = subprocess.run(cmd, cwd=worktree_path, capture_output=True, text=True, check=False, timeout=timeout)
+        proc = subprocess.run(
+            cmd, cwd=worktree_path, capture_output=True, text=True, check=False, timeout=timeout,
+            env=profile_command_env(worktree_path),
+        )
     except subprocess.TimeoutExpired as exc:
         output = (exc.stdout or b"").decode("utf-8", errors="replace") if exc.stdout else ""
         err = (exc.stderr or b"").decode("utf-8", errors="replace") if exc.stderr else ""
@@ -126,7 +129,10 @@ def run_build_runner(worktree_path: str) -> dict:
     cmd = [DART_BIN, "run", "build_runner", "build", "--delete-conflicting-outputs"]
 
     try:
-        proc = subprocess.run(cmd, cwd=worktree_path, capture_output=True, text=True, check=False, timeout=timeout)
+        proc = subprocess.run(
+            cmd, cwd=worktree_path, capture_output=True, text=True, check=False, timeout=timeout,
+            env=profile_command_env(worktree_path),
+        )
     except subprocess.TimeoutExpired as exc:
         output = (exc.stdout or b"").decode("utf-8", errors="replace") if exc.stdout else ""
         err = (exc.stderr or b"").decode("utf-8", errors="replace") if exc.stderr else ""
@@ -251,7 +257,10 @@ def run_dart_analyze(worktree_path: str, files: list[str] | None = None) -> dict
         cmd.extend(targets)
 
     try:
-        proc = subprocess.run(cmd, cwd=worktree_path, capture_output=True, text=True, check=False, timeout=timeout)
+        proc = subprocess.run(
+            cmd, cwd=worktree_path, capture_output=True, text=True, check=False, timeout=timeout,
+            env=profile_command_env(worktree_path),
+        )
     except subprocess.TimeoutExpired as exc:
         output = (exc.stdout or b"").decode("utf-8", errors="replace") if exc.stdout else ""
         err = (exc.stderr or b"").decode("utf-8", errors="replace") if exc.stderr else ""
@@ -320,7 +329,10 @@ def run_flutter_test(worktree_path: str, targets: list[str] | None = None) -> di
         cmd.extend(targets)
 
     try:
-        proc = subprocess.run(cmd, cwd=worktree_path, capture_output=True, text=True, check=False, timeout=timeout)
+        proc = subprocess.run(
+            cmd, cwd=worktree_path, capture_output=True, text=True, check=False, timeout=timeout,
+            env=profile_command_env(worktree_path),
+        )
     except subprocess.TimeoutExpired as exc:
         output = (exc.stdout or b"").decode("utf-8", errors="replace") if exc.stdout else ""
         err = (exc.stderr or b"").decode("utf-8", errors="replace") if exc.stderr else ""

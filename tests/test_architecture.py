@@ -161,3 +161,42 @@ def test_tools_do_not_branch_on_a_language_name():
         "Language-specific behavior belongs in a tools/<lang>_tools.py profile registered via "
         f"language_hooks, not in a conditional in the shared tool layer. Offenders: {offenders}"
     )
+
+
+def test_tools_that_run_repo_code_always_pass_an_environment():
+    """AGENTS.md hard constraint #12: a command that executes code from a
+    worktree (a build, a test run, a language server) gets its environment
+    from `language_hooks.profile_command_env` — never the daemon's own by
+    omission. A bare `subprocess.run(cmd, cwd=...)` inherits `DATABASE_URL`
+    and every token in the shell forge was started from, which is exactly what
+    forge/tools/agent_env.py exists to keep away from code the agent wrote.
+
+    Checked per call, via the AST: every `subprocess.run`/`Popen` in the tool
+    modules that run a toolchain must name `env=`. (git, ripgrep and grep
+    calls elsewhere execute no repo code and are left alone.)"""
+    toolchain_modules = [
+        "tools/dart_tools.py", "tools/java_tools.py", "tools/vue_tools.py",
+        "tools/lsp_client.py", "tools/safe_shell.py", "tools/language_hooks.py",
+    ]
+    offenders: list[str] = []
+    for rel_module in toolchain_modules:
+        path = FORGE_ROOT / rel_module
+        if not path.exists():
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            is_spawn = (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "subprocess"
+                and func.attr in ("run", "Popen", "check_output", "check_call")
+            )
+            if is_spawn and not any(kw.arg == "env" for kw in node.keywords):
+                offenders.append(f"forge/{rel_module}:{node.lineno}: subprocess.{func.attr} without env=")
+    assert offenders == [], (
+        "Commands that run repo code must pass env=language_hooks.profile_command_env(<worktree>). "
+        f"Offenders: {offenders}"
+    )
