@@ -419,6 +419,30 @@ Before any of an epic's branches exist, forge looks (git only, no model —
   from the epic branch and goes back to `pending`
   (`send_back_to_planning`, questions and answers cleared).
 
+## Reclaiming finished worktrees
+
+`daemon/worktree_retention.py`. Every story gets a full checkout per repo it
+writes (`node_modules/`, `target/` and all), and only removing the whole ticket
+took one away. Once a story has merged, its code is on the epic branch and its own
+branch still holds every commit, so the directory is only somewhere to look at what
+dev did.
+
+- **Policy:** `worktree_retention` (settings → Git and storage; default 10, 0 =
+  keep everything) keeps the newest N finished stories' worktrees and removes the
+  rest. Newest is by worktree creation. A story already reclaimed takes no slot.
+- **What goes:** the directory and git's registration of it — never the branch
+  (`git worktree add <path> <branch>` brings it back, and a re-dispatch does exactly
+  that). The `story_worktrees` rows stay: every reader already checks the directory
+  exists.
+- **Only when safe:** the story is `merged`, `done` or `skipped`; it has no run in
+  flight; its path is under `worktrees_base_dir` (so an attached repo's own checkout
+  is never touched); and for `done`/`skipped`, the worktree is clean and carries
+  nothing the epic branch lacks. A `merged` story's commits are on the epic by
+  definition.
+- **When:** `poll_once` asks every cycle; `maybe_reclaim` answers at most every
+  5 minutes, off the event loop, and never raises. It does not reclaim the epic's
+  integration worktrees.
+
 ## Cancelling a run
 
 `POST /api/stories/{key}/cancel` (the **Cancel run** button on a running story)
@@ -1345,6 +1369,7 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | Where a branch starts (existing work for a ticket) | `services/prior_work.py` (git), `daemon/prior_work_lookup.py` (when, storage, planner view) |
 | Read-only repos and reference folders (what runs read, what plans may change) | `tools/reference_folder.py`, `tools/workspace.py`'s `Workspace.read_only`, `agents/roles/plan_gate.py`, `daemon/main.py`'s `_workspace_roots` |
 | Agent behavior | `agents/roles/*` |
+| Disk a finished story's worktree holds (retention) | `daemon/worktree_retention.py`, `state/manager_story.py`'s `list_worktrees_of_stories_in` |
 | Removing a ticket (rows, worktrees, branches, checkpoints — local only) | `daemon/ticket_removal.py`, `state/manager_removal.py`, `tools/worktree.py`'s `discard_worktree` |
 | Deleting a project (its tickets, clones, settings — local only) | `daemon/project_removal.py`, `state/manager_project.py`'s `delete_project_records` |
 | What the agents are told about a repo (its AGENTS.md, or one forge generates) | `services/project_guide.py`; routes in `api/project_routes.py` |

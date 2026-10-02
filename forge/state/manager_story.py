@@ -172,6 +172,35 @@ class _StoryMixin:
                 for r in rows
             ]
 
+    def list_worktrees_of_stories_in(self, statuses: tuple[str, ...]) -> list[dict]:
+        """Every worktree row of a story whose status is one of `statuses`,
+        newest worktree first, with what a cleanup needs to judge it: the
+        story's status and its epic's integration branch. For
+        forge/daemon/worktree_retention.py, which reclaims the disk of stories
+        that are finished."""
+        with session_scope() as session:
+            rows = (
+                session.query(StoryWorktree, Story, Epic)
+                .join(Story, Story.jira_key == StoryWorktree.story_key)
+                .join(Epic, Epic.jira_key == Story.epic_key)
+                .filter(Story.status.in_(statuses))
+                .order_by(StoryWorktree.created_at.desc(), StoryWorktree.id.desc())
+                .all()
+            )
+            return [
+                {
+                    "story_key": story.jira_key,
+                    "status": story.status,
+                    "repo_label": wt.repo_label,
+                    "repo_path": wt.repo_path,
+                    "worktree_path": wt.worktree_path,
+                    "branch": wt.branch,
+                    "integration_branch": epic.integration_branch,
+                    "created_at": wt.created_at,
+                }
+                for wt, story, epic in rows
+            ]
+
     def set_story_kind(self, jira_key: str, kind: str, *, reason: str = "manual") -> None:
         """A human correcting forge's sync-time guess. Records the reason as
         "manual" so a later reader can tell an overridden classification

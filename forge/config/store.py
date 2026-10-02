@@ -105,6 +105,15 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         "LangSmith workspace ID (only needed with an organization-scoped API key)",
         False, None, "string",
     ),
+    # forge/daemon/worktree_retention.py: a finished story's checkout is only
+    # convenience (its branch keeps every commit), and each one holds a full
+    # dependency install.
+    ConfigField(
+        "worktree_retention",
+        "Keep the worktrees of this many of the newest finished stories on disk and remove the rest "
+        "(0 = keep them all). Only the directory goes; the story's branch is always kept",
+        False, "10", "string",
+    ),
     ConfigField("worktrees_base_dir", "Worktrees base directory", False, "/data/repos", "string"),
     ConfigField("cloned_repos_base_dir", "Cloned project repos base directory", False, "/data/cloned-repos", "string"),
     ConfigField("data_dir", "Data directory (dev-loop baseline snapshots, etc.)", False, "/data", "string"),
@@ -263,7 +272,7 @@ CONFIG_CATEGORIES: tuple[ConfigCategory, ...] = (
         "git", "Git and storage", "Commit identity, and where forge keeps clones, worktrees and data.",
         (
             "git_author_name", "git_author_email", "manage_gitignore",
-            "worktrees_base_dir", "cloned_repos_base_dir", "data_dir",
+            "worktrees_base_dir", "worktree_retention", "cloned_repos_base_dir", "data_dir",
         ),
     ),
     ConfigCategory(

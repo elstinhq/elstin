@@ -72,6 +72,7 @@ from forge.services.project_guide import project_guide_for_run
 from forge.services.run_activity import append_activity, last_event_at
 from forge.services.ticket_source import get_ticket_source, ticket_source_configured
 from forge.services.usage import record_run_outcome
+from forge.daemon.worktree_retention import maybe_reclaim
 from forge.state.manager import StateManager
 from forge.tools.codebase_skeleton import build_workspace_skeleton
 from forge.tools.git_tools import (
@@ -2002,6 +2003,10 @@ async def poll_once(sm: StateManager | None = None, *, wait: bool = False) -> No
                     launched.append(task)
             else:
                 await handle_intent(sm, epic, intent)
+
+    # Housekeeping, after the work: finished stories' checkouts beyond the newest
+    # few (forge/daemon/worktree_retention.py). Throttled, and never raises.
+    await asyncio.to_thread(maybe_reclaim, sm, live=live_run_keys() | frozenset(_background))
 
     if wait and launched:
         await asyncio.gather(*launched, return_exceptions=True)
