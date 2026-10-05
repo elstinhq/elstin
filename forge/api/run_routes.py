@@ -4,9 +4,10 @@ and a per-ticket JIRA prose refresh.
 Approval: the reconciler (forge/orchestration/reconciler.py) parks a story
 with `ParkForGate` until its key shows up in
 `OrchestratorContext.approved_story_keys` — this is how a human clears
-that, whichever gate currently applies (plan-approval, PR-open, or
-PR-review; a story only ever waits on one at a time). The next daemon poll
-cycle picks it up — no separate "resume" action needed.
+plan approval, the only per-story gate: a finished story merges into the
+epic branch locally, and the one pull request is the epic's (its own gate
+is POST /api/epics/{key}/pr-approval). The next daemon poll cycle picks it
+up — no separate "resume" action needed.
 
 Clarification: a plan-approval gate sometimes carries a question instead of
 a finished plan — the planner asks when a design decision is genuinely
@@ -30,11 +31,11 @@ that replays the run's history, then pushes each new event the moment it
 is written (forge/services/activity_stream.py) instead of leaving the UI a
 poll interval behind the agent.
 
-Repo override: an epic is assigned one repo as its default, but a
-project whose repos are split by concern can carry an API story and a UI
-story under one epic. This is how a human points one story at a different
-repo — the one that gets its worktree, branch, commit and pull request.
-See forge/tools/workspace.py.
+Repo override: an epic is assigned one repo as its default, and a story
+inherits it. That default is only where an unprefixed plan path lands and
+where the story's first worktree is made — the approved plan decides which
+repos a story writes (forge/tools/workspace.py). This is how a human points
+one pending story's default at a different repo.
 
 Ticket refresh: epic re-sync deliberately leaves existing summary/
 description alone (progress must not be rewritten by a tree walk). This

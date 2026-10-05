@@ -6,14 +6,19 @@ this document is the map of where those contracts live.
 
 ## What this project is
 
-**code_forge** is a local, single-tenant JIRA-epic-to-PR platform. A
-deterministic reconciler decides what to do next; a LangGraph loop runs
-planner → dev → verifier (or epic QA) per story in an isolated git
-worktree, with independent stories in parallel. Each finished story is
-verified and merged into the epic branch **locally**; once every story has
-merged, the epic opens **one** GitHub pull request, which a human reviews
-and merges. The only per-story human gate is plan review (and the
-planner's clarification questions).
+**code_forge** is a local, single-tenant JIRA-epic-to-PR platform (a
+project's tickets can come from GitHub Issues instead). A deterministic
+reconciler decides what to do next; a LangGraph loop runs planner → dev →
+verifier (or epic QA) per story in an isolated git worktree, with
+independent stories in parallel. Each finished story is verified and
+merged into the epic branch **locally**; once every story has merged, the
+epic opens **one** GitHub pull request (one per repo it changed), which a
+human reviews and merges. The only per-story human gate is plan review
+(and the planner's clarification questions). Two optional gates sit around
+it: a project can hold the epic's pull request until a person says to push
+it ("The PR gate"), and a project with automatic runs off waits for a
+person to press Start ("Manual-run projects"). Every newly added epic starts
+paused until a person resumes it.
 
 Designed for a laptop: `docker compose up`, one process, Postgres-backed
 state, no Kubernetes, no multi-tenancy.
@@ -33,7 +38,10 @@ for `/healthz`, and adds `stop`/`down`/`logs`/`status`/`rebuild`/`psql`/
 `reset`. `scripts/stop.sh` stops the stack (`--keep` to leave the
 containers in place); only `reset` deletes data, and it asks first. Plain
 `docker compose up` still works and nothing in `forge/` depends on either
-script.
+script. `scripts/clear_db.py` (local dev) empties every forge table *and*
+LangGraph's checkpoint tables — without those a "cleared" story would
+resume mid-run — and keeps both schema-version tables, so nothing needs
+migrating afterwards; it asks first unless given `--yes`.
 
 Local develop without the full stack:
 
@@ -56,48 +64,65 @@ at `/settings` — no `.env` file.
 Settings UI ──HTTP──► FastAPI (forge/app.py)
                          │
                          ├── /api/*  (config, projects, epics, stories)
-                         ├── lifespan → ticket-filter sweep (5m, per project)
+                         ├── lifespan → ticket-filter sweep (5m by default, per project)
                          └── lifespan → daemon poll loop (15s)
-                                          │
-                                          ├── StateManager (Postgres)
-                                          ├── reconciler.plan_orchestration()  [pure]
-                                          └── handle_intent
-                                                ├── DispatchStory / ResumeStory
-                                                │     → LangGraph (thread_id = JIRA key)
-                                                │           ├── kind=dev: planner → [approval] → dev → tier-1 gate → verifier
-                                                │           │                          ^_________|  (gate fail)  |
-                                                │           │                          ^______________________|  (review fail)
-                                                │           └── kind=qa:  epic QA → END
-                                                ├── ParkForGate (plan approval)
-                                                ├── MergeIntoEpic → merge queue: update from epic → gate → fast-forward
-                                                └── (all merged) → epic PR: push epic branch, open one PR
+                               │
+                               ├── StateManager (Postgres)
+                               ├── retry stories whose provider limit has lifted
+                               ├── per epic: prior-work lookup; done tickets' work → epic branch
+                               ├── reconciler.plan_orchestration()  [pure]
+                               ├── handle_intent  (background tasks, ≤ max_parallel_stories)
+                               │     ├── DispatchStory / ResumeStory → LangGraph (thread_id = story key)
+                               │     │     ├── kind=dev: planner → [approval] → dev → tier-1 gate → verifier
+                               │     │     │             ^_____|  (asked a question: planner again once answered)
+                               │     │     │                                    ^_______________|  (gate fail; via `variants` when on)
+                               │     │     │                                    ^__________________________|  (review fail)
+                               │     │     └── kind=qa:  epic QA → END
+                               │     ├── ParkForGate (plan approval)
+                               │     ├── MergeIntoEpic → merge queue: update from epic → gate → fast-forward
+                               │     └── all merged → [PR gate] → push the epic branch, one PR per repo
+                               └── reclaim old finished worktrees (worktree_retention)
 
 Agent activity flows the other way, same process:
 
-  roles/*  ──append_activity──►  activity_events (Postgres)
-                                        │
-                                        └── activity_stream.publish
-                                              └── SSE /api/stories/{key}/stream
-                                                    └──► Settings UI activity feed
+  roles/*, daemon ──append_activity──► redact ──► activity_events (Postgres)
+                                                        │
+                                                        └── activity_stream.publish
+                                                              └── SSE /api/stories/{key}/stream
+                                                                    └──► Settings UI activity feed
 ```
 
-JIRA is source of truth for tickets. Forge tables track orchestration
-state only (status, kind, worktree, gates, levels).
+The ticket source — JIRA or GitHub Issues, chosen per project — owns what
+a ticket *says*; forge's Postgres board mirrors that text (a change under a
+plan is held for a person — see "The board vs. its source") and owns all
+orchestration state: status, kind, dependencies and levels, gates,
+worktrees, prior work. The daemon's only write back to the source is epic
+QA's report comment, and only with `jira_write_enabled` (per project) or
+`github_issues_write_enabled` on. The JIRA MCP server's transition tool
+obeys `jira_write_enabled` too; neither MCP server is wired to an agent.
+
+Before dispatching, `poll_once` also retries stories parked on a provider
+limit that has lifted ("Provider limits") and, for each epic, looks up work
+that already exists for its tickets and merges done tickets' unmerged work
+into the epic branch ("Work that already exists for a ticket"). The API's
+`/start`, `/approve`, `/answer`, `/replan` and `/retry` routes run the same
+intent handling on the same event loop, which is how a manual-run project
+moves at all.
 
 ## Package map (`forge/`)
 
 | Package | Responsibility | Do not |
 |---------|----------------|--------|
-| `agents/` | Prompts + role runners (planner, dev, verifier, qa) + `loop.py`'s shared agent loop | Hand-roll a second chat loop, or call an `llm/` provider directly from a role — always go through `agents/loop.py` (dev/planner) or `services/generation.py` (verifier/qa) |
+| `agents/` | Prompts + role runners (planner and its explorers, dev, verifier, qa), the plan gate (`roles/plan_gate.py`), competing dev attempts (`roles/dev_variants.py`), tool-argument repair (`tool_arguments.py`), and `loop.py`'s shared agent loop | Hand-roll a second chat loop, or call an `llm/` provider directly from a role — always go through `agents/loop.py` (dev/planner) or `services/generation.py` (verifier/qa) |
 | `llm/` | The provider port: `types.py` (normalized vocabulary), `base.py` (`LlmProvider`/`Capabilities`), `openai_compat.py` (the OpenAI adapter — the only module that imports `openai`), `registry.py` (config → provider), `pricing.py`, `errors.py` | Import a provider SDK anywhere outside `llm/openai_compat.py` |
-| `orchestration/` | LangGraph graph, pure reconciler, run state | Put I/O in the reconciler |
-| `daemon/` | Poll loop, ticket-filter sweep, worktree create, intent handling, PR/CI/merge, QA brief assembly | Call agents without going through the graph |
-| `state/` | **Only** DB access for epics/stories/PRs/projects | Import `forge.db.models` outside the allow-list in hard constraint #1 |
+| `orchestration/` | LangGraph graph, pure reconciler, run state (`FeatureRunState`), the git side of landing a story (`integration.py`) | Put I/O in the reconciler |
+| `daemon/` | Poll loop, ticket-filter sweep, worktree create, intent handling, merge queue, the epic's PR and its CI, QA brief assembly, prior-work lookup, provider-limit retries, worktree retention, ticket and project removal | Call agents without going through the graph |
+| `state/` | **Only** DB access for epics/stories/PRs/projects/lessons/watermarks — one `manager_*.py` mixin per concern, composed into `StateManager` in `manager.py` | Import `forge.db.models` outside the allow-list in hard constraint #1 |
 | `db/` | SQLAlchemy models + engine | Business logic here |
-| `services/` | JIRA/GitHub clients, epic sync, ticket filters, story_kind, generation (verifier/QA's single-shot LLM call), repo clone / attach, run activity + its live fan-out, run telemetry (cost **and** run shape), LangSmith tracing (`tracing.py`) | Bypass StateManager for persistence |
-| `tools/` | Dev-agent tools, planner's read-only tools, language profiles, worktree, path guard, workspace (multi-repo read roots) | Hardcode language names — use `language_hooks`; give a reference repo a write path |
+| `services/` | JIRA/GitHub clients and the per-project ticket source (`ticket_source.py`, `github_issues.py`), epic sync and reconciling with the source (`external_sync.py`), ticket filters, story_kind, generation (verifier/QA's single-shot LLM call), repo clone / attach, project guide, lessons, prior work, guidance, provider limits, run activity + its live fan-out, run telemetry (cost, run shape, peak memory), redaction, LangSmith tracing (`tracing.py`), model options | Bypass StateManager for persistence |
+| `tools/` | Dev-agent tools (web search/fetch included), planner's read-only tools, language profiles (+ `jdk.py`), worktree, path guard, the allowlisted shell, the agent environment, the process monitor, workspace (multi-repo read roots), reference folders, codebase skeleton | Hardcode language names — use `language_hooks`; give a reference repo a write path |
 | `mcp/` | MCP servers (jira/github standalone) | Assume agents already use JIRA/GitHub MCP — daemon calls services directly today |
-| `api/` | FastAPI routers | Long-running work — daemon owns that |
+| `api/` | FastAPI routers: `config_routes`, `project_routes`, `epic_routes`, `run_routes` (stories) | Long-running work — daemon owns that |
 | `config/` | Postgres config store | Read secrets from env (except `DATABASE_URL`) |
 
 Entry points (`pyproject.toml`): `forge-daemon`, `forge-mcp-jira`,
@@ -149,7 +174,9 @@ the task rather than configured ahead of it.
   free-for-all: the path must be in the plan, prefix included.
 - A single-repo project is byte-identical to before — no prefixes, no note
   in any tool description, and `make_dev_tools` returns the shared
-  `TOOL_SCHEMAS` object rather than a patched copy.
+  `TOOL_SCHEMAS` object rather than a patched copy (with web access on, the
+  default, the web tools' schemas are appended to it: a new list, but the
+  same bytes on every turn).
 
 **The trade-off, stated plainly:** a story spanning two repos produces two
 branches, and git has no transaction across them, so it can land in one and
@@ -647,7 +674,7 @@ locally, like removing a ticket:
 - Only **top-level** stories are dispatched (worktree, run, PR).
 - Sub-tasks get `parent_key`, status `skipped`, are omitted from
   `Epic.levels`, and enrich the parent brief in the daemon.
-- **Story-level sync:** settings "Add ticket" accepts an Epic or a lone
+- **Story-level sync:** "Add ticket" (the project page) accepts an Epic or a lone
   Story/Task. Non-epic roots with no story-level children become the sole
   work unit (same JIRA key as the epic row); empty Epics get no levels until
   children appear. See `forge/services/epic_sync.py` for the full contract.
@@ -662,8 +689,8 @@ locally, like removing a ticket:
   rows, so a story mid-run is never restructured. The re-walk then
   reconciles content and closure (below). Sub-tasks, children of other
   matches, and keys owned by another project are skipped, and nothing is
-  unsynced when a ticket stops matching. Ingested epics land paused and
-  folder-less, exactly like "Add ticket".
+  unsynced when a ticket stops matching. Ingested epics land paused, exactly
+  like "Add ticket", with the project's default folder when it has one.
 - **The board vs. its source** (`forge/services/external_sync.py`,
   `ticket_source.py`): the Postgres board is what agents read; the source
   owns what a ticket *says*. A ticket whose text changed is applied at once
@@ -720,6 +747,48 @@ sibling story with its state (`_epic_context_for_brief` in
 `daemon/main.py`), so it neither guesses the epic's vocabulary nor plans a
 sibling's work, and builds on the ones already merged.
 
+## Story and epic status
+
+`stories.status` is the coarse state the reconciler reasons about; the
+fine-grained `RunStatus` (planning, developing, verifying, …) lives in the
+story's LangGraph checkpoint, never in a table.
+
+- `pending` → `dispatched` → `awaiting_plan_approval` → `dispatched` →
+  `ready_to_merge` → `merging` → `merged`. **`dispatched` means a run is in
+  flight in this process**: `_run_or_resume_story` claims the run first —
+  sets `dispatched`, records `thread_id`, consumes the approval that
+  unparked it — so a second `/start` is refused and the ticket sync sees the
+  story as started. A run that raises before writing an outcome puts the
+  story back as it was, approval included; a crash leaves it `dispatched`
+  with no live run, which the reconciler answers with a resume
+  (`OrchestratorContext.live_thread_ids` tells the two apart).
+- The graph's end state maps through `_GRAPH_STATUS_TO_STORY_STATUS`:
+  `awaiting_approval` and `awaiting_clarification` both become
+  `awaiting_plan_approval` (only the latter fills `clarification_questions`),
+  `completed` → `ready_to_merge` (the work is committed on the story branch,
+  one commit per repo), `qa_completed` → `done`, `failed` → `failed`. Any
+  other end state fails the story rather than leaving it `dispatched`, which
+  the reconciler would resume every cycle.
+- `done`: a QA story's report is in, or dev declared the plan already
+  satisfied and changed nothing. `skipped`: sub-tasks, and tickets closed or
+  on hold in the source.
+- `parked_reason` says why: `cancelled`, `usage_limit`,
+  `provider_unreachable` (on `failed`); `already_satisfied` (on `done`);
+  `closed_externally`, `on_hold_in_source` (on `skipped`). The UI labels
+  each (`StatusTag.tsx`'s `PARKED_REASON_LABEL`).
+- `failure_stage`: `run` — Retry resumes at dev or review when it can,
+  else plans again (see "Retry after a dev failure") — or `merge`, whose
+  Retry re-attempts only the landing.
+
+`epics.phase` is `planning` | `implementing` | `complete` | `pr_open` |
+`merged` | `failed`, but only the last four are written as work progresses —
+`planning` is the creation default, and `implementing` is written only when
+a Retry or a re-plan reopens the epic — and the daemon polls on the stored
+value. What the API shows is `reconciler.display_epic_phase`: the two
+non-terminal phases read off the stories — `planning` until one has got
+past plan approval, `implementing` after. `epics.pr_approval` (`awaiting` | `approved` |
+`skipped`) is the PR gate's.
+
 ## Agent roles
 
 | Role | Module | Runtime | Notes |
@@ -739,10 +808,19 @@ reads die with its throwaway context and only a short report comes back.
 Everything about it is best-effort — an empty scope, a failed scope, or
 every explorer returning nothing all degrade to "plan without a head
 start". Sub-agents get the read-only tools only, so there is no write path
-and no way to spawn another one. Skipped on a clarification round-trip
-(the run explored before it asked), not on a fresh run that carries a
-person's earlier answers: the daemon passes `stories.clarification_answers`
-into every run, Retry's included, and `planner_node` flags them
+and no way to spawn another one. Their tokens roll up into the planner's
+`story_usage` row via the same `on_turn` hook, and their spend caps are
+carved out of `planner_sdk_max_budget_usd` rather than each inheriting the
+whole cap. Settings: `planner_explorers_enabled` (on by default),
+`planner_explorer_max_agents` (3; 0 also turns it off),
+`planner_explorer_max_turns` (8 per explorer) and `planner_explorer_model`
+(blank = the planner's; a cheaper model usually suffices for reading code).
+
+**What a fresh run carries over.** Exploration is skipped on a
+clarification round-trip (the run explored before it asked), not on a
+fresh run that carries a person's earlier answers: the daemon passes
+`stories.clarification_answers` into every run, Retry's included, and
+`planner_node` flags them
 `answers_from_earlier_run` unless the run is resuming from its own
 question — the planner then follows them as decisions but may still ask
 about something they do not settle. `send_back_to_planning` clears them
@@ -757,9 +835,46 @@ this story's earlier run"), and `dev_loop` keeps every repo the story
 already changed writable and those files editable even when the new plan
 does not list them, so a fix the gate or the review asks for there is
 still possible. Removing the epic is the clean slate.
-Their tokens roll up into the planner's `story_usage` row via the same
-`on_turn` hook, and their spend caps are carved out of
-`planner_sdk_max_budget_usd` rather than each inheriting the whole cap.
+
+**The plan gate** (`agents/roles/plan_gate.py`) is Tier 1 for the *plan*,
+the way `compare_to_plan` is for the code: deterministic checks, no model,
+on every plan before it can be approved or reach dev. The planner stops
+when it *believes* it is done — on a weak model, after one turn — and
+nothing used to disagree: a plan naming no files passed every later check
+vacuously, and a path that does not exist cost dev its fix rounds.
+`check_plan` reports a `files_to_modify` entry that is not in the repo, a
+`files_to_create` entry that already is (planning a modification as a
+creation invites an overwrite), a `discovery_evidence` citation to a file
+or line that is not there, and a plan naming no files or stating no
+acceptance criteria (`KIND_NO_FILES`). Only `blocking()` defects — ones dev
+would act on — reject the plan; the rest are warnings for the person
+approving it (the gate's first version failed a story over one `path:line`
+shorthand in its evidence). A rejection starts a fresh planner run with
+`format_plan_feedback` appended, up to `planner_sdk_max_retries` (default 2)
+more times; then the run ends `failed` — never back to `pending`, which
+re-planned the same failure every poll. Deliberately *not* checked: whether
+each acceptance criterion is covered by a planned file, a semantic judgement
+a gate could only guess at. Two things are fixed rather than sent back
+(`normalize_plan`): a path naming another repo without its `@`, and a change
+in a read-only repo (see "Read-only repos").
+
+**Clarification questions** (`planner.py`'s CLARIFICATION QUESTIONS rules;
+`stories.clarification_questions` / `clarification_answers`, migration
+`20260922_0024`). The planner may answer with `questions` instead of a
+plan — 2–4 options each, the most project-idiomatic first — only when two
+valid approaches lead to different files or dependencies and the code does
+not settle which. The run ends `awaiting_clarification` (the story shows
+`awaiting_plan_approval`, with the questions), and `route_after_planner`
+sends the resumed run back to `planner`, never to `dev`: one run went
+straight to dev with an unanswered plan and failed with "nothing to
+verify". `POST /api/stories/{key}/answer {answers: [{question_id,
+option_id}]}` must answer every question in one call — the prompt has an
+all-or-nothing answers branch, so a partial set would be ignored or
+reasoned from answers never given — and clears the same gate `/approve`
+does; the resume patch feeds the resolved answers to the planner. A plan
+that asks skips `check_plan` (its files may legitimately be empty), so
+`check_questions` catches stub questions instead (a "placeholder" question
+once sat in front of a person as if it were real).
 
 **Plan integrity** (`plan_gate.check_plan_integrity`, called by
 `planner_loop` on the provider's answer *before* `normalize_plan`): whether the
@@ -883,7 +998,10 @@ same loop drives GPT, DeepSeek, or a local vLLM/Ollama endpoint):
   otherwise.
 - **Repeat-call guard**: an identical (name, args) call in the consecutive
   turn is intercepted and answered with an is_error nudge; resets after any
-  mutating call.
+  mutating call except a bookkeeping one (`LoopConfig.bookkeeping_tools`:
+  ticking the checklist or declaring a file satisfied changes nothing on
+  disk, so a re-read after it is still a repeat — and a tool the prompt says
+  to call constantly would otherwise switch the guard off).
 - **Model-call deadline** (`llm_request_timeout_seconds`, default 900): the
   adapter (`llm/openai_compat.py`) abandons a single call after this many
   seconds and raises `LlmTimeoutError`. The SDK's own timeout is per read, and
@@ -903,6 +1021,9 @@ same loop drives GPT, DeepSeek, or a local vLLM/Ollama endpoint):
   cap keeps it a bound on a model that is only looping. In the last
   `IDLE_WARNING_WINDOW` turns before the stop, the trailing message also
   says how many are left (`_idle_warning`), so the cut-off is never a surprise.
+  The turn cap has the same opt-in warning (`turn_warning_window`, used by
+  the explorers): the last turns before `max_turns` say so, the final one
+  telling the model to answer without a tool call.
 - **Trailing reminder** (`LoopConfig.trailing_reminder`): a callable
   re-evaluated each turn whose text is appended to the request as a final
   user message — and **kept in the loop's history**, so every request
@@ -975,7 +1096,10 @@ state, not a bespoke table.
 
 **Graph paths** (`forge/orchestration/graph.py`):
 
-- `dev` → `planner` → (optional interrupt) → `dev` → `gate` → `verifier` → `END`
+- dev story: `planner` → (interrupt for approval when `require_plan_approval`
+  is on — read once per compile) → `dev` → `gate` → `verifier` → `END`
+  - `planner` → `planner` when it asked a question (`awaiting_clarification`,
+    see "Clarification questions"); `planner` → `END` when it failed.
   - `gate` is the Tier 1 fast-fail: compare_to_plan (planned files present,
     compile/lint, planned tests — subprocesses, no model). Fail → straight
     back to `dev` with a targeted fix message (`gate_feedback`, appended to
@@ -1012,7 +1136,7 @@ state, not a bespoke table.
     poll cycle. Neither role asks for a strict schema — both rely on a
     prompt plus `_parse_json_content`'s tolerant extraction — so this is
     the normal failure mode for a chatty model, not an exotic one.
-- `qa` → `qa` → `END`
+- qa story: `qa` → `END` (`route_entry` picks the path from `story_kind`)
 
 Checkpointer: Postgres (`langgraph-checkpoint-postgres`). `thread_id` =
 story JIRA key.
@@ -1058,15 +1182,81 @@ shape with `tools/planner_tools.py`'s read-only tools instead. There is no
 MCP hop in either: `make_dev_tools()`/`make_planner_tools()` hand their
 `(functions, schemas)` pair straight to the loop.
 
+**Dev's tools** (`make_dev_tools`):
+
+- Read-only, run concurrently (`READ_ONLY_TOOLS`): `read_file_tool`,
+  `outline_file_tool`, `search_codebase_tool`, `find_files_tool`,
+  `lookup_sdk_symbol_tool` (Dart/Flutter SDK lookup through the analysis
+  server, `tools/docs_tool.py` + `lsp_client.py`; answers "could not find"
+  anywhere else, so it is safe to offer every project).
+- Writes, plan-scoped by `path_guard` — the `PROGRESS_TOOLS` the idle-turn
+  budget counts: `write_file_tool`, `edit_file_tool`, `apply_edits_tool`
+  (many edits in one call, each reported). `roll_back_file_tool` discards
+  the run's uncommitted edits to one file.
+- Bookkeeping (`BOOKKEEPING_TOOLS` — touch nothing on disk, so they reset
+  neither the idle budget nor the repeat-call guard): `update_progress_tool`,
+  `declare_already_satisfied_tool`.
+- `analyze_changed_files_tool` — the profile's compile/lint on what
+  changed; it does not run tests. `run_command_tool` — the allowlisted
+  shell, below; the plan's tests run through it.
+- `web_search_tool` / `web_fetch_tool` while web access is on (below).
+
+The planner has `read_file_tool`, `outline_file_tool`, `grep_tool` and
+`find_files_tool`, all read-only. `find_files_tool` (`tools/find_files.py`,
+shared) lists a folder (`some/folder/*`) or finds files by name glob across
+the read roots, sorted, at most 200 — dev had no way to ask what is in a
+folder, reached for `ls`/`find` through the shell, and each refusal was a
+turn with no edit toward the idle budget.
+
+**The dev shell** (`tools/safe_shell.py`, `run_command_tool`) runs a
+command only if it starts with an allowed prefix — `git status`,
+`git diff`, `git add`, `git checkout`, plus each profile's
+`safe_command_prefixes` (Vue's include `npm view`, a read-only registry
+lookup, so a dependency is checked rather than written from memory). It is
+split with `shlex` and run without a shell; `;`, `&&`, `||`, `|`, `` ` ``,
+`$`, parentheses, redirects and newlines are refused outright. Git options
+that reach outside the worktree are refused under an allowed prefix too:
+`--output`, `--no-index`, `--pathspec-from-file` (and their abbreviations),
+`git diff -O<orderfile>`, and a `git diff` path outside the worktree, which
+git silently treats as `--no-index`. A refused command returns
+`BLOCKED_RETURN_CODE` (-1; a timeout is -2) with what to use instead —
+`find_files_tool` for `ls`/`find`, `search_codebase_tool`/`read_file_tool`
+for `grep`/`cat`. Default timeout 180 s. Commands run in the story's
+default worktree unless the call names another repo the plan writes (see
+"A failing test is run, not guessed at").
+
+**Web access for dev** (`tools/web_tools.py`; `dev_web_access_enabled`,
+global, **on by default**): `web_search_tool` (Brave Search with
+`brave_search_api_key`, else — and whenever Brave fails — DuckDuckGo Lite,
+which is keyless but unofficial and can rate-limit) and `web_fetch_tool`
+(one page as text). Narrower than a browser because the agent runs
+unattended: http(s) only, no credentials in the URL, no cookies, 15 s and
+1 MB per fetch, at most 20 000 characters back, text content types only
+(HTML is reduced to its text).
+The host is resolved first and refused unless every address is public —
+which keeps a fetched URL away from Postgres, the cloud metadata endpoint
+and the host's own services — and that check is repeated on every redirect
+(at most 5). A name that changes its answer between the check and the
+connect (DNS rebinding) is a known gap. Every result starts with an
+"UNTRUSTED WEB CONTENT" line, and nothing feeds it back as instructions.
+Like every tool, they never raise: a failure is a string the model reads.
+Neither is read-only in the loop's sense, so a web call runs alone. Off,
+`make_dev_tools` offers neither and the schemas are the shared object.
+
 **Language extension point:** `forge/tools/language_hooks.py`
 
 1. Add a profile module (see `dart_tools.py`, `java_tools.py`, `vue_tools.py`).
 2. Register in `_ensure_default_profiles_registered()`.
 3. Add tests under `tests/test_*_tools.py`.
 
+Registered today (by key): `dart_flutter`, `java_maven`, `java_gradle`,
+`vue_vite`. There is no Python profile.
+
 Do not special-case languages inside `safe_shell` / `dev_tools` — profiles
-own analyze, test, verify, safe command prefixes, and prompt conventions,
-and three things about the toolchain itself:
+own analyze, test, verify, safe command prefixes, prompt conventions and
+the test command a fix brief names (`test_command_hint`, see "A failing
+test is run, not guessed at"), and these things about the toolchain
+itself:
 
 - `command_env` — extra environment for every command in a matching
   worktree, the gate's (`language_hooks.run`) and dev's own (`safe_shell`).
@@ -1151,25 +1341,58 @@ like a credential (`SECRET_NAME_RE`). A profile's `command_env` is applied on to
 - **The epic's pull request** (`_finish_epic`; held for approval when
   `require_pr_approval` is on — see "The PR gate"): once every story is
   merged/done/skipped, the epic branch is pushed and one PR opened into the
-  default branch per repo with changes (`epic_pull_requests`); its body
-  lists each story, coverage gaps, already-satisfied declarations and the
-  planner's clarification decisions. Phase `pr_open` is still polled —
+  default branch per repo with changes (`epic_pull_requests`). Its body
+  (`_epic_pr_body`) is the reviewer's whole briefing: the epic's text, each
+  story with any branch it continued, coverage gap, already-satisfied
+  declaration, on-hold note and clarification decision, then "Left to a
+  person" (`person_actions`), "Changes left to a person"
+  (`read_only_changes`), "Lessons from building this", and how it was
+  built. Phase `pr_open` is still polled —
   CI status and state are refreshed every cycle, in manual-run projects
   too — until a human merges it (`merged`) or closes it (`complete`).
   Without GitHub configured, or with nothing to propose, the epic ends
   `complete` with its branch ready locally. Story branches are never
   pushed.
-- Manual epic gate (`epics.manual_gate`) parks the whole epic independently
-  of the plan gate.
+- **Pause / Resume** (`epics.manual_gate`, `PUT /api/epics/{key}/gate`, the
+  epic card's button) holds one epic, independently of the plan gate: the
+  reconciler answers it with `NoOp("manual_gate")`. **A newly added epic
+  starts paused** (`create_epic`'s `manual_gate=True`) — from Add ticket and
+  the ticket-filter sweep alike — so nothing runs until a person resumes it;
+  an epic its source closes is put back on hold. (A process-wide pause,
+  `OrchestratorContext.dispatch_paused`, exists in the reconciler, but
+  nothing sets it.)
+- **Manual-run projects** (`auto_run_enabled` off, per project): `poll_once`
+  still looks up prior work, brings in done tickets' work and refreshes an
+  open epic PR, but dispatches nothing. `POST /api/stories/{key}/start` (the
+  Start button) asks `check_story_action` — the reconciler's
+  `describe_story_action`, the same dependency rules answering `Blocked`
+  with a reason (409) — and runs the intent as a background task
+  (`execute_story_action`); in an auto-run project it only gets there before
+  the next poll. Approve, answer, re-plan, Retry and an external-change
+  re-plan drive the next step themselves (`_maybe_trigger_manual_run`),
+  since nothing else will; a story parked on a provider limit waits for a
+  person's Retry; the PR gate's decision runs the epic's finish itself
+  (`run_epic_finish`).
+- **Commit identity** (`git_author_name` / `git_author_email`, settings →
+  Git and storage): forge runs where no git identity can be assumed (a
+  container, a fresh clone), so it passes one on every commit as `-c
+  user.name=… -c user.email=…`, never writing a repo's config. With both
+  set, the commits forge makes — a story's, the .gitignore fix, done-work
+  merges — are authored by that person, `git_tools.commit_all` /
+  `commit_paths` add a `Co-authored-by: code_forge <forge@localhost>`
+  trailer, and the epic PR body ends with the same line, so GitHub credits
+  the person. Either one blank: authored by `code_forge <forge@localhost>`,
+  no trailer.
 - The ticket-filter sweep (`forge/daemon/ticket_sync.py`) is a **second,
   slower loop** in the same process, deliberately not folded into
   `poll_once`: it hits someone else's API for a set that changes a few
   times a day, and a JIRA outage must not stall stories mid-run. Each
   project's sweep runs in `asyncio.to_thread` (blocking HTTP + sync
   SQLAlchemy) and one project's failure never ends the loop.
-- Best-effort external side effects (JIRA QA comment, the epic's PR): log
-  and continue — a failed epic PR push or API call is recorded on its
-  `epic_pull_requests` row and retried next poll; neither fails a run.
+- Best-effort external side effects (the QA report comment on the ticket,
+  the epic's PR): log and continue — a failed epic PR push or API call is
+  recorded on its `epic_pull_requests` row and retried next poll; neither
+  fails a run.
 - `stories.coverage_gap` (set when the verifier's only blocker was a
   coverage-threshold miss, not a real failure — see
   `forge/tools/vue_tools.py`'s coverage-only-failure detection) no longer
@@ -1504,6 +1727,24 @@ typed. `components/shared/ModelCombobox.tsx` shows the whole list until you type
 (a native `<datalist>` narrows to the text already in the box, hiding every
 other model), caps it at 200 rows, and is keyboard operable.
 
+## Data model
+
+| Table | Model (`db/models/`) | Holds | Read and written through |
+|-------|----------------------|-------|--------------------------|
+| `projects`, `project_repos`, `project_ticket_filters` | `project.py` | A project and its ticket source; its folders (clone/attach, `kind` repo or reference, `read_only`, `generated_guide`); its saved ticket query | `state/manager_project.py` |
+| `app_config`, `project_config` | `config.py`, `project.py` | Global settings; a project's overrides | `config/store.py` |
+| `epics`, `stories` | `gameplan.py` | The board: ticket text and its source link, coarse status, kind, dependencies and levels, gates, worktree/branch, prior work, queued guidance, parking and retries, what is left to a person | `state/manager_epic.py`, `manager_story.py`, `manager_external.py` |
+| `story_worktrees` | `story_worktree.py` | One row per (story, repo) worktree | `state/manager_story.py` |
+| `epic_pull_requests` | `gameplan.py` | The epic's PR, one per repo — the only pull requests forge opens | `state/manager_epic.py` |
+| `pull_requests` | `gameplan.py` | Per-story PRs from before stories merged locally; nothing writes it now (the API still attaches a story's row as `pull_request`) | `state/manager_pr.py` |
+| `project_lessons` | `lesson.py` | Lessons proposed from finished runs | `state/manager_lesson.py` |
+| `jira_watermarks` | `gameplan.py` | Last-seen comment id per issue | `state/manager_watermark.py` |
+| `activity_events`, `story_usage`, `story_run_outcomes` | `activity.py`, `story_usage.py`, `run_outcome.py` | The feed, cost, run shape and peak memory, keyed by `run_id` | `services/run_activity.py`, `services/usage.py` (hard constraint #1's exception) |
+
+Plus LangGraph's own checkpoint tables — every story's plan, diffs, dev
+history and fine-grained run state — which forge never duplicates: `GET
+/api/stories/{key}/plan` reads the plan back from the checkpoint.
+
 ## Config and migrations
 
 - Config schema and UI fields: `forge/config/store.py` (`CONFIG_FIELDS`,
@@ -1516,32 +1757,53 @@ other model), caps it at 200 rows, and is keyboard operable.
   when you add the `ConfigField` — `tests/test_config_store.py` fails on a
   setting with no section, or in two. A saved value whose key is not declared
   (an old row) shows under "Other", so it stays reachable.
-- Project overrides: JIRA creds, the approval gates, the LangSmith switch and
-  the **model side** — provider, endpoint, API key, and which model each role
-  runs on (see "Per-project models"). GitHub / the other agent limits stay
-  global. A project's ticket filter is **not** a config
+- Project overrides (`PROJECT_OVERRIDABLE_KEYS`): the JIRA connection and
+  `jira_write_enabled`; the workflow switches (`auto_run_enabled`,
+  `require_plan_approval`, `require_pr_approval`, `generate_project_guide`,
+  `capture_lessons`); `ticket_hold_statuses`; `manage_gitignore`; the
+  LangSmith switch and project name; competing dev attempts
+  (`dev_variants`, `dev_variants_after_gate_failures`); and the **model
+  side** — provider, endpoint, API key, and which model each role runs on
+  (see "Per-project models"). Everything else stays global: GitHub, the
+  other agent limits (turns, budgets, effort, web access), the poll
+  interval, storage directories. A project's ticket filter is **not** a config
   override — it is its own table (`project_ticket_filters`), since it has
   no global default to fall back to.
 - Alembic: `alembic/versions/YYYYMMDD_NNNN_description.py`. Docstring must
   explain backfill/default semantics for existing rows.
 - Adding a column: model → migration → StateManager mixin → keep backfill
-  meaning stable.
+  meaning stable. Tests build the schema from the models
+  (`Base.metadata.create_all` in `forge_db`), not from migrations, so a
+  missing migration passes the suite and breaks a real database. A few
+  tests run Alembic in-process: `tests/test_ticket_source.py` upgrades to
+  the revision before one, writes old-shape rows, then upgrades and checks
+  the backfill (the pattern to copy when a backfill matters);
+  `test_run_outcome.py` and `test_lessons.py` upgrade to head and check the
+  result. `alembic/env.py` keeps existing loggers enabled for this, or every
+  logger created before the migration would go silent for `caplog`.
 
 LangGraph checkpointer creates its own tables on first use
 (`AsyncPostgresSaver.setup()`).
 
-## API surface (high level)
+## API surface
 
-| Area | Prefix | Examples |
-|------|--------|----------|
-| Config | `/api/config` | Global settings CRUD |
-| Projects | `/api/projects` | Projects (DELETE removes one and everything forge holds for it), repos (cloned from a URL or attached from a local folder — `forge/services/repo_clone.py`), overrides, ticket filter (+ `/preview`, `/sync`) |
-| Epics | `/api/epics` | Sync from JIRA, assign repo, manual gate, decide the held pull request (`/pr-approval`) |
-| Stories | `/api/stories` | Approve gate, re-plan a plan waiting for approval (`/replan`, answers kept), set kind, get story, get plan, message the running agent (`/guidance`) |
+| Area | Prefix | Routes |
+|------|--------|--------|
+| Config | `/api/config` | `GET ""` (every field, secrets masked), `GET /categories` (the settings sections), `GET /models[?project_id=]` (model-picker suggestions), `PUT /{key}` |
+| Projects | `/api/projects` | `GET`/`POST ""` (create, optionally with `repo_url`, `repo_path` or `repo_paths`, `read_only_paths`, `reference_path`); `GET`/`PUT`/`DELETE /{id}` (`PUT` takes `name`, `description`, `ticket_source`; `DELETE` removes the project and everything forge holds for it); `POST /browse-folder`, `POST /scan-folder`; `GET`/`POST /{id}/repos` (clone a `url` or attach a `path` — `forge/services/repo_clone.py`), `PUT`/`DELETE /{id}/repos/{repo_id}` (read-only flag; detach); `GET`/`PUT .../repos/{repo_id}/guide`, `POST .../guide/generate`; `GET /{id}/lessons[?status=]`, `PUT`/`DELETE .../lessons/{lesson_id}`; `GET /{id}/config`, `PUT`/`DELETE /{id}/config/{key}` (overrides); `GET /{id}/epics` (the board); `GET`/`PUT`/`DELETE /{id}/ticket-filter`, `POST .../preview`, `POST .../sync` |
+| Epics | `/api/epics` | `GET ""`, `GET /{key}`, `GET /{key}/usage`; `POST /sync` (Add ticket: `{jira_key, project_id}` — a key or URL, an epic or a lone story); `POST /{key}/sync` (refresh the epic's own text, no tree walk); `PUT /{key}/repo` (its default folder); `PUT /{key}/gate` (Pause / Resume); `POST /{key}/prior-work/refresh`; `POST /{key}/pr-approval`; `DELETE /{key}` (remove the ticket) |
+| Stories | `/api/stories` | `GET /{key}`, `/plan`, `/activity`, `/stream` (SSE), `/usage`; `POST /{key}/start`, `/approve`, `/answer`, `/replan`, `/retry[?replan=true]`, `/cancel`, `/guidance`, `/prior-work`, `/external-change`, `/sync` (refresh its text); `PUT /{key}/kind`, `PUT /{key}/repo` (pending top-level stories only) |
+| Pages | — | `/` and `/projects`, `/projects/{id}`, `/settings` (the three HTML shells), `/settings-ui/*` (the bundles), `/healthz`. Shells and bundles are served `Cache-Control: no-cache`: they keep fixed names, so without it a browser could run an old bundle after a rebuild, missing a button the server already has |
 
-There is no “start run” endpoint: sync epic (by key, or by the project's
-ticket filter) → assign repo → daemon dispatches when reconciler says ready
-→ human `POST .../approve` clears gates.
+The normal flow needs no "start" call: add a ticket (by key, or through the
+project's ticket filter) → the epic lands paused, with the project's
+default folder already assigned (`epic_sync`, with `poll_once` as the
+backstop) → a person resumes it (`PUT /api/epics/{key}/gate`) → the daemon
+dispatches whatever the reconciler says is ready → a person approves the
+plan (`/approve`, or `/answer` when the planner asked) → stories merge into
+the epic branch → the epic's pull request opens (after `/pr-approval` when
+held). `/start` exists for manual-run projects (see "Manual-run projects")
+and only gets there sooner elsewhere.
 
 ## UI
 
@@ -1587,6 +1849,22 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
   "Using global default" / "Reset" hint; sections holding an override start
   open). A field you leave unchanged saves nothing — in a project that would
   pin today's global value as an override.
+- **Project page** (`components/project-detail/`): `ProjectDetailPage`; the
+  board — `EpicList`, `EpicCard` (one per ticket; stories in wave, then key,
+  order), `StoryRow` (status tags and the gate button); `DetailDialog`, a
+  story's details — `PlanPanel`, `ActivityFeed` (the SSE stream),
+  `UsagePanel`, `GuidanceForm`, `CancelRunButton`, the clarification
+  questions, prior work and what is left to a person; `FoldersPanel` +
+  `RepoGuide`; `LessonsPanel`; `TicketFilterDialog`; `SyncTicketDialog`
+  (Add ticket); `ProjectSettingsDialog` (+ `DeleteProjectSection`);
+  `PriorWorkChoice`; `PrApprovalPrompt`; `RemoveEpicButton`. Shared:
+  `StatusTag.tsx` holds every status, phase, parked-reason and gate label —
+  the place to add one — and the gate button names its action ("Approve
+  plan") rather than a bare "Approve"; `RepoSourceInput` / `RepoPicker` /
+  `FolderBrowser` (clone, attach, browse); `ModelCombobox`. One hook per
+  resource under `hooks/`; `lib/api.ts` is the fetch wrapper and
+  `types/api.ts` mirrors the API's response shapes — change it with the
+  route.
 - `ui-src/build.mjs` bundles all three entry points (esbuild, built-in
   JSX/TSX support) into `settings-ui/vendor/app-*.js`, then shells out to
   the Tailwind CLI to compile `src/styles/globals.css` into
@@ -1603,9 +1881,17 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 
 ## Testing conventions
 
-- `tests/conftest.py`: `postgres_url` (testcontainers), `forge_db`,
-  `git_repo`, `fake_agents` (patches all five graph entry points:
-  planner, dev, deterministic gate, verifier, epic QA).
+- `tests/conftest.py`: `postgres_url` (testcontainers), `forge_db` (points
+  the engine at it and creates the tables from the models), `project_id` (a
+  bare project, for tests that only need the foreign key), `git_repo` (a
+  real repo with an `origin` remote), `fake_agents` (patches all five graph
+  entry points: planner, dev, deterministic gate, verifier, epic QA — and
+  the gate's second import in `daemon/main.py`, used by the merge queue's
+  re-check). Competing dev attempts import `run_dev` and
+  `run_deterministic_gate` by name as well; `fake_agents` leaves those
+  alone, which is safe while `dev_variants` stays at its default of 1, and
+  `tests/test_dev_variants.py` patches them on
+  `forge.agents.roles.dev_variants`.
 - **Never** call a real LLM provider / GitHub / live JIRA in
   unit/integration tests. Patch agent entry points on
   `forge.orchestration.graph` (names imported at module load), or fake
@@ -1676,6 +1962,16 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
   via `_build_story_brief`, but that is a filesystem walk, not retrieval)
 - JIRA/GitHub MCP wired into agent roles (servers exist; daemon uses
   services)
+- Ticket attachments and linked issues reaching the planner:
+  `FeatureRunState.attachment_paths` and `linked_issues_context` are always
+  empty (the planner prompt handles them when set), and
+  `JiraService.download_attachment` / `build_referenced_tickets_context`
+  exist with no caller. The `jira_attachments_dir` setting only tells ticket
+  removal where such files would be.
+- Anything behind `qdrant-client`, `tree-sitter`, `tree-sitter-python` or
+  `pydantic-settings`: they are declared in `pyproject.toml`, but nothing in
+  `forge/` or `tests/` imports them. `outline_file_tool` and the codebase
+  skeleton are text heuristics, not parsers.
 - A second `forge/llm/` provider adapter — `openai_compat.py` (OpenAI's
   own API, or any OpenAI-compatible endpoint via `llm_base_url`: Azure,
   OpenRouter, vLLM, Ollama, etc.) is the only one wired today. The port
@@ -1689,6 +1985,9 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | New language support | `tools/*_tools.py` + `language_hooks.py` |
 | How much memory a run's commands used (peak per run) | `tools/process_monitor.py`, `services/memory_usage.py`, `services/usage.py`'s `record_run_peak_memory` |
 | What environment a build/test/agent command sees | `tools/agent_env.py`, `language_hooks.profile_command_env` |
+| What dev may run in its shell (the allowlist, refused git options) | `tools/safe_shell.py`; a language's commands in its profile's `safe_command_prefixes` |
+| Dev's tools (adding one; read-only vs. progress vs. bookkeeping) | `tools/dev_tools.py` (`make_dev_tools`, `TOOL_SCHEMAS`, `READ_ONLY_TOOLS` / `PROGRESS_TOOLS` / `BOOKKEEPING_TOOLS`) |
+| Dev's web search and page fetch | `tools/web_tools.py`; offered by `agents/roles/dev_loop.py` via `make_dev_tools(web_access=…)` |
 | Sync / levels / kind | `services/epic_sync.py`, `services/story_kind.py` |
 | Filter-based ingestion | `services/jira_filter.py`, `daemon/ticket_sync.py` |
 | Which system tickets come from (source per project, neutral `Ticket`) | `services/ticket_source.py` — sync code calls `get_ticket_source(project_id)`, never `JiraService` directly |
@@ -1696,11 +1995,17 @@ ticket filter) → assign repo → daemon dispatches when reconciler says ready
 | Scrubbing credentials from persisted/traced output | `services/redaction.py`; applied in `services/run_activity.py` and `services/tracing.py`'s client |
 | LangSmith tracing (what is traced, settings, per-project switch) | `services/tracing.py`; call sites: `daemon/main.py`'s `_invoke_graph`, `agents/loop.py`'s `_call_tool`, `llm/openai_compat.py` |
 | Graph routing / gates | `orchestration/graph.py`, `config/store.py` |
+| What makes a plan acceptable (plan gate, integrity, what is fixed in place) | `agents/roles/plan_gate.py`, `agents/roles/planner_loop.py` |
+| Clarification questions and their answers | `agents/roles/planner.py` (CLARIFICATION QUESTIONS), `orchestration/graph.py`'s `route_after_planner`, `api/run_routes.py`'s `answer_story_questions` |
+| Story status and epic phase as shown | `daemon/main.py`'s `_GRAPH_STATUS_TO_STORY_STATUS`, `orchestration/reconciler.py`'s `display_epic_phase`, `components/shared/StatusTag.tsx` |
+| Manual-run projects (Start, approve/retry follow-through) | `daemon/main.py`'s `check_story_action` / `execute_story_action`, `reconciler.describe_story_action`, `api/run_routes.py`'s `_maybe_trigger_manual_run` |
 | Per-project provider / models, the model picker | `llm/registry.py` (`get_provider`), `config/store.py` (`resolve_text`, `PROJECT_OVERRIDABLE_KEYS`), `services/model_options.py`, `components/shared/ModelCombobox.tsx` |
 | Competing dev attempts after repeated gate failures | `agents/roles/dev_variants.py`, `orchestration/graph.py`'s `gate_node`/`variants_node`, `tools/worktree.py`'s `create_scratch_worktree` |
 | A model call refused on a rate/quota limit (classification, parking, auto-retry) | `llm/errors.py`, `llm/openai_compat.py`, `agents/loop.py`, `services/provider_limit.py`, `daemon/main.py`'s `_resume_stories_past_their_limit` |
 | Retry: plan again vs. resume at dev/review | `daemon/main.py`'s `arm_resume_after_failure` (`arm_resume_at_dev`), `state/manager_story.py`'s `retry_story`, `api/run_routes.py` |
 | Holding the epic's pull request for approval | `daemon/main.py`'s `_finish_epic`/`run_epic_finish`, `api/epic_routes.py`'s `decide_epic_pr`, `components/project-detail/PrApprovalPrompt.tsx` |
+| What the epic's pull request says | `daemon/main.py`'s `_epic_pr_body` (lessons: `services/lessons.py`'s `pr_lessons_section`) |
+| Who commits are credited to | `daemon/main.py`'s `_commit_author`, `tools/git_tools.py`'s `commit_all` / `commit_paths` |
 | Dispatch / PR / CI | `daemon/main.py`, `orchestration/integration.py` |
 | Where a branch starts (existing work for a ticket) | `services/prior_work.py` (git), `daemon/prior_work_lookup.py` (when, storage, planner view) |
 | Read-only repos and reference folders (what runs read, what plans may change) | `tools/reference_folder.py`, `tools/workspace.py`'s `Workspace.read_only`, `agents/roles/plan_gate.py`, `daemon/main.py`'s `_workspace_roots` |

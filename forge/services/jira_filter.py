@@ -62,10 +62,10 @@ finished epic is exactly what drops out — and reconcile it with the source
 deleted there. That is driven by the ticket itself, not by the query.
 
 Newly ingested epics land exactly where "Add ticket" leaves them: paused
-(`manual_gate=True`, see StateManager.create_epic) and with no folder
-assigned, so the daemon ignores them until a human picks a folder and
-resumes. Background ingestion decides *what forge knows about*, never
-*what forge starts working on*.
+(`manual_gate=True`, see StateManager.create_epic), with the project's
+default folder assigned when it has one (forge/services/epic_sync.py), so
+the daemon ignores them until a human resumes them. Background ingestion
+decides *what forge knows about*, never *what forge starts working on*.
 """
 from __future__ import annotations
 

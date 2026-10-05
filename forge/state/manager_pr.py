@@ -1,15 +1,16 @@
-"""Pull requests, one per (story, repo).
+"""Per-story pull requests, one per (story, repo) — a legacy table.
 
-A story whose approved plan writes two repos produces two branches and so
-two pull requests — git's constraint, not a forge choice. Every accessor
-here therefore takes a `repo_label` (forge/tools/workspace.py), with `""`
-meaning "the story's default repo", which is what rows written before
-per-repo PRs existed carry.
+Stories no longer open pull requests: each merges into the epic branch
+locally, and the only pull request forge opens is the epic's
+(`epic_pull_requests`, forge/state/manager_epic.py). Nothing writes here
+any more; the rows that exist predate local merges, and the API still
+attaches a story's first one as `pull_request`.
 
-The label-free reads (`get_pull_request`, `list_pull_requests`) exist
-because plenty of callers legitimately want "this story's PR" without
-caring which repo — the dashboard, and the single-repo case that is still
-the common one.
+When stories did open their own, one whose plan wrote two repos produced
+two branches and so two pull requests, which is why every accessor takes a
+`repo_label` (forge/tools/workspace.py), with `""` meaning "the story's
+default repo" — what rows from before per-repo PRs carry. The label-free
+`get_pull_request` is what the API's story view reads.
 """
 from __future__ import annotations
 
@@ -66,9 +67,8 @@ class _PullRequestMixin:
             return _to_dict(pr) if pr is not None else None
 
     def list_pull_requests(self, story_key: str) -> list[dict]:
-        """Every PR this story opened, oldest first. The daemon's CI gate
-        and merge step both walk this, because a story that wrote two
-        repos is only mergeable when *all* of its PRs are green."""
+        """Every PR this story opened, oldest first — rows from before
+        stories merged locally; nothing in the merge path reads them."""
         with session_scope() as session:
             rows = session.query(PullRequest).filter_by(story_key=story_key).order_by(PullRequest.id).all()
             return [_to_dict(pr) for pr in rows]
