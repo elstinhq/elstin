@@ -128,7 +128,8 @@ from typing import Any, Callable, Literal
 from forge.agents.tool_arguments import argument_errors, repair_arguments
 from forge.llm.base import LlmProvider
 from forge.llm.errors import (
-    LlmContextOverflowError, LlmError, LlmRateLimitError, LlmTimeoutError, ProviderLimit, is_retryable, provider_limit_of,
+    LlmContextOverflowError, LlmError, LlmRateLimitError, LlmTimeoutError, LlmUnreachableError, ProviderLimit, is_retryable,
+    provider_limit_of,
 )
 from forge.llm.pricing import estimate_cost_usd
 from forge.llm.types import (
@@ -242,6 +243,15 @@ _MAX_TRANSIENT_RETRIES = 3
 _MAX_TIMEOUT_RETRIES = 1
 _RETRY_BASE_DELAY_SECONDS = 2.0
 _RETRY_CEILING_SECONDS = 30.0
+# A call that could not even connect (LlmUnreachableError) is the opposite of a
+# timeout: it cost seconds, nothing was sent, and the cause — a proxy hiccup, a
+# VPN dropping — is usually gone within a minute. So it is waited out for longer
+# than a transient error is, and without using up the retries other errors are
+# owed. Past this the run ends carrying the "unreachable" limit and the story is
+# parked and retried later (forge/services/provider_limit.py) rather than failed:
+# One story died on two connects slower than the SDK's 5s, twelve seconds apart.
+_MAX_UNREACHABLE_ATTEMPTS = 5
+_UNREACHABLE_DELAYS_SECONDS = (2.0, 5.0, 15.0, 30.0)
 # A rate limit that says when it lifts is waited out in place when that is soon
 # (the delay is the provider's own figure, not our backoff guess). A longer wait
 # is not: the loop stops at once with the limit on its result, and the story is
@@ -270,6 +280,11 @@ TurnCallback = Callable[[int, LlmResponse], None]
 
 def retry_backoff_seconds(attempt: int) -> float:
     return min(_RETRY_BASE_DELAY_SECONDS * (2 ** max(attempt - 1, 0)), _RETRY_CEILING_SECONDS)
+
+
+def unreachable_backoff_seconds(failures: int) -> float:
+    """The wait after the `failures`-th failed attempt to connect (1-based)."""
+    return _UNREACHABLE_DELAYS_SECONDS[min(max(failures, 1), len(_UNREACHABLE_DELAYS_SECONDS)) - 1]
 
 
 def tool_defs_from_schemas(schemas: list[dict[str, Any]]) -> list[ToolDef]:
@@ -430,7 +445,11 @@ async def _complete_with_retry(config: LoopConfig, request: LlmRequest) -> tuple
     last_error: LlmError | None = None
     api_duration_ms = 0
     timeouts = 0
-    for attempt in range(1, _MAX_TRANSIENT_RETRIES + 1):
+    # Failed calls that count against _MAX_TRANSIENT_RETRIES: every kind but
+    # "could not connect", which has its own budget.
+    attempt = 0
+    unreachable = 0
+    while True:
         started = time.monotonic()
         try:
             response = await config.provider.complete(request)
@@ -438,19 +457,26 @@ async def _complete_with_retry(config: LoopConfig, request: LlmRequest) -> tuple
         except LlmError as exc:
             api_duration_ms += int((time.monotonic() - started) * 1000)
             last_error = exc
-            if isinstance(exc, LlmTimeoutError):
-                timeouts += 1
-            if attempt >= _MAX_TRANSIENT_RETRIES or not is_retryable(exc) or timeouts > _MAX_TIMEOUT_RETRIES:
-                break
-            delay = retry_backoff_seconds(attempt)
-            if isinstance(exc, LlmRateLimitError) and exc.retry_after_seconds is not None:
-                if exc.retry_after_seconds > _MAX_INLINE_LIMIT_WAIT_SECONDS:
-                    break  # too long to sit through here; the caller parks the story
-                delay = max(delay, exc.retry_after_seconds + 1.0)
-            logger.warning("Transient LLM error (attempt %d/%d): %s — retrying in %.0fs", attempt, _MAX_TRANSIENT_RETRIES, exc, delay)
+            if isinstance(exc, LlmUnreachableError):
+                unreachable += 1
+                if unreachable >= _MAX_UNREACHABLE_ATTEMPTS:
+                    break
+                tried, delay = unreachable, unreachable_backoff_seconds(unreachable)
+            else:
+                attempt += 1
+                if isinstance(exc, LlmTimeoutError):
+                    timeouts += 1
+                if attempt >= _MAX_TRANSIENT_RETRIES or not is_retryable(exc) or timeouts > _MAX_TIMEOUT_RETRIES:
+                    break
+                tried, delay = attempt, retry_backoff_seconds(attempt)
+                if isinstance(exc, LlmRateLimitError) and exc.retry_after_seconds is not None:
+                    if exc.retry_after_seconds > _MAX_INLINE_LIMIT_WAIT_SECONDS:
+                        break  # too long to sit through here; the caller parks the story
+                    delay = max(delay, exc.retry_after_seconds + 1.0)
+            logger.warning("Transient LLM error (attempt %d): %s — retrying in %.0fs", tried, exc, delay)
             if config.on_retry:
                 try:
-                    config.on_retry(attempt, exc, delay)
+                    config.on_retry(tried, exc, delay)
                 except Exception:  # noqa: BLE001 — a caller's hook is never worth the run
                     logger.warning("on_retry raised — continuing", exc_info=True)
             await asyncio.sleep(delay)

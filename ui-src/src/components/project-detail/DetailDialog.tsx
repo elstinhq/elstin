@@ -14,6 +14,7 @@ import {
 import { lookupDue, startCandidate } from "../../lib/priorWork";
 import { useToast } from "../../lib/toast";
 import { displayKey, sourceLabel, ticketUrl } from "../../lib/ticketSource";
+import { cn } from "../../lib/utils";
 import { useSyncEpicFields } from "../../hooks/useEpics";
 import type { Epic, ExternalChangeAction, PriorWork, Story } from "../../types/api";
 import { Button } from "../ui/button";
@@ -371,21 +372,42 @@ function ReplanRow({ projectId, story }: { projectId: number; story: Story }) {
 // a person: the epic's pull request lists them too.
 function ReadOnlyChangesRow({ story }: { story: Story }) {
   const changes = story.read_only_changes ?? [];
-  if (!changes.length) return null;
+  const actions = story.person_actions ?? [];
+  if (!changes.length && !actions.length) return null;
   return (
     <DetailRow label="Needs a person">
-      <div className="text-muted-foreground text-xs">
-        Changes this ticket needs that forge won't make — in read-only repos, or files the project says agents must
-        not change. The rest of the plan runs without them.
-      </div>
-      <ul className="mt-1 flex flex-col gap-1">
-        {changes.map((change) => (
-          <li key={change.path} className="min-w-0 text-xs">
-            <span className="font-mono break-all">{change.path}</span>
-            {change.purpose ? <span className="text-muted-foreground"> — {change.purpose}</span> : null}
-          </li>
-        ))}
-      </ul>
+      {changes.length ? (
+        <>
+          <div className="text-muted-foreground text-xs">
+            Changes this ticket needs that forge won't make — in read-only repos, or files the project says agents must
+            not change. The rest of the plan runs without them.
+          </div>
+          <ul className="mt-1 flex flex-col gap-1">
+            {changes.map((change) => (
+              <li key={change.path} className="min-w-0 text-xs">
+                <span className="font-mono break-all">{change.path}</span>
+                {change.purpose ? <span className="text-muted-foreground"> — {change.purpose}</span> : null}
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+      {actions.length ? (
+        <>
+          <div className={cn("text-muted-foreground text-xs", changes.length && "mt-2")}>
+            Things the criteria lean on that no agent here can do — running against data it can't reach, checks outside
+            the repos, publishing, review. They are not part of this run and are listed in the epic's pull request.
+          </div>
+          <ul className="mt-1 flex flex-col gap-1">
+            {actions.map((action) => (
+              <li key={action.action} className="min-w-0 text-xs">
+                <span className="break-words">{action.action}</span>
+                {action.reason ? <span className="text-muted-foreground"> — {action.reason}</span> : null}
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
     </DetailRow>
   );
 }
@@ -424,6 +446,13 @@ function StoryDetailBody({ projectId, story, activityEnabled }: { projectId: num
           {story.retry_at
             ? `The provider said the limit lifts at ${new Date(story.retry_at).toLocaleString()}; forge retries this story then. The story stays failed until it does.`
             : "The provider did not say when the limit lifts, so nothing is scheduled. Retry once it has (or add credit)."}
+        </DetailRow>
+      ) : null}
+      {story.parked_reason === "provider_unreachable" ? (
+        <DetailRow label="Model endpoint">
+          {story.retry_at
+            ? `forge could not reach the model endpoint, even after several attempts. It retries this story automatically at ${new Date(story.retry_at).toLocaleString()}, continuing where the run stopped. The story stays failed until then. If it keeps failing, check the endpoint, proxy or VPN.`
+            : "forge could not reach the model endpoint, even after several attempts, and is not retrying on its own. Check the endpoint, proxy or VPN, then Retry."}
         </DetailRow>
       ) : null}
       <DetailRow label="Branch">{story.branch}</DetailRow>

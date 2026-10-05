@@ -221,9 +221,9 @@ def test_retry_non_failed_story_is_refused(epic):
 
 
 def test_replan_discards_a_plan_waiting_for_approval_and_keeps_the_answers(epic):
-    """"Not this plan", short of approving it. MKT2-866's answer (leave out
-    Webshop ID) is a decision the new plan must follow, so it stays."""
-    answers = [{"question": "Include Webshop ID?", "option_label": "No", "option_description": None}]
+    """"Not this plan", short of approving it. One story's answer (leave out
+    Reference ID) is a decision the new plan must follow, so it stays."""
+    answers = [{"question": "Include Reference ID?", "option_label": "No", "option_description": None}]
     epic.set_story_clarification_answers("ENG-2", answers)
     epic.set_story_status("ENG-2", "awaiting_plan_approval", parked_reason="plan_approval_gate")
 

@@ -113,6 +113,21 @@ class LlmTimeoutError(LlmConnectionError):
     """Request timed out. Retryable."""
 
 
+class LlmUnreachableError(LlmConnectionError):
+    """The provider could not be reached at all: the connection was never made
+    (a connect timeout, a refused or reset connect, DNS, a proxy that would not
+    pass it on), so nothing was sent and nothing was processed.
+
+    Not an LlmTimeoutError, deliberately. A timeout means a call already spent
+    its whole deadline and the provider likely stalled, so the loop allows one
+    more try; this costs seconds and is usually brief (a proxy hiccup, a VPN
+    dropping), so the loop waits it out for longer. When even that is not
+    enough the run ends carrying a ProviderLimit of kind "unreachable" and the
+    story is parked and retried later (forge/services/provider_limit.py) instead
+    of being failed for a network blip (two connects slower than the
+    SDK's 5s default, twelve seconds apart, ended the story)."""
+
+
 class LlmServerError(LlmError):
     """5xx from the provider. Retryable."""
 
@@ -208,11 +223,14 @@ LIMIT_RESET_MARGIN_SECONDS = 5
 
 @dataclass(frozen=True)
 class ProviderLimit:
-    """A model call that ended on a limit, in a form that survives being
+    """A model call that ended on a limit — or, kind "unreachable", on the
+    provider not being reachable at all — in a form that survives being
     checkpointed in a run's state. `reset_at` is epoch seconds, or None when the
-    provider did not say when the limit lifts — then only a person can tell."""
+    provider did not say when the limit lifts — then only a person can tell. An
+    unreachable provider never says: it always has None, and the retry time is
+    forge's own schedule (provider_limit.plan_parking)."""
 
-    kind: str  # "rate" | "quota"
+    kind: str  # "rate" | "quota" | "unreachable"
     reset_at: float | None
     message: str = ""
 
@@ -222,7 +240,10 @@ class ProviderLimit:
 
 def provider_limit_of(exc: BaseException | None, *, now: float | None = None) -> ProviderLimit | None:
     """The limit `exc` reports, or None when it is some other failure. A reset
-    further away than MAX_LIMIT_WAIT_SECONDS counts as unknown."""
+    further away than MAX_LIMIT_WAIT_SECONDS counts as unknown. A provider that
+    could not be reached is reported too, as kind "unreachable"."""
+    if isinstance(exc, LlmUnreachableError):
+        return ProviderLimit(kind="unreachable", reset_at=None, message=str(exc))
     if not isinstance(exc, LlmLimitError):
         return None
     wait = exc.retry_after_seconds

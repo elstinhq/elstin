@@ -77,6 +77,9 @@ export const PARKED_REASON_LABEL: Record<string, string> = {
   // forge/services/provider_limit.py: the provider refused calls on a rate or
   // quota limit. With a retry time forge retries the story itself then.
   usage_limit: "provider limit",
+  // forge/services/provider_limit.py: the model endpoint could not be reached
+  // (a proxy or VPN blip, usually). Forge retries the story itself shortly.
+  provider_unreachable: "model endpoint unreachable",
 };
 
 export const ACTIVITY_TYPE_LABEL: Record<string, string> = {
@@ -159,14 +162,17 @@ export function CoverageGapTag({ story }: { story: Story }) {
 // are for a person.
 export function ReadOnlyChangesTag({ story }: { story: Story }) {
   const changes = story.read_only_changes ?? [];
-  if (!changes.length) return null;
-  // Short: repo labels run long (@api-contract-definitions) and the row
-  // does not wrap. The paths are in the title and the story's details.
+  const actions = story.person_actions ?? [];
+  if (!changes.length && !actions.length) return null;
+  // Short: repo labels run long (@api-schemas) and the row
+  // does not wrap. The paths and actions are in the title and the story's
+  // details. Actions are the non-file kind — something run, checked or
+  // signed off — that no agent here can do (plan_gate.person_actions_of).
   return (
     <Tag
       label="left to a person"
       appearance="warning"
-      title={`forge won't make these; someone has to:\n${changes.map((c) => c.path).join("\n")}`}
+      title={`forge won't do these; someone has to:\n${[...changes.map((c) => c.path), ...actions.map((a) => a.action)].join("\n")}`}
     />
   );
 }

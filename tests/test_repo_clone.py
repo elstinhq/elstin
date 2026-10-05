@@ -153,11 +153,11 @@ from forge.services.repo_clone import scan_folder  # noqa: E402
 
 
 def _workspace(tmp_path):
-    """Like ../mkt: a plain folder with a checkout per service beside other
+    """Like ../mono: a plain folder with a checkout per service beside other
     things that are not repos."""
     root = tmp_path / "workspace"
-    _local_repo(root / "mkt-apiservice")
-    _local_repo(root / "Mkt-adminportal")
+    _local_repo(root / "mono-apiservice")
+    _local_repo(root / "Mono-adminportal")
     _local_repo(root / "fresh", commit=False)
     (root / "docs").mkdir()
     (root / "notes.txt").write_text("x\n")
@@ -173,10 +173,10 @@ def test_a_folder_holding_repos_lists_them_to_pick_from(tmp_path):
 
     assert result["path"] == str(root.resolve()) and result["is_repo"] is False
     assert [(r["name"], r["problem"] is None) for r in result["repos"]] == [
-        ("fresh", False), ("Mkt-adminportal", True), ("mkt-apiservice", True),
+        ("fresh", False), ("Mono-adminportal", True), ("mono-apiservice", True),
     ]
     assert result["repos"][0]["problem"].startswith("has no commits yet")  # the row already names the repo
-    assert result["repos"][2]["path"] == str((root / "mkt-apiservice").resolve())
+    assert result["repos"][2]["path"] == str((root / "mono-apiservice").resolve())
 
 
 def test_a_repo_scans_as_itself(tmp_path):
@@ -191,7 +191,7 @@ def test_a_repo_scans_as_itself(tmp_path):
 def test_attaching_a_folder_that_holds_repos_names_them(tmp_path):
     root = _workspace(tmp_path)
 
-    with pytest.raises(RepoAttachError, match=r"not a git repository, but it holds 3: fresh, Mkt-adminportal, mkt-apiservice"):
+    with pytest.raises(RepoAttachError, match=r"not a git repository, but it holds 3: fresh, Mono-adminportal, mono-apiservice"):
         attach_local_repository(str(root))
     (root / "empty").mkdir()
     with pytest.raises(RepoAttachError, match="run `git init` there"):
@@ -212,7 +212,7 @@ def test_browsing_lists_subfolders_and_marks_repos(tmp_path, monkeypatch):
     assert listing["path"] == str(root.resolve()) and listing["parent"] == str(root.resolve().parent)
     assert listing["is_repo"] is False and listing["truncated"] is False
     assert [(e["name"], e["is_repo"]) for e in listing["entries"]] == [
-        ("docs", False), ("fresh", True), ("Mkt-adminportal", True), ("mkt-apiservice", True),
+        ("docs", False), ("fresh", True), ("Mono-adminportal", True), ("mono-apiservice", True),
     ]  # folders only, hidden ones skipped, case-insensitive order
     inside = browse_folder(listing["entries"][2]["path"])
     assert inside["is_repo"] is True

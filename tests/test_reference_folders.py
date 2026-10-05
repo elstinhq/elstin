@@ -1,4 +1,4 @@
-"""Reference folders and read-only repos: a workspace folder like ~/dev/mkt
+"""Reference folders and read-only repos: a workspace folder like ~/dev/mono
 read for context (its CLAUDE.md, docs) and a shared contract repo read but
 never changed. forge/tools/reference_folder.py (the copy runs read),
 forge/api/project_routes.py (attaching, marking read-only), and a run through
@@ -27,18 +27,18 @@ def _git_repo(path) -> str:
 
 
 def _workspace(tmp_path):
-    """Like ~/dev/mkt."""
-    root = tmp_path / "mkt"
-    _git_repo(root / "mkt-apiservice")
-    _git_repo(root / "API-Contract-Definitions")
-    (root / "CLAUDE.md").write_text("API-Contract-Definitions is off limits.\n")
+    """Like ~/dev/mono."""
+    root = tmp_path / "mono"
+    _git_repo(root / "mono-apiservice")
+    _git_repo(root / "API-Schemas")
+    (root / "CLAUDE.md").write_text("API-Schemas is off limits.\n")
     (root / "docs" / "plans").mkdir(parents=True)
-    (root / "docs" / "kb.md").write_text("how customer search works\n")
+    (root / "docs" / "kb.md").write_text("how item search works\n")
     (root / "docs" / "plans" / "search.md").write_text("plan\n")
     (root / "db").mkdir()
     (root / "db" / "prod.gz").write_bytes(b"\x1f\x8b" + b"x" * 100)
-    (root / "Inventory report.csv").write_text("a,b\n1,2\n")
-    (root / "ip_white.sh").write_text("#!/bin/sh\n")
+    (root / "Quarterly report.csv").write_text("a,b\n1,2\n")
+    (root / "helper.sh").write_text("#!/bin/sh\n")
     (root / "big.log").write_text("x" * (reference_folder.MAX_FILE_BYTES + 1))
     (root / "blob.dat").write_bytes(b"\0\1\2")
     (root / ".claude").mkdir()
@@ -63,12 +63,12 @@ def test_the_copy_holds_the_context_and_leaves_out_repos_and_data(tmp_path):
     plan = plan_reference(str(root))
     copy = sync_reference_copy(str(root), str(tmp_path / "copy"))
 
-    assert _files(copy) == ["CLAUDE.md", "docs/kb.md", "docs/plans/search.md", "ip_white.sh"]
-    assert sorted(plan.repos) == ["API-Contract-Definitions", "mkt-apiservice"]
+    assert _files(copy) == ["CLAUDE.md", "docs/kb.md", "docs/plans/search.md", "helper.sh"]
+    assert sorted(plan.repos) == ["API-Schemas", "mono-apiservice"]
     summary = plan.summary()
-    assert summary["readable"] == ["CLAUDE.md", "docs/", "ip_white.sh"]
+    assert summary["readable"] == ["CLAUDE.md", "docs/", "helper.sh"]
     assert {s["name"]: s["reason"] for s in summary["skipped"]} == {
-        "big.log": "over 1 MB", "blob.dat": "binary file", "db/": "data file", "Inventory report.csv": "data file",
+        "big.log": "over 1 MB", "blob.dat": "binary file", "db/": "data file", "Quarterly report.csv": "data file",
     }
 
 
@@ -110,26 +110,26 @@ def test_attach_a_reference_folder_and_a_read_only_repo(tmp_path):
 
     root = _workspace(tmp_path)
     sm = StateManager()
-    project_id = sm.create_project("MKT")
+    project_id = sm.create_project("MONO")
 
     with _client() as client:
         scan = client.post("/api/projects/scan-folder", json={"path": str(root)}).json()
-        assert scan["reference"]["readable"] == ["CLAUDE.md", "docs/", "ip_white.sh"]
+        assert scan["reference"]["readable"] == ["CLAUDE.md", "docs/", "helper.sh"]
 
-        api = client.post(f"/api/projects/{project_id}/repos", json={"path": str(root / "mkt-apiservice")}).json()
+        api = client.post(f"/api/projects/{project_id}/repos", json={"path": str(root / "mono-apiservice")}).json()
         contracts = client.post(
-            f"/api/projects/{project_id}/repos", json={"path": str(root / "API-Contract-Definitions"), "read_only": True},
+            f"/api/projects/{project_id}/repos", json={"path": str(root / "API-Schemas"), "read_only": True},
         ).json()
         reference = client.post(f"/api/projects/{project_id}/repos", json={"path": str(root), "kind": "reference"}).json()
         a_repo_as_reference = client.post(
-            f"/api/projects/{project_id}/repos", json={"path": str(root / "mkt-apiservice"), "kind": "reference"},
+            f"/api/projects/{project_id}/repos", json={"path": str(root / "mono-apiservice"), "kind": "reference"},
         )
         generate = client.post(f"/api/projects/{project_id}/repos/{reference['id']}/guide/generate")
         make_reference_writable = client.put(f"/api/projects/{project_id}/repos/{reference['id']}", json={"read_only": False})
 
     assert (api["kind"], api["read_only"]) == ("repo", False)
     assert (contracts["kind"], contracts["read_only"]) == ("repo", True)
-    assert (reference["kind"], reference["read_only"], reference["label"]) == ("reference", True, "mkt")
+    assert (reference["kind"], reference["read_only"], reference["label"]) == ("reference", True, "mono")
     assert a_repo_as_reference.status_code == 400 and "mark it read-only instead" in a_repo_as_reference.json()["detail"]
     assert generate.status_code == 400
     assert make_reference_writable.status_code == 400
@@ -142,7 +142,7 @@ def test_marking_a_repo_read_only_moves_epics_off_it_and_waits_for_unfinished_wo
     from forge.state.manager import StateManager
 
     sm = StateManager()
-    project_id = sm.create_project("MKT")
+    project_id = sm.create_project("MONO")
     first = sm.add_project_repo(project_id, _git_repo(tmp_path / "a"), label="a")
     second = sm.add_project_repo(project_id, _git_repo(tmp_path / "b"), label="b")
     sm.create_epic("ENG-1", project_id=project_id)
@@ -166,16 +166,16 @@ def test_marking_a_repo_read_only_moves_epics_off_it_and_waits_for_unfinished_wo
 @pytestmark_db
 def test_create_a_project_with_repos_a_read_only_one_and_the_reference_folder(tmp_path):
     root = _workspace(tmp_path)
-    api, contracts = str((root / "mkt-apiservice").resolve()), str((root / "API-Contract-Definitions").resolve())
+    api, contracts = str((root / "mono-apiservice").resolve()), str((root / "API-Schemas").resolve())
 
     with _client() as client:
         project = client.post("/api/projects", json={
-            "name": "MKT", "repo_paths": [api, contracts], "read_only_paths": [contracts], "reference_path": str(root),
+            "name": "MONO", "repo_paths": [api, contracts], "read_only_paths": [contracts], "reference_path": str(root),
         }).json()
         repos = client.get(f"/api/projects/{project['id']}/repos").json()
 
     assert [(r["label"], r["kind"], r["read_only"]) for r in repos] == [
-        ("mkt-apiservice", "repo", False), ("API-Contract-Definitions", "repo", True), ("mkt", "reference", True),
+        ("mono-apiservice", "repo", False), ("API-Schemas", "repo", True), ("mono", "reference", True),
     ]
 
 
@@ -200,23 +200,23 @@ async def test_a_run_reads_the_reference_folder_and_never_branches_read_only_rep
     set_config("require_plan_approval", "false")
     root = _workspace(tmp_path)
     # The service repo needs an origin like any real one (worktree.py assumes it).
-    api = str((root / "mkt-apiservice").resolve())
-    (root / "mkt-apiservice" / "AGENTS.md").write_text("Run mvn verify.\n")
+    api = str((root / "mono-apiservice").resolve())
+    (root / "mono-apiservice" / "AGENTS.md").write_text("Run mvn verify.\n")
     subprocess.run(["git", "add", "."], cwd=api, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "guide"], cwd=api, check=True)
     subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(tmp_path / "api.git")], check=True)
     subprocess.run(["git", "remote", "add", "origin", str(tmp_path / "api.git")], cwd=api, check=True)
     subprocess.run(["git", "push", "-q", "origin", "main"], cwd=api, check=True)
-    contracts = str((root / "API-Contract-Definitions").resolve())
+    contracts = str((root / "API-Schemas").resolve())
 
     sm = StateManager()
-    project_id = sm.create_project("MKT")
-    api_id = sm.add_project_repo(project_id, api, label="mkt-apiservice")
-    sm.add_project_repo(project_id, contracts, label="API-Contract-Definitions", read_only=True)
-    sm.add_project_repo(project_id, str(root.resolve()), label="mkt", kind="reference")
+    project_id = sm.create_project("MONO")
+    api_id = sm.add_project_repo(project_id, api, label="mono-apiservice")
+    sm.add_project_repo(project_id, contracts, label="API-Schemas", read_only=True)
+    sm.add_project_repo(project_id, str(root.resolve()), label="mono", kind="reference")
     sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2"]], manual_gate=False)
     sm.set_epic_project_repo("ENG-1", api_id)
-    sm.create_story("ENG-2", epic_key="ENG-1", wave=0, summary="customer search", depends_on=[])
+    sm.create_story("ENG-2", epic_key="ENG-1", wave=0, summary="item search", depends_on=[])
     seen: dict = {}
 
     async def planner(**kwargs):
@@ -227,27 +227,27 @@ async def test_a_run_reads_the_reference_folder_and_never_branches_read_only_rep
 
     await daemon.poll_once(sm, wait=True)
 
-    assert sorted(seen["read_only_labels"]) == ["api-contract-definitions", "mkt"]
+    assert sorted(seen["read_only_labels"]) == ["api-schemas", "mono"]
     roots = seen["repo_roots"]
-    assert roots["api-contract-definitions"] == contracts
-    assert _files(roots["mkt"]) == ["CLAUDE.md", "docs/kb.md", "docs/plans/search.md", "ip_white.sh"]
+    assert roots["api-schemas"] == contracts
+    assert _files(roots["mono"]) == ["CLAUDE.md", "docs/kb.md", "docs/plans/search.md", "helper.sh"]
     guide = seen["project_guide"]["content"]
-    assert guide.startswith("### mkt (CLAUDE.md)\n\nAPI-Contract-Definitions is off limits.")
-    assert "### mkt-apiservice (AGENTS.md)" in guide  # the repo's own, after the workspace's
+    assert guide.startswith("### mono (CLAUDE.md)\n\nAPI-Schemas is off limits.")
+    assert "### mono-apiservice (AGENTS.md)" in guide  # the repo's own, after the workspace's
     epic_branch = integration_branch_name("ENG-1")
     assert subprocess.run(["git", "rev-parse", "--verify", "-q", epic_branch], cwd=api).returncode == 0
     assert subprocess.run(["git", "rev-parse", "--verify", "-q", epic_branch], cwd=contracts).returncode != 0
     # The workspace folder itself was only read.
     assert sorted(os.listdir(root)) == sorted([
-        ".claude", "API-Contract-Definitions", "CLAUDE.md", "Inventory report.csv", "big.log", "blob.dat", "db",
-        "docs", "ip_white.sh", "mkt-apiservice", "node_modules",
+        ".claude", "API-Schemas", "CLAUDE.md", "Quarterly report.csv", "big.log", "blob.dat", "db",
+        "docs", "helper.sh", "mono-apiservice", "node_modules",
     ])
 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("forge_db", "fake_agents")
 async def test_changes_a_plan_needs_in_a_read_only_repo_are_kept_for_a_person(git_repo, tmp_path, project_id, monkeypatch):
-    """MKT2-866: the plan goes ahead without the contract change, which is
+    """One story: the plan goes ahead without the contract change, which is
     kept on the story — the board's tag, the details — and listed in the
     epic's pull request. The next plan replaces the list."""
     import forge.daemon.main as daemon
@@ -260,10 +260,10 @@ async def test_changes_a_plan_needs_in_a_read_only_repo_are_kept_for_a_person(gi
     set_config("worktrees_base_dir", str(tmp_path / "worktrees"))
     set_config("require_plan_approval", "true")
     sm = StateManager()
-    sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2"]], manual_gate=False, summary="Customer search")
+    sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2"]], manual_gate=False, summary="Item search")
     sm.set_epic_project_repo("ENG-1", sm.add_project_repo(project_id, git_repo))
     sm.create_story("ENG-2", epic_key="ENG-1", wave=0, summary="search columns", depends_on=[])
-    needed = [{"path": "@contracts/orders.yaml", "purpose": "add the columns to the contract"}]
+    needed = [{"path": "@contracts/items.yaml", "purpose": "add the columns to the contract"}]
     plans = [needed, []]
 
     async def planner(**kwargs):
@@ -279,7 +279,7 @@ async def test_changes_a_plan_needs_in_a_read_only_repo_are_kept_for_a_person(gi
     assert story["status"] == "awaiting_plan_approval" and story["read_only_changes"] == needed
     body = daemon._epic_pr_body(sm, sm.get_epic("ENG-1"))
     assert "## Changes left to a person" in body
-    assert "- `@contracts/orders.yaml` (ENG-2): add the columns to the contract" in body
+    assert "- `@contracts/items.yaml` (ENG-2): add the columns to the contract" in body
 
     assert sm.send_back_to_planning("ENG-2")  # as a changed ticket or newly merged work does
     await daemon.poll_once(sm, wait=True)

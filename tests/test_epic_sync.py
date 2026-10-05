@@ -304,7 +304,7 @@ _PROJ_3480 = [
     ("PROJ-3481", "[Shop App] Select multiple item types on the search form"),
     ("PROJ-3482", "[Shop App] Search and retrieve offers for a multi-item order"),
     ("PROJ-3483", "[Shop App] View multi-item pricing on the results list and details"),
-    ("PROJ-3484", "[Shop App] Complete booking for multiple item types through review and acknowledgement"),
+    ("PROJ-3484", "[Shop App] Complete checkout for multiple item types through review and acknowledgement"),
     ("PROJ-3485", "[Shop App] Handle multi-item errors and persist selections"),
     ("PROJ-3722", "[Shop App] Validate implemented end-to-end multi-item flow"),
 ]

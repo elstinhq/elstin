@@ -36,6 +36,7 @@ import re
 import time
 from typing import Any
 
+from forge.agents.roles.plan_gate import person_actions_of
 from forge.config.store import get_int_config
 from forge.services.generation import chat_completion_json
 from forge.services.run_activity import append_activity
@@ -201,7 +202,7 @@ def compare_to_plan(
 # What the review is shown of the change: every changed file, sharing
 # _DIFF_BUDGET_CHARS (the payload is cut at 120,000), none over
 # _MAX_DIFF_CHARS. A file count cap used to drop whatever came 21st —
-# MKT2-866 changed 21 files.
+# one story changed 21 files.
 _DIFF_BUDGET_CHARS = 90_000
 _MAX_DIFF_CHARS = 12_000
 _FAILED_OUTPUT_TAIL = 1_500
@@ -314,7 +315,7 @@ def _budgeted_diffs(diffs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _story_diffs(worktree_path: str, story_worktrees: dict[str, Any] | None, default_label: str) -> list[dict[str, Any]]:
     """What the story changed, in every repo it wrote — the repos the gate
     checks (`_gate_workspace`), another repo's paths `@label/`-prefixed.
-    Reading only `worktree_path` showed MKT2-866's review the backend and
+    Reading only `worktree_path` showed one story's review the backend and
     none of the portal, and it rejected the story for the missing half."""
     workspace = _gate_workspace(worktree_path, story_worktrees, default_label)
     return [
@@ -420,6 +421,52 @@ def _gate_issue_details(gate: dict[str, Any], issue: dict[str, Any]) -> str:
     return ""
 
 
+_TESTS_FAILED_SUFFIX = ": tests failed"
+_REPO_PREFIX_RE = re.compile(r"^\[([^\]]*)\]\s*")
+
+
+def _test_failure_instruction(issues: list[dict[str, Any]], *, max_attempts: int) -> list[str]:
+    """What to tell dev when the gate's tests failed: run them, here, until
+    they pass. [] when no test failed.
+
+    The brief used to end every failure the same way — "then run
+    analyze_changed_files_tool" — and that tool compiles and lints; it does not
+    run a test. One story's developer fixed a failing assertion, ran it, saw
+    "analyzer passed", and finished three times over without once running the
+    test it had been told failed: each round was a guess made blind, a wrong
+    one cost a gate round, and the story failed with the verifier never reached.
+    The tests are allowed through run_command_tool (the profile's
+    test_command_prefixes), so the brief names the command."""
+    ways: list[str] = []
+    for issue in issues:
+        raw = str(issue.get("reason") or "")
+        prefix = _REPO_PREFIX_RE.match(raw)
+        reason = _REPO_PREFIX_RE.sub("", raw)
+        if not reason.endswith(_TESTS_FAILED_SUFFIX):
+            continue
+        hint = language_hooks.test_command_hint(reason[: -len(_TESTS_FAILED_SUFFIX)].strip())
+        way = f"`{hint}`" if hint else "the project's test command"
+        # The gate tags a failure with its repo when the story spans several;
+        # run_command_tool runs in the default repo unless told which (the
+        # portal's tests do not run in the API's worktree).
+        if prefix:
+            way += f' with repo="{prefix.group(1)}"'
+        if way not in ways:
+            ways.append(way)
+    if not ways:
+        return []
+    command = " or ".join(ways)
+    return [
+        "",
+        f"A test failed: run it yourself before you finish — run_command_tool with {command}. analyze_changed_files_tool "
+        "only compiles and lints, so it passing says nothing about this failure. Re-run after every change; stop only "
+        "when it passes.",
+        "If the assertion is over a collection (every, some, list equality), work out the whole set it must cover first — "
+        "read or print the data — then fix once. One case per attempt fails on the next case, and you have "
+        f"{max_attempts} attempts in all.",
+    ]
+
+
 def format_gate_feedback(gate: dict[str, Any], *, attempt: int, max_attempts: int, wrote_nothing: bool = False) -> str:
     """The user message the graph sends dev when Tier 1 fails — one
     targeted fix brief in place of a verifier review. Leads with a
@@ -510,6 +557,8 @@ def format_gate_feedback(gate: dict[str, Any], *, attempt: int, max_attempts: in
     if omitted > 0:
         lines.append(f"... and {omitted} more problem(s); run analyze_changed_files_tool to see them all.")
 
+    test_instruction = _test_failure_instruction(issues, max_attempts=max_attempts)
+
     if has_unwritten:
         lines.extend([
             "",
@@ -517,6 +566,7 @@ def format_gate_feedback(gate: dict[str, Any], *, attempt: int, max_attempts: in
             "calls in ONE turn, not one file per turn. Do not explore or re-read first: the plan is above and you have already "
             "explored; read a file only when an edit must copy its exact text. "
             "Then run analyze_changed_files_tool; when it passes for your files, respond with a plain-text summary.",
+            *test_instruction,
         ])
         if unwritten[KIND_UNMODIFIED_TARGET]:
             lines.extend([
@@ -526,6 +576,13 @@ def format_gate_feedback(gate: dict[str, Any], *, attempt: int, max_attempts: in
                 "satisfies the requirement. A comment, rename or reformat made only so this check sees a change is worse than "
                 "declaring it: the reviewer sees your declaration and judges it.",
             ])
+    elif test_instruction:
+        lines.extend([
+            "",
+            "Apply the fixes with edit_file_tool/apply_edits_tool (do not rewrite files from scratch; do not touch files outside the plan), "
+            "then re-run the failing tests as below. Respond with a plain-text summary only when they pass.",
+            *test_instruction,
+        ])
     else:
         lines.extend([
             "",
@@ -537,7 +594,8 @@ def format_gate_feedback(gate: dict[str, Any], *, attempt: int, max_attempts: in
 
 def _build_llm_payload(plan: dict[str, Any], acceptance_criteria: list[str], file_changes: list[dict[str, Any]], diffs: list[dict[str, Any]], gate: dict[str, Any]) -> dict[str, Any]:
     left_to_a_person = plan.get("read_only_changes") or []
-    plan = {k: v for k, v in plan.items() if k not in ("plan_markdown", "read_only_changes")}
+    person_actions = person_actions_of(plan)
+    plan = {k: v for k, v in plan.items() if k not in ("plan_markdown", "read_only_changes", "person_actions")}
     gate_summary = dict(gate)
     profiles_summary: dict[str, Any] = {}
     for profile_key, report in (gate.get("profiles") or {}).items():
@@ -547,6 +605,18 @@ def _build_llm_payload(plan: dict[str, Any], acceptance_criteria: list[str], fil
                 continue
             section = dict(section)
             keep_tail = sub_key == "test_results" and not section.get("passed", True)
+            if sub_key == "test_results" and section.get("coverage_gap"):
+                # Vitest exits non-zero for a missed coverage threshold exactly as
+                # it does for a failed assertion, so `passed` reads false here
+                # although every test passed. The gate recorded it as a
+                # coverage_gap and passed (language_hooks.verify), and the
+                # threshold errors in the output tail read as a failure to a
+                # reviewer — one story was rejected three times over them.
+                keep_tail = False
+                section["note"] = (
+                    "Every test passed; only the coverage threshold was missed. Recorded as coverage_gap — see "
+                    "deterministic_gate.coverage_gap_detail — and not a failure."
+                )
             for stream in ("stdout", "stderr"):
                 value = section.get(stream)
                 if not value:
@@ -559,6 +629,7 @@ def _build_llm_payload(plan: dict[str, Any], acceptance_criteria: list[str], fil
         "plan": plan,
         "acceptance_criteria": acceptance_criteria,
         **({"left_to_a_person": left_to_a_person} if left_to_a_person else {}),
+        **({"person_actions": person_actions} if person_actions else {}),
         "file_changes": file_changes,
         "diffs": _budgeted_diffs(diffs),
         "deterministic_gate": gate_summary,
@@ -630,7 +701,29 @@ changes — a file that already does the job needs none.
 `left_to_a_person` lists changes this story may not make — in read-only repos (a shared API contract,
 say), or files the project says agents must not change: a person makes them, outside this change. Never set passed=false because they are missing
 from the diffs, and never ask for them in required_fixes. An acceptance criterion that depends on
-them is judged only on the part this change can deliver."""
+them is judged only on the part this change can deliver.
+
+`person_actions` lists things no agent here can do and a person will: run something against data or
+an environment the developer cannot reach and record the result, check open pull requests or other
+branches, publish, review or sign off. Treat them exactly as `left_to_a_person`: never set passed=false
+because they are undone, never put one in required_fixes, and judge a criterion that leans on one only on
+the part this change can deliver — a committed, re-runnable script and a report with a place for each result
+meet "reconcile against the extract"; the run's results are not this change's to supply.
+
+`deterministic_gate.coverage_gap` (with `coverage_gap_detail`) means the planned tests PASSED and only the
+repository's coverage threshold was missed. The gate records that and passes, and the person who opens the pull
+request is shown it; it is not a failure. A profile's `test_results` may carry the same miss. Never set
+passed=false because of it and never put it in required_fixes: the developer can only edit the plan's files,
+and the figure counts every file the tests load, including shared code other stories own. An acceptance
+criterion about a coverage threshold is judged on whether the change's own code is tested; if the figure is
+short, say so in `reasoning` and judge the rest.
+
+Do not ask the developer for what it has no way to do. It runs only the project's build, test and codegen
+commands, has no GitHub, network or data access and cannot see branches or pull requests outside the
+worktrees, and the deterministic gate has already built the code and run the planned tests — so never put in
+required_fixes "run the complete build or suite", a check against open pull requests, or a capture from data
+it cannot reach. If an acceptance criterion cannot be met by this developer from the repositories on disk,
+say so in `reasoning` and judge the rest of the change; do not fail the run for it."""
 
 
 _NOTHING_TO_VERIFY = (

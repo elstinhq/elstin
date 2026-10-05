@@ -67,6 +67,14 @@ export function EpicCard({
   const pullRequests = (epic.pull_requests || []).filter((pr) => pr.number || pr.error);
   const total = stories.length;
   const pct = total ? Math.round((doneCount / total) * 100) : 0;
+  // Pause/Resume is a hold on dispatch, and the daemon stops polling an epic
+  // once it is merged or complete (forge/state/manager_epic.py's
+  // _TERMINAL_EPIC_PHASES), so on a finished epic the flag does nothing — yet
+  // it was left set from the epic's creation (epics start paused) and read
+  // "Paused / Resume" on work that was long done. Keyed on the phase rather
+  // than a guess at the stories, so the control comes back by itself if the
+  // backend ever reopens a finished epic.
+  const finished = epic.phase === "merged" || epic.phase === "complete";
 
   return (
     <Card className="p-4">
@@ -124,7 +132,7 @@ export function EpicCard({
             ),
           )}
 
-          {epic.manual_gate ? <Tag label="Paused" appearance="warning" /> : null}
+          {epic.manual_gate && !finished ? <Tag label="Paused" appearance="warning" /> : null}
           {epic.pr_approval === "awaiting" ? (
             <Tag label="Awaiting PR approval" appearance="warning" title="Every story has merged; nothing is pushed until you open the pull request or keep the branch local." />
           ) : null}
@@ -134,18 +142,20 @@ export function EpicCard({
 
           <div className="flex-1" />
 
-          <Button
-            variant="outline"
-            size="sm"
-            loading={setEpicGate.isPending}
-            onClick={(e) => {
-              e.stopPropagation();
-              setEpicGate.mutate({ epicKey: epic.jira_key, manualGate: !epic.manual_gate });
-            }}
-          >
-            {epic.manual_gate ? <Play /> : <Pause />}
-            {epic.manual_gate ? "Resume" : "Pause"}
-          </Button>
+          {finished ? null : (
+            <Button
+              variant="outline"
+              size="sm"
+              loading={setEpicGate.isPending}
+              onClick={(e) => {
+                e.stopPropagation();
+                setEpicGate.mutate({ epicKey: epic.jira_key, manualGate: !epic.manual_gate });
+              }}
+            >
+              {epic.manual_gate ? <Play /> : <Pause />}
+              {epic.manual_gate ? "Resume" : "Pause"}
+            </Button>
+          )}
           <RemoveEpicButton projectId={projectId} epic={epic} />
         </div>
 

@@ -24,6 +24,7 @@ import logging
 from typing import Any
 
 from openai import (
+    DEFAULT_TIMEOUT,
     APIConnectionError,
     APIStatusError,
     APITimeoutError,
@@ -45,6 +46,7 @@ from forge.llm.errors import (
     LlmRateLimitError,
     LlmServerError,
     LlmTimeoutError,
+    LlmUnreachableError,
     is_context_overflow_message,
     is_quota_message,
     retry_after_seconds,
@@ -138,6 +140,21 @@ def _limit_error(exc: APIStatusError, *, quota: bool = False) -> LlmQuotaError |
     return LlmRateLimitError(message, retry_after_seconds=wait)
 
 
+# Names of the transport exceptions that mean the connection was never made. The
+# SDK chains one as the cause of its APITimeoutError / APIConnectionError, and
+# which HTTP library supplies it has changed between SDK versions (httpx, then
+# httpx2), so they are recognised by name rather than imported.
+_NEVER_CONNECTED = frozenset({"ConnectTimeout", "ConnectError", "ProxyError"})
+
+
+def _never_connected(exc: BaseException) -> bool:
+    """True when `exc` (an SDK timeout or connection error) failed before any
+    connection to the endpoint existed — as opposed to one that dropped, or
+    stalled, mid-request. Nothing was sent, so retrying it is free."""
+    cause = exc.__cause__
+    return cause is not None and any(cls.__name__ in _NEVER_CONNECTED for cls in type(cause).__mro__)
+
+
 class OpenAiCompatProvider:
     """Adapter for OpenAI's own API and any OpenAI-compatible endpoint
     (pass `base_url` to reach one). One instance per (api_key, base_url)
@@ -150,8 +167,19 @@ class OpenAiCompatProvider:
         base_url: str | None = None,
         name: str = "openai",
         request_timeout_seconds: float | None = None,
+        connect_timeout_seconds: float | None = None,
     ) -> None:
         self.name = name
+        # How long to wait for the connection itself. The SDK allows 5s, which a
+        # corporate proxy reached over a VPN can miss for no reason that lasts;
+        # None keeps the SDK's figure. Only the connect phase changes:
+        # read/write/pool stay what the SDK sets, and the overall deadline above
+        # is still the call's real bound.
+        self._connect_timeout = connect_timeout_seconds if connect_timeout_seconds and connect_timeout_seconds > 0 else None
+        client_timeout = (
+            type(DEFAULT_TIMEOUT)(DEFAULT_TIMEOUT.read, connect=self._connect_timeout)
+            if self._connect_timeout else DEFAULT_TIMEOUT
+        )
         # An overall wall-clock deadline for one call (0/None = none). The SDK's
         # own timeout is per read, and a gateway that answers a slow request
         # with keep-alive bytes never trips it — one run's single model call
@@ -178,7 +206,12 @@ class OpenAiCompatProvider:
         # returns and raises what it did. A call is only recorded — messages,
         # reply, token usage — inside a traced run (forge/services/tracing.py),
         # nested under the graph node that made it; anywhere else it is a no-op.
-        self._client = wrap_openai(AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=0))
+        self._client = wrap_openai(AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=0, timeout=client_timeout))
+
+    def _unreachable_message(self, exc: BaseException) -> str:
+        waited = f" within {self._connect_timeout:g}s" if self._connect_timeout and isinstance(exc, APITimeoutError) else ""
+        reason = str(exc.__cause__ or "") or str(exc)
+        return f"Could not connect to the model endpoint{waited}: {reason}"
 
     async def complete(self, request: LlmRequest) -> LlmResponse:
         kwargs = self._build_kwargs(request)
@@ -194,8 +227,12 @@ class OpenAiCompatProvider:
         except RateLimitError as exc:
             raise _limit_error(exc) from exc
         except APITimeoutError as exc:
+            if _never_connected(exc):
+                raise LlmUnreachableError(self._unreachable_message(exc)) from exc
             raise LlmTimeoutError(str(exc)) from exc
         except APIConnectionError as exc:
+            if _never_connected(exc):
+                raise LlmUnreachableError(self._unreachable_message(exc)) from exc
             raise LlmConnectionError(str(exc)) from exc
         except BadRequestError as exc:
             if getattr(exc, "code", None) == "context_length_exceeded" or is_context_overflow_message(str(exc)):

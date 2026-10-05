@@ -1,8 +1,8 @@
 """Work from tickets closed as done in the source, not in the default branch
 yet (forge/daemon/main.py's _bring_done_work_into_epic and
-_replan_behind_done_work). The MKT2-846 case: two customer-search tickets Done
+_replan_behind_done_work). One such case: two item-search tickets Done
 in JIRA, their branches unmerged, and the next story planning against a main
-that had no customer search at all. Real Postgres and git; agents are fakes."""
+that had no item search at all. Real Postgres and git; agents are fakes."""
 from __future__ import annotations
 
 import os

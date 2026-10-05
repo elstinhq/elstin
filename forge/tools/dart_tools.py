@@ -552,6 +552,7 @@ def dart_flutter_profile() -> LanguageProfile:
         ),
         analyze_command_prefixes=(("flutter", "analyze"), ("dart", "analyze")),
         test_command_prefixes=(("flutter", "test"), ("dart", "test")),
+        test_command_hint="flutter test <path/to/the_test.dart>",
         format_test_command=_dart_format_test_command,
         planner_conventions=_DI_REGISTRATION_CONVENTIONS,
         dev_conventions=_DEPRECATED_API_CONVENTIONS,

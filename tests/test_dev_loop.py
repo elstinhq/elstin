@@ -372,7 +372,7 @@ def test_changes_left_to_a_person_are_named_but_not_in_dev_s_plan():
 
     plan = {
         "files_to_modify": [{"path": "src/Search.java", "purpose": "columns"}],
-        "read_only_changes": [{"path": "@contracts/orders.yaml", "purpose": "add the columns to the contract"}],
+        "read_only_changes": [{"path": "@contracts/items.yaml", "purpose": "add the columns to the contract"}],
         "plan_markdown": "# Plan",
     }
 
@@ -381,7 +381,83 @@ def test_changes_left_to_a_person_are_named_but_not_in_dev_s_plan():
     approved, _, rest = prompt.partition("\n\n")
     assert "read_only_changes" not in approved and "src/Search.java" in approved
     assert "Not yours to make" in rest
-    assert "- @contracts/orders.yaml: add the columns to the contract" in rest
+    assert "- @contracts/items.yaml: add the columns to the contract" in rest
+
+
+def test_actions_left_to_a_person_are_named_to_dev_and_never_to_be_faked():
+    """A developer dated an "audit" it had no way to run, because a
+    reviewer kept asking for one. Told up front that it is a person's, and not
+    to make anything that looks like it is done."""
+    from forge.agents.roles.dev_loop import _build_prompt
+
+    plan = {
+        "files_to_modify": [{"path": "docs/report.md", "purpose": "the report"}],
+        "person_actions": [
+            {"action": "Run the script against the reference extract", "reason": "the agent has no data access"},
+            {"action": "Publish the delta sheet", "reason": None},
+        ],
+        "plan_markdown": "# Plan",
+    }
+
+    prompt = _build_prompt(continuing=False, plan=plan, context_bundle={}, brief="the brief")
+
+    approved, _, rest = prompt.partition("\n\n")
+    assert "person_actions" not in approved and "docs/report.md" in approved
+    assert "Not yours to do — a person does these" in rest
+    assert "never write a comment, report row, count or name that makes one look done" in rest
+    assert "- Run the script against the reference extract — the agent has no data access" in rest
+    assert "- Publish the delta sheet\n" in rest
+
+
+def test_a_fix_brief_sends_dev_to_run_the_plans_tests_not_just_the_analyzer():
+    """A story was sent back three times for coverage and finished each round on
+    "analyzer passed" — the brief ended "then run analyze_changed_files_tool",
+    which never runs a test."""
+    from forge.agents.roles.dev import _build_iteration_brief
+
+    fixes = ["Add focused coverage so the planned portal test command meets the 80% thresholds."]
+    for continuing in (False, True):
+        brief = _build_iteration_brief(
+            "/nonexistent", set(), fixes, [], continuing=continuing,
+            test_commands=[("adminportal", "npx vitest run <path/to/the.spec.ts>")],
+        )
+
+        assert 'run_command_tool with `npx vitest run <path/to/the.spec.ts>` with repo="adminportal"' in brief
+        assert "analyze_changed_files_tool only compiles and lints; it does NOT run tests" in brief
+        assert "the checks pass for your files" in brief
+
+
+def test_a_fix_brief_for_a_plan_with_no_tests_is_as_it_was():
+    from forge.agents.roles.dev import _build_iteration_brief
+
+    brief = _build_iteration_brief("/nonexistent", set(), ["fix it"], [], test_commands=[])
+
+    assert "run_command_tool" not in brief and "does NOT run tests" not in brief
+    assert "Apply each fix with edit_file_tool, then run analyze_changed_files_tool. When every fix is applied and the checks pass" in brief
+
+
+def test_the_test_command_to_run_is_worked_out_per_repo_and_names_only_a_non_default_one(monkeypatch):
+    """The plan writes the portal only, the default repo is the API: the brief
+    names the portal, whose tests are in it. A test of the default repo names no
+    repo — run_command_tool runs there already."""
+    from types import SimpleNamespace
+
+    from forge.agents.roles.dev_loop import planned_test_commands
+    from forge.tools import language_hooks
+    from forge.tools.workspace import Workspace
+
+    roots = {"api": "/w/api", "web": "/w/web"}
+    workspace = Workspace(default_label="api", roots=roots)
+    profiles = {"/w/web": SimpleNamespace(key="vue_vite"), "/w/api": SimpleNamespace(key="java_maven")}
+    monkeypatch.setattr(language_hooks, "profile_for_path", lambda root, path: profiles.get(root))
+
+    only_web = planned_test_commands(workspace, roots, ["@web/tests/a.spec.ts"], "api")
+    both = planned_test_commands(workspace, roots, ["@web/tests/a.spec.ts", "src/test/FooTest.java"], "api")
+    none = planned_test_commands(workspace, roots, [], "api")
+
+    assert only_web == [("web", "npx vitest run <path/to/the.spec.ts>")]
+    assert both == [(None, "./mvnw test -Dtest=<TestClass>"), ("web", "npx vitest run <path/to/the.spec.ts>")]
+    assert none == []
 
 
 async def test_files_the_story_already_changed_stay_writable_off_the_plan(git_repo: str, tmp_path, monkeypatch: pytest.MonkeyPatch):

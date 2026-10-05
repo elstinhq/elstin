@@ -414,7 +414,7 @@ async def test_a_bad_verifier_reply_fails_one_story_without_abandoning_the_poll_
 
 
 async def test_a_retried_story_plans_with_the_answers_already_given(git_repo: str, tmp_path, project_id, monkeypatch: pytest.MonkeyPatch):
-    """MKT2-866: a person answered the planner's question, the run then
+    """One story: a person answered the planner's question, the run then
     failed, and Retry — a fresh run, not a resume — planned without the
     answer, exporting the column it had said to leave out."""
     import forge.orchestration.graph as graph
@@ -424,7 +424,7 @@ async def test_a_retried_story_plans_with_the_answers_already_given(git_repo: st
     sm = StateManager()
     _create_epic_with_repo(sm, "ENG-1", project_id=project_id, repo_path=git_repo, levels=[["ENG-2"]])
     sm.create_story("ENG-2", epic_key="ENG-1", wave=0, summary="Export customers", depends_on=[])
-    answers = [{"question": "Include Webshop ID?", "option_label": "No", "option_description": None}]
+    answers = [{"question": "Include Reference ID?", "option_label": "No", "option_description": None}]
     sm.set_story_clarification_answers("ENG-2", answers)
     sm.set_story_status("ENG-2", "failed", failure_stage="run")
     sm.retry_story("ENG-2")
@@ -444,7 +444,7 @@ async def test_a_retried_story_plans_with_the_answers_already_given(git_repo: st
 
 
 async def test_retry_keeps_the_work_the_failed_run_left_and_the_planner_is_told(git_repo: str, tmp_path, project_id, monkeypatch: pytest.MonkeyPatch):
-    """MKT2-866: Retry recreated the story's main worktree — throwing away a
+    """One story: Retry recreated the story's main worktree — throwing away a
     backend that compiled and passed its tests — while keeping its portal."""
     import forge.orchestration.graph as graph
     from forge.services.run_activity import list_activity

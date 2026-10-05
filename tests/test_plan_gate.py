@@ -9,16 +9,22 @@ import os
 from forge.agents.roles.plan_gate import (
     KIND_CREATE_TARGET_EXISTS,
     KIND_EVIDENCE_MISSING,
+    KIND_MALFORMED_OUTPUT,
     KIND_MODIFY_TARGET_MISSING,
     KIND_NO_CRITERIA,
     KIND_NO_FILES,
     KIND_QUESTION_PLACEHOLDER,
+    KIND_STUB_PLAN,
     KIND_UNKNOWN_REPO,
     blocking,
     check_plan,
+    check_plan_integrity,
     check_questions,
+    describe_plan_shape,
     format_plan_feedback,
     normalize_plan,
+    person_actions_of,
+    plan_shape,
 )
 from forge.tools.workspace import Workspace
 
@@ -275,6 +281,155 @@ def test_feedback_for_an_empty_plan_explains_why_empty_is_not_an_answer(git_repo
     assert "empty plan ships the ticket as an empty change" in text
 
 
+def test_feedback_for_an_empty_plan_points_an_implemented_ticket_at_files_declared_satisfied(git_repo):
+    """An empty plan on a ticket that is already built used to be told to
+    plan "the files that still need changing" — of which there are none —
+    so it stayed empty and the story failed. The brief now names the way
+    through: the existing files, under files_to_modify, for dev to declare."""
+    defects = check_plan(_plan(files_to_modify=[]), _ws(git_repo))
+
+    text = format_plan_feedback(defects, attempt=1, max_attempts=3)
+
+    assert "under files_to_modify" in text
+    assert '"Already satisfied:"' in text
+    assert "finishes as done with no change" in text
+    assert "Do not invent an edit" in text
+    assert "still need changing" not in text
+
+
+def test_a_plan_listing_existing_files_as_already_satisfied_clears_the_gate(git_repo):
+    """What the planner is told to write for a built ticket must itself pass:
+    the files exist, so nothing blocks, and there is nothing to warn about."""
+    plan = _plan(files_to_modify=[{"path": "README.md", "purpose": "Already satisfied: it documents the widget"}])
+
+    assert check_plan(plan, _ws(git_repo)) == []
+
+
+# --- an answer that is not a plan object --------------------------------
+
+# One planner's first answer on claude-sonnet-5 behind an OpenAI-compatible proxy: valid JSON
+# whose only field held the model's own tool-call syntax, so every field after
+# it was inside that string and none of them was a field of the plan.
+_LEAKED = {
+    "acceptance_criteria": (
+        '["POST /search/items returns every matching item"]\n'
+        '<parameter name="architecture">{"layers": "controller -> service"}\n'
+        '<parameter name="files_to_modify">[{"path": "README.md", "purpose": "x"}]\n'
+        '<parameter name="plan_markdown">## Plan'
+    ),
+}
+
+
+def test_tool_call_markup_in_a_value_is_malformed_output_naming_what_it_swallowed():
+    defects = check_plan_integrity(_LEAKED)
+
+    assert _kinds(defects) == {KIND_MALFORMED_OUTPUT}
+    assert len(defects) == 1
+    reason = defects[0]["reason"]
+    assert '"acceptance_criteria" holds tool-call markup' in reason
+    assert "architecture, files_to_modify, plan_markdown" in reason
+    assert blocking(defects) == defects
+
+
+def test_markup_nested_inside_a_list_or_an_object_is_found_too():
+    nested = _plan(acceptance_criteria=["fine", "<invoke name=\"x\">oops"], architecture={"layers": "<parameter name=\"a\">"})
+
+    reasons = [d["reason"] for d in check_plan_integrity(nested)]
+
+    assert any('"acceptance_criteria[1]"' in r for r in reasons)
+    assert any('"architecture.layers"' in r for r in reasons)
+
+
+def test_prose_that_merely_mentions_a_parameter_is_not_markup():
+    plan = _plan(acceptance_criteria=["the request parameter `size` is clamped to 200", "a <div> is rendered"])
+
+    assert check_plan_integrity(plan) == []
+
+
+def test_a_string_where_an_array_belongs_is_malformed_output():
+    plan = _plan(files_to_modify='[{"path": "README.md", "purpose": "x"}]', context_files="README.md")
+
+    reasons = [d["reason"] for d in check_plan_integrity(plan)]
+
+    assert '"files_to_modify" must be a JSON array but is a string (a JSON list written inside a string)' in reasons
+    assert '"context_files" must be a JSON array but is a string' in reasons
+
+
+def test_acceptance_criteria_as_one_string_is_still_tolerated():
+    # `criteria_list` has always accepted this shape; the integrity check
+    # must not start rejecting it.
+    assert check_plan_integrity(_plan(acceptance_criteria="it works")) == []
+
+
+def test_a_stub_feature_summary_is_a_defect():
+    for stub in ("placeholder", "# placeholder", "TBD", "", "  n/a  "):
+        defects = check_plan_integrity(_plan(feature_summary=stub))
+
+        assert _kinds(defects) == {KIND_STUB_PLAN}, stub
+        assert blocking(defects) == defects
+
+
+def test_a_real_summary_that_starts_with_a_stub_word_is_not_a_stub():
+    # A ticket about a search field's placeholder text is a plausible ticket.
+    assert check_plan_integrity(_plan(feature_summary="Placeholder text for the empty search field")) == []
+
+
+def test_a_clarification_plan_may_carry_stub_fields():
+    # The plan is a placeholder until a person answers (planner_loop.py);
+    # check_questions judges the part that reaches them.
+    assert check_plan_integrity(_plan(feature_summary="placeholder"), clarifying=True) == []
+    # Markup is wrong in any plan.
+    assert _kinds(check_plan_integrity(_LEAKED, clarifying=True)) == {KIND_MALFORMED_OUTPUT}
+
+
+def test_a_well_formed_plan_and_one_with_absent_fields_pass_integrity():
+    assert check_plan_integrity(_plan(feature_summary="Add a widget", plan_markdown="# Plan")) == []
+    # An absent field is `check_plan`'s to report as an empty plan, not a malformed one.
+    assert check_plan_integrity({}) == []
+
+
+def test_feedback_for_a_mangled_answer_names_the_cause_not_the_missing_files():
+    text = format_plan_feedback(check_plan_integrity(_LEAKED), attempt=1, max_attempts=3)
+
+    assert "problem(s) with the answer itself" in text
+    assert "plan attempt 1/3" in text
+    assert "architecture, files_to_modify, plan_markdown" in text
+    assert "never <parameter> or <invoke> tags" in text
+    assert "every field a top-level key" in text
+    # None of check_plan's advice applies to an answer it never saw.
+    assert "Checks against the repository" not in text
+    assert "names no files" not in text
+    assert "Verify each path" not in text
+
+
+def test_feedback_for_a_stub_answer_says_to_investigate_first():
+    text = format_plan_feedback(check_plan_integrity(_plan(feature_summary="placeholder")), attempt=2, max_attempts=3)
+
+    assert "feature_summary is stub text ('placeholder')" in text
+    assert "Do the investigation first" in text
+    assert "never answer with placeholder text" in text
+
+
+def test_plan_shape_of_a_mangled_answer_shows_the_fields_that_never_arrived():
+    shape = plan_shape(_LEAKED)
+
+    assert shape["fields"] == ["acceptance_criteria"]
+    assert shape["files_to_modify"] == "missing"
+    assert shape["files_to_create"] == "missing"
+    assert shape["acceptance_criteria"] == f"string ({len(_LEAKED['acceptance_criteria'])} chars)"
+    assert "files_to_modify missing" in describe_plan_shape(shape)
+
+
+def test_plan_shape_of_an_empty_plan_shows_empty_lists_not_missing_ones():
+    shape = plan_shape(_plan(files_to_modify=[], feature_summary="Add a widget", acceptance_criteria=["a", "b"], questions=[]))
+
+    assert shape["files_to_modify"] == 0
+    assert shape["acceptance_criteria"] == 2
+    assert shape["questions"] == 0
+    assert shape["feature_summary"] == "Add a widget"
+    assert shape["files_to_create"] == 0 and "files_to_create" in shape["fields"]
+
+
 def test_a_plan_that_changes_a_read_only_repo_is_rejected(tmp_path):
     """A read-only repo or reference folder is context, never a target. The
     planner loop moves such entries to read_only_changes first
@@ -319,31 +474,31 @@ def test_the_tools_tell_the_planner_which_repos_are_read_only(tmp_path):
 # --- normalize_plan: fixed rather than sent back ---------------------------------
 
 
-def _mkt(tmp_path) -> Workspace:
-    """MKT2-866's shape: the admin portal, the API, and a contract repo
+def _mono(tmp_path) -> Workspace:
+    """One story's shape: the admin portal, the API, and a contract repo
     marked read-only."""
-    for rel in ("portal/src/app/search.ts", "api/src/Search.java", "contracts/apis/v1/orders.yaml"):
+    for rel in ("portal/src/app/search.ts", "api/src/Search.java", "contracts/apis/v1/items.yaml"):
         _write(str(tmp_path), rel)
     return Workspace(
-        default_label="mkt-apiservice",
+        default_label="mono-apiservice",
         roots={
-            "mkt-apiservice": str(tmp_path / "api"), "mkt-adminportal": str(tmp_path / "portal"),
-            "api-contract-definitions": str(tmp_path / "contracts"),
+            "mono-apiservice": str(tmp_path / "api"), "mono-adminportal": str(tmp_path / "portal"),
+            "api-schemas": str(tmp_path / "contracts"),
         },
-        read_only=frozenset({"api-contract-definitions"}),
+        read_only=frozenset({"api-schemas"}),
     )
 
 
 def test_a_change_in_a_read_only_repo_is_listed_for_a_person_and_the_plan_goes_ahead(tmp_path):
-    """MKT2-866: the ticket needed the OpenAPI contract changed, the contract
+    """One story: the ticket needed the OpenAPI contract changed, the contract
     repo is read-only, and three rejected plans failed the whole story."""
-    workspace = _mkt(tmp_path)
+    workspace = _mono(tmp_path)
     plan = _plan(
         files_to_modify=[
             {"path": "src/Search.java", "purpose": "add the columns"},
-            {"path": "@api-contract-definitions/apis/v1/orders.yaml", "purpose": "add the columns to the contract"},
+            {"path": "@api-schemas/apis/v1/items.yaml", "purpose": "add the columns to the contract"},
         ],
-        files_to_create=[{"path": "@api-contract-definitions/apis/v1-bundled/orders.yaml", "purpose": "bundle"}],
+        files_to_create=[{"path": "@api-schemas/apis/v1-bundled/items.yaml", "purpose": "bundle"}],
     )
 
     fixed, notes = normalize_plan(plan, workspace)
@@ -351,47 +506,47 @@ def test_a_change_in_a_read_only_repo_is_listed_for_a_person_and_the_plan_goes_a
     assert fixed["files_to_modify"] == [{"path": "src/Search.java", "purpose": "add the columns"}]
     assert fixed["files_to_create"] == []
     assert fixed["read_only_changes"] == [
-        {"path": "@api-contract-definitions/apis/v1-bundled/orders.yaml", "purpose": "bundle"},
-        {"path": "@api-contract-definitions/apis/v1/orders.yaml", "purpose": "add the columns to the contract"},
+        {"path": "@api-schemas/apis/v1-bundled/items.yaml", "purpose": "bundle"},
+        {"path": "@api-schemas/apis/v1/items.yaml", "purpose": "add the columns to the contract"},
     ]
-    assert "@api-contract-definitions/apis/v1/orders.yaml" in fixed["context_files"]  # still read
+    assert "@api-schemas/apis/v1/items.yaml" in fixed["context_files"]  # still read
     assert len(notes) == 2 and all("read-only repo" in note for note in notes)
     assert blocking(check_plan(fixed, workspace)) == []
 
 
 def test_a_path_missing_its_at_sign_is_given_one(tmp_path):
-    """MKT2-866's second attempt wrote `mkt-adminportal/src/...` for every
+    """One story's second attempt wrote `mono-adminportal/src/...` for every
     portal file and had eight "missing" files."""
-    workspace = _mkt(tmp_path)
+    workspace = _mono(tmp_path)
     plan = _plan(
-        files_to_modify=[{"path": "mkt-adminportal/src/app/search.ts", "purpose": "columns"}],
-        context_files=["mkt-adminportal/src/app/search.ts"],
+        files_to_modify=[{"path": "mono-adminportal/src/app/search.ts", "purpose": "columns"}],
+        context_files=["mono-adminportal/src/app/search.ts"],
     )
 
     fixed, notes = normalize_plan(plan, workspace)
 
-    assert fixed["files_to_modify"] == [{"path": "@mkt-adminportal/src/app/search.ts", "purpose": "columns"}]
-    assert fixed["context_files"] == ["@mkt-adminportal/src/app/search.ts"]
-    assert notes == ["mkt-adminportal/src/app/search.ts is in another repo: read as @mkt-adminportal/src/app/search.ts"] * 2
+    assert fixed["files_to_modify"] == [{"path": "@mono-adminportal/src/app/search.ts", "purpose": "columns"}]
+    assert fixed["context_files"] == ["@mono-adminportal/src/app/search.ts"]
+    assert notes == ["mono-adminportal/src/app/search.ts is in another repo: read as @mono-adminportal/src/app/search.ts"] * 2
     assert blocking(check_plan(fixed, workspace)) == []
 
 
 def test_a_folder_of_the_default_repo_named_like_another_repo_is_left_alone(tmp_path):
-    workspace = _mkt(tmp_path)
-    _write(workspace.default_root, "mkt-adminportal/config.json")
+    workspace = _mono(tmp_path)
+    _write(workspace.default_root, "mono-adminportal/config.json")
 
-    fixed, notes = normalize_plan(_plan(files_to_modify=[{"path": "mkt-adminportal/config.json"}]), workspace)
+    fixed, notes = normalize_plan(_plan(files_to_modify=[{"path": "mono-adminportal/config.json"}]), workspace)
 
-    assert fixed["files_to_modify"] == [{"path": "mkt-adminportal/config.json"}] and notes == []
+    assert fixed["files_to_modify"] == [{"path": "mono-adminportal/config.json"}] and notes == []
 
 
 def test_a_file_in_a_writable_repo_left_to_a_person_stays_left_to_a_person(tmp_path):
-    """MKT2-866: the workspace's CLAUDE.md says `orders-oas.yaml`
+    """One story: the workspace's CLAUDE.md says `bundled-oas.yaml`
     (an untracked copy of the contract) is not source, and the planner left
     it to a person. Moving it back into the plan had dev hand-write it. It
     stays, flagged for whoever approves the plan."""
-    workspace = _mkt(tmp_path)
-    oas = {"path": "@mkt-adminportal/orders-oas.yaml", "purpose": "regenerate from the contract, publish"}
+    workspace = _mono(tmp_path)
+    oas = {"path": "@mono-adminportal/bundled-oas.yaml", "purpose": "regenerate from the contract, publish"}
     plan = _plan(files_to_modify=[{"path": "src/Search.java", "purpose": "export"}], read_only_changes=[oas])
 
     fixed, notes = normalize_plan(plan, workspace)
@@ -399,28 +554,28 @@ def test_a_file_in_a_writable_repo_left_to_a_person_stays_left_to_a_person(tmp_p
     assert fixed["read_only_changes"] == [oas]
     assert fixed["files_to_create"] == [] and fixed["files_to_modify"] == [{"path": "src/Search.java", "purpose": "export"}]
     assert notes == [
-        "@mkt-adminportal/orders-oas.yaml is in a repo forge can change, but the plan leaves it to a "
+        "@mono-adminportal/bundled-oas.yaml is in a repo forge can change, but the plan leaves it to a "
         "person — check that at approval"
     ]
     assert blocking(check_plan(fixed, workspace)) == []
 
 
 def test_a_file_both_planned_and_left_to_a_person_is_planned(tmp_path):
-    workspace = _mkt(tmp_path)
+    workspace = _mono(tmp_path)
     plan = _plan(
-        files_to_modify=[{"path": "@mkt-adminportal/src/app/search.ts", "purpose": "columns"}],
-        read_only_changes=[{"path": "@mkt-adminportal/src/app/search.ts", "purpose": "columns"}],
+        files_to_modify=[{"path": "@mono-adminportal/src/app/search.ts", "purpose": "columns"}],
+        read_only_changes=[{"path": "@mono-adminportal/src/app/search.ts", "purpose": "columns"}],
     )
 
     fixed, notes = normalize_plan(plan, workspace)
 
     assert fixed["read_only_changes"] == [] and notes == []
-    assert fixed["files_to_modify"] == [{"path": "@mkt-adminportal/src/app/search.ts", "purpose": "columns"}]
+    assert fixed["files_to_modify"] == [{"path": "@mono-adminportal/src/app/search.ts", "purpose": "columns"}]
 
 
 def test_a_plan_whose_only_changes_are_read_only_is_sent_back_saying_so(tmp_path):
-    workspace = _mkt(tmp_path)
-    plan = _plan(files_to_modify=[{"path": "@api-contract-definitions/apis/v1/orders.yaml", "purpose": "contract"}])
+    workspace = _mono(tmp_path)
+    plan = _plan(files_to_modify=[{"path": "@api-schemas/apis/v1/items.yaml", "purpose": "contract"}])
 
     fixed, _ = normalize_plan(plan, workspace)
     defects = blocking(check_plan(fixed, workspace))
@@ -431,4 +586,54 @@ def test_a_plan_whose_only_changes_are_read_only_is_sent_back_saying_so(tmp_path
 
 def test_a_single_repo_plan_is_untouched(git_repo):
     plan = _plan()
-    assert normalize_plan(plan, _ws(git_repo)) == ({**plan, "context_files": [], "read_only_changes": []}, [])
+    assert normalize_plan(plan, _ws(git_repo)) == (
+        {**plan, "context_files": [], "read_only_changes": [], "person_actions": []}, []
+    )
+
+
+# --- actions left to a person ------------------------------------------------
+
+
+def test_person_actions_are_read_whatever_shape_the_model_left_them_in():
+    plan = {"person_actions": [
+        {"action": "Run the script against the reference extract", "reason": "the agent has no access to it"},
+        "Publish the delta sheet",
+        {"action": "  ", "reason": "blank, so dropped"},
+        {"action": "Publish the delta sheet", "reason": "a repeat, so kept once"},
+        {"action": "Get Sales sign-off", "reason": ""},
+        None,
+    ]}
+
+    assert person_actions_of(plan) == [
+        {"action": "Run the script against the reference extract", "reason": "the agent has no access to it"},
+        {"action": "Publish the delta sheet", "reason": None},
+        {"action": "Get Sales sign-off", "reason": None},
+    ]
+
+
+def test_a_plan_with_no_person_actions_has_none_whether_absent_or_not_a_list():
+    assert person_actions_of({}) == []
+    assert person_actions_of({"person_actions": None}) == []
+    assert person_actions_of({"person_actions": "run it yourself"}) == []
+
+
+def test_normalize_plan_cleans_person_actions_for_every_later_reader(git_repo):
+    plan = _plan(person_actions=["Check open pull requests for a clashing migration version", {"action": "", "reason": "x"}])
+
+    fixed, _ = normalize_plan(plan, _ws(git_repo))
+
+    assert fixed["person_actions"] == [{"action": "Check open pull requests for a clashing migration version", "reason": None}]
+
+
+def test_person_actions_do_not_stand_in_for_planned_files(git_repo):
+    # Not a way out of planning work: a plan that only hands things to a
+    # person is still an empty plan.
+    plan = _plan(files_to_modify=[], person_actions=[{"action": "Do all of it", "reason": None}])
+
+    assert _kinds(check_plan(plan, _ws(git_repo))) == {KIND_NO_FILES}
+
+
+def test_person_actions_that_are_not_a_list_are_malformed_output():
+    reasons = [d["reason"] for d in check_plan_integrity(_plan(person_actions="Publish it"))]
+
+    assert '"person_actions" must be a JSON array but is a string' in reasons

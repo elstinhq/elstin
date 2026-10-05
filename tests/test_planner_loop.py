@@ -107,6 +107,49 @@ def test_plan_schema_satisfies_strict_structured_output_rules():
     check(_PLAN_JSON_SCHEMA)
 
 
+def test_the_plan_schema_carries_person_actions_as_required_objects():
+    items = _PLAN_JSON_SCHEMA["properties"]["person_actions"]["items"]
+
+    assert "person_actions" in _PLAN_JSON_SCHEMA["required"]
+    assert set(items["properties"]) == {"action", "reason"} == set(items["required"])
+
+
+async def test_the_planner_is_told_what_the_dev_agent_cannot_do_and_where_such_criteria_go(monkeypatch, git_repo):
+    """An open-PR audit and a capture against a reference
+    extract were acceptance criteria no agent here could meet, and each cost a
+    story. The prompt has to name what the agent lacks and send those
+    criteria to person_actions instead."""
+    provider = FakeProvider(script=[_plan_response()])
+    _configure(monkeypatch, provider)
+
+    await run_planner(user_request="Add a widget", project_path=git_repo)
+
+    system = provider.calls[0].system
+    assert "what the dev agent can and cannot do" in system
+    assert "no GitHub, Jira or Confluence access" in system
+    assert "cannot see other branches or open pull requests" in system
+    assert "person_actions" in system
+    assert "Never state a result, count or name the agent cannot have produced" in system
+    # Whole-project criteria belong to the gate and the epic's QA step.
+    assert "the complete build and every existing test pass" in system and "leave it out" in system
+
+
+async def test_a_plan_handing_actions_to_a_person_is_accepted_and_tidied(monkeypatch, git_repo):
+    handed = {**_MINIMAL_PLAN, "person_actions": [
+        {"action": "Run the script against the reference extract and record the nine rows", "reason": "no data access"},
+        {"action": "", "reason": "blank"},
+    ]}
+    provider = FakeProvider(script=[_plan_response(handed)])
+    _configure(monkeypatch, provider)
+
+    result = await run_planner(user_request="Reconcile the grid", project_path=git_repo)
+
+    assert len(provider.calls) == 1
+    assert result["plan"]["person_actions"] == [
+        {"action": "Run the script against the reference extract and record the nine rows", "reason": "no data access"},
+    ]
+
+
 async def test_returns_plan_questions_and_acceptance_criteria(monkeypatch, git_repo):
     provider = FakeProvider(script=[_plan_response()])
     _configure(monkeypatch, provider)
@@ -179,6 +222,132 @@ async def test_a_plan_naming_no_files_is_rejected_and_retried_with_the_reason(mo
     assert "states no acceptance criteria" in retry_prompt
 
 
+async def test_an_already_implemented_ticket_is_sent_back_toward_declaring_files_satisfied(monkeypatch, git_repo):
+    """An epic continued from a branch that already built the whole
+    feature, so the planner wrote real acceptance criteria and no files — an
+    empty list is all "nothing left to change" looks like when the only
+    advice on offer is "plan the files that still need changing". The gate
+    rejected it three times and failed the story.
+
+    The way through is the dev-stage "already satisfied" ending
+    (docs: AGENTS.md "When a planned file already does the job"), which needs
+    the existing files named in the plan. Both the system prompt and the
+    retry brief have to say so, and a plan that does is accepted as it is."""
+    already_built = {**_MINIMAL_PLAN, "files_to_create": [], "files_to_modify": [], "acceptance_criteria": ["it works"]}
+    satisfied = {
+        **_MINIMAL_PLAN,
+        "files_to_create": [],
+        "files_to_modify": [{"path": "README.md", "purpose": "Already satisfied: documents the widget"}],
+    }
+    provider = FakeProvider(script=[_plan_response(already_built), _plan_response(satisfied)])
+    _configure(monkeypatch, provider)
+
+    result = await run_planner(user_request="Add a widget", project_path=git_repo)
+
+    assert result["plan"]["files_to_modify"] == [{"path": "README.md", "purpose": "Already satisfied: documents the widget"}]
+    assert len(provider.calls) == 2
+    for guidance in (provider.calls[0].system, provider.calls[1].messages[0].content[-1].text):
+        assert "Already satisfied:" in guidance
+        assert "Do not invent an edit" in guidance
+    # The advice that produced the empty plan is gone, not merely outweighed.
+    assert "most often" not in provider.calls[0].system
+    assert "most often" not in provider.calls[1].messages[0].content[-1].text
+
+
+_LEAKED_PLAN = {
+    # What a planner (claude-sonnet-5 behind an OpenAI-compatible
+    # proxy) actually returned: valid JSON whose single field swallowed the
+    # model's tool-call syntax and, with it, every field after the first.
+    "acceptance_criteria": (
+        '["it works"]\n<parameter name="architecture">{"layers": null}\n'
+        '<parameter name="files_to_modify">[{"path": "README.md", "purpose": "x"}]'
+    ),
+}
+
+
+async def test_a_mangled_answer_is_sent_back_for_that_and_the_feed_records_what_arrived(monkeypatch, git_repo):
+    """The gate used to see this as "the plan names no files" — true, and
+    useless: the planner had named some, inside a string, and the retry
+    told it to go and find files. It is rejected for what it is instead,
+    and the activity feed — which cuts the plan's text before its file lists
+    — records which fields actually arrived, so the next one is diagnosable
+    without a second run."""
+    from forge.services.run_activity import list_activity
+
+    provider = FakeProvider(script=[_plan_response(_LEAKED_PLAN), _plan_response()])
+    _configure(monkeypatch, provider)
+
+    result = await run_planner(user_request="Add a widget", project_path=git_repo, run_id="RUN-MANGLED")
+
+    assert result["plan"]["files_to_create"] == [{"path": "widget.py", "purpose": "the widget"}]
+    retry_prompt = provider.calls[1].messages[0].content[-1].text
+    assert "problem(s) with the answer itself" in retry_prompt
+    assert "architecture, files_to_modify" in retry_prompt
+    assert "names no files" not in retry_prompt
+
+    rejected = [e for e in list_activity("RUN-MANGLED") if e["title"].startswith("Plan gate rejected")]
+    assert len(rejected) == 1
+    assert rejected[0]["meta"]["kinds"] == ["malformed_output"]
+    assert rejected[0]["meta"]["plan_shape"]["fields"] == ["acceptance_criteria"]
+    assert rejected[0]["meta"]["plan_shape"]["files_to_modify"] == "missing"
+    assert "files_to_modify missing" in rejected[0]["detail"]
+    assert "fields present: acceptance_criteria" in rejected[0]["detail"]
+
+
+async def test_a_string_in_place_of_a_file_list_is_rejected_not_read_a_character_at_a_time(monkeypatch, git_repo):
+    """normalize_plan walks the file lists, so a string there would have
+    become one "path" per character before any check saw it."""
+    stringy = {**_MINIMAL_PLAN, "files_to_create": '[{"path": "widget.py", "purpose": "the widget"}]'}
+    provider = FakeProvider(script=[_plan_response(stringy), _plan_response()])
+    _configure(monkeypatch, provider)
+
+    await run_planner(user_request="Add a widget", project_path=git_repo)
+
+    retry_prompt = provider.calls[1].messages[0].content[-1].text
+    assert '"files_to_create" must be a JSON array but is a string (a JSON list written inside a string)' in retry_prompt
+    assert "is listed under files_to_modify but no such file exists" not in retry_prompt
+
+
+async def test_stub_answers_fail_the_run_saying_they_were_stubs(monkeypatch, git_repo):
+    """The retries of one run came back as `"feature_summary": "placeholder"`
+    with nothing else in them: a model answering the JSON-only format before
+    it had looked at anything."""
+    from forge.config.store import set_config
+
+    stub = {**_MINIMAL_PLAN, "feature_summary": "placeholder", "plan_markdown": "# placeholder",
+            "files_to_create": [], "files_to_modify": [], "acceptance_criteria": []}
+    provider = FakeProvider(script=[_plan_response(stub), _plan_response(stub)])
+    _configure(monkeypatch, provider)
+    set_config("planner_sdk_max_retries", "1")  # -> 2 attempts
+
+    with pytest.raises(PlannerLoopError) as caught:
+        await run_planner(user_request="Add a widget", project_path=git_repo)
+
+    assert "feature_summary is stub text ('placeholder')" in str(caught.value)
+    # The empty lists are a consequence, and not what the run is told failed.
+    assert "names no files" not in str(caught.value)
+    retry_prompt = provider.calls[1].messages[0].content[-1].text
+    assert "Do the investigation first" in retry_prompt
+
+
+async def test_a_clarification_plan_with_stub_fields_is_not_rejected_for_them(monkeypatch, git_repo):
+    """The plan around a question is a placeholder until a person answers —
+    the one place stub fields are legitimate."""
+    asking = {
+        **_MINIMAL_PLAN, "feature_summary": "placeholder", "plan_markdown": "placeholder",
+        "files_to_create": [], "acceptance_criteria": [],
+        "questions": [{"id": "q1", "question": "Which currency?", "context": None, "options": [
+            {"id": "a", "label": "EUR", "description": None}, {"id": "b", "label": "USD", "description": None}]}],
+    }
+    provider = FakeProvider(script=[_plan_response(asking)])
+    _configure(monkeypatch, provider)
+
+    result = await run_planner(user_request="Show the currency", project_path=git_repo)
+
+    assert len(provider.calls) == 1
+    assert result["questions"][0]["question"] == "Which currency?"
+
+
 async def test_a_plan_with_files_but_no_acceptance_criteria_is_rejected(monkeypatch, git_repo):
     """Half the vacuous pass on its own: the gate has files to check, but
     the review's whole rule is about criteria it would not have."""
@@ -231,7 +400,7 @@ async def test_a_plan_naming_a_file_that_does_not_exist_is_rejected_with_the_rea
 
 
 async def test_a_change_in_a_read_only_repo_is_set_aside_not_rejected(monkeypatch, git_repo, tmp_path):
-    """MKT2-866: the plan needed a contract change in a read-only repo, and
+    """One story: the plan needed a contract change in a read-only repo, and
     another repo's paths without their `@`. Both are fixed in place — one
     attempt, no retry — and the fixes are in the activity feed."""
     import os
@@ -242,7 +411,7 @@ async def test_a_change_in_a_read_only_repo_is_set_aside_not_rejected(monkeypatc
     (portal / "src").mkdir(parents=True)
     (portal / "src" / "search.ts").write_text("x\n")
     contracts.mkdir()
-    (contracts / "orders.yaml").write_text("openapi: 3.0\n")
+    (contracts / "items.yaml").write_text("openapi: 3.0\n")
     with open(os.path.join(git_repo, "widget.py"), "w", encoding="utf-8") as handle:
         handle.write("x\n")
     plan = {
@@ -251,22 +420,22 @@ async def test_a_change_in_a_read_only_repo_is_set_aside_not_rejected(monkeypatc
         "files_to_modify": [
             {"path": "widget.py", "purpose": "the API"},
             {"path": "portal/src/search.ts", "purpose": "the columns"},
-            {"path": "@contracts/orders.yaml", "purpose": "the contract"},
+            {"path": "@contracts/items.yaml", "purpose": "the contract"},
         ],
     }
     provider = FakeProvider(script=[_plan_response(plan)])
     _configure(monkeypatch, provider)
 
     result = await run_planner(
-        user_request="Customer search columns", project_path=git_repo, run_id="ENG-9", default_label="app",
+        user_request="Item search columns", project_path=git_repo, run_id="ENG-9", default_label="app",
         repo_roots={"app": git_repo, "portal": str(portal), "contracts": str(contracts)}, read_only_labels=["contracts"],
     )
 
     assert len(provider.calls) == 1
     assert [e["path"] for e in result["plan"]["files_to_modify"]] == ["widget.py", "@portal/src/search.ts"]
-    assert result["plan"]["read_only_changes"] == [{"path": "@contracts/orders.yaml", "purpose": "the contract"}]
+    assert result["plan"]["read_only_changes"] == [{"path": "@contracts/items.yaml", "purpose": "the contract"}]
     adjusted = [e for e in list_activity("ENG-9") if e["title"].startswith("Plan paths")]
-    assert len(adjusted) == 1 and "@contracts/orders.yaml is in a read-only repo" in adjusted[0]["detail"]
+    assert len(adjusted) == 1 and "@contracts/items.yaml is in a read-only repo" in adjusted[0]["detail"]
 
 
 async def test_a_plan_asking_clarification_questions_may_be_empty(monkeypatch, git_repo):
@@ -288,7 +457,7 @@ async def test_a_plan_asking_clarification_questions_may_be_empty(monkeypatch, g
 
 
 async def test_stub_placeholder_questions_are_rejected_and_retried(monkeypatch, git_repo):
-    """Regression for MKT2-858: the planner emitted a question whose id,
+    """Regression: the planner emitted a question whose id,
     question, and option label were all literally "placeholder", and it
     reached the human as if it were a real clarification question because
     a clarification round-trip skips the plan gate entirely. It must now
@@ -468,7 +637,7 @@ async def test_clarification_round_trip_skips_exploration(monkeypatch, git_repo)
 
 
 async def test_answers_from_an_earlier_run_are_followed_in_a_fresh_plan(monkeypatch, git_repo):
-    """MKT2-866: a person answered "leave out Webshop ID", the run then
+    """One story: a person answered "leave out Reference ID", the run then
     failed, and Retry's fresh plan never saw the answer. Carried into a new
     run, the answer is a decision to follow — but this run has not explored
     yet, and may still ask about something the answer does not settle."""
@@ -478,7 +647,7 @@ async def test_answers_from_an_earlier_run_are_followed_in_a_fresh_plan(monkeypa
     await run_planner(
         user_request="Export customers", project_path=git_repo, answers_from_earlier_run=True,
         clarification_answers=[{
-            "question": "Include Webshop ID?", "option_label": "Use the proposed columns except Webshop ID",
+            "question": "Include Reference ID?", "option_label": "Use the proposed columns except Reference ID",
             "option_description": "Export the first 24 columns",
         }],
     )
@@ -486,7 +655,7 @@ async def test_answers_from_an_earlier_run_are_followed_in_a_fresh_plan(monkeypa
     assert len(provider.calls) == 2  # scoping ran
     prompt = provider.calls[1].messages[0].content[0].text
     assert "Decisions a person already made on this ticket (follow them; do not ask these again):" in prompt
-    assert "- Q: Include Webshop ID?\n  A: Use the proposed columns except Webshop ID — Export the first 24 columns" in prompt
+    assert "- Q: Include Reference ID?\n  A: Use the proposed columns except Reference ID — Export the first 24 columns" in prompt
     assert "do NOT emit questions" not in prompt
 
 

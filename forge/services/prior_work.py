@@ -2,8 +2,8 @@
 
 A team rarely hands forge an epic nobody has touched. A story is "In
 Progress" because someone already has a branch for it —
-`feature/MKT2-848-customer-search-api`, ten commits ahead of main — and
-forge used to ignore it: it branched `feat/MKT2-848-…` from main, and the
+`feature/PROJ-848-search-api`, ten commits ahead of main — and
+forge used to ignore it: it branched `feat/PROJ-848-…` from main, and the
 planner, reading main, planned the whole ticket again. The epic's pull
 request then conflicted with the work it had duplicated.
 
@@ -30,7 +30,7 @@ The branch that is found is only ever READ: forge creates its own branch
 from that commit and never writes to, pushes, or checks out the original.
 
 Only a key that can appear in a branch name is looked for: a JIRA key like
-`MKT2-848`. A GitHub issue's forge key (`gh.owner.repo.3`) has no such
+`PROJ-848`. A GitHub issue's forge key (`gh.owner.repo.3`) has no such
 form, so those stories are recorded as not applicable rather than matched
 against every branch containing a `3`.
 """
@@ -47,7 +47,7 @@ MAX_COMMITS = 15
 MAX_FILES = 40
 MAX_DEFAULT_COMMITS = 10
 
-# `ENG-12`, `MKT2-848`: the JIRA key shape. Anything else (a GitHub story's
+# `ENG-12`, `PROJ-848`: the JIRA key shape. Anything else (a GitHub story's
 # `gh.owner.repo.3`) is not looked for — see the module docstring.
 _JIRA_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*-\d+$")
 
@@ -57,9 +57,9 @@ def is_searchable_key(key: str) -> bool:
 
 
 def key_pattern(key: str) -> re.Pattern[str]:
-    """`key` as a whole token, any case: `MKT2-848` matches
-    `feature/MKT2-848-search` and `mkt2-848`, never `MKT2-8480` or
-    `XMKT2-848`."""
+    """`key` as a whole token, any case: `PROJ-848` matches
+    `feature/PROJ-848-search` and `proj-848`, never `PROJ-8480` or
+    `XPROJ-848`."""
     return re.compile(rf"(?<![A-Za-z0-9]){re.escape(key.strip())}(?![0-9])", re.IGNORECASE)
 
 

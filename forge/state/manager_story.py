@@ -138,17 +138,18 @@ class _StoryMixin:
             return taken
 
     def list_stories_waiting_on_a_limit(self, now: datetime | None = None) -> list[dict]:
-        """Failed stories parked on a provider limit whose retry time has come
-        (parked_reason "usage_limit", retry_at <= now), oldest first — what the
-        daemon retries on its own. A story with no retry_at is not here: the
-        provider did not say when, so only a person can."""
+        """Failed stories parked on a provider limit — or on the model endpoint
+        being unreachable — whose retry time has come (parked_reason
+        "usage_limit" / "provider_unreachable", retry_at <= now), oldest first:
+        what the daemon retries on its own. A story with no retry_at is not
+        here: nothing says when, so only a person can."""
         moment = now or datetime.now(timezone.utc)
         with session_scope() as session:
             rows = session.execute(
                 select(Story)
                 .where(
                     Story.status == "failed",
-                    Story.parked_reason == "usage_limit",
+                    Story.parked_reason.in_(("usage_limit", "provider_unreachable")),
                     Story.failure_stage == "run",
                     Story.retry_at.is_not(None),
                     Story.retry_at <= moment,
@@ -398,6 +399,15 @@ class _StoryMixin:
             if story is not None:
                 story.read_only_changes = list(changes) if changes else None
 
+    def set_story_person_actions(self, jira_key: str, actions: list[dict] | None) -> None:
+        """From the story's latest plan: things its criteria lean on that no
+        agent here can do (plan_gate.person_actions_of). None clears what an
+        earlier plan listed."""
+        with session_scope() as session:
+            story = session.get(Story, jira_key)
+            if story is not None:
+                story.person_actions = list(actions) if actions else None
+
     def set_story_pr_open_error(self, jira_key: str, error: str | None) -> None:
         with session_scope() as session:
             story = session.get(Story, jira_key)
@@ -519,6 +529,7 @@ def _story_to_dict(session, story: Story) -> dict:
         "coverage_gap": story.coverage_gap,
         "coverage_gap_detail": story.coverage_gap_detail,
         "read_only_changes": list(story.read_only_changes or []),
+        "person_actions": list(story.person_actions or []),
         "pr_open_error": story.pr_open_error,
         "retry_count": story.retry_count,
         "failure_stage": story.failure_stage,

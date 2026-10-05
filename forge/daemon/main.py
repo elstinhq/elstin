@@ -58,6 +58,7 @@ from forge.orchestration.reconciler import (
     epic_completion_status,
     plan_orchestration,
 )
+from forge.agents.roles.plan_gate import person_actions_of
 from forge.agents.roles.qa import format_qa_report_comment
 from forge.agents.roles.verifier import format_gate_feedback, run_deterministic_gate
 from forge.orchestration.state import initial_state
@@ -73,7 +74,7 @@ from forge.services.run_activity import append_activity, last_event_at
 from forge.services.ticket_source import get_ticket_source, ticket_source_configured
 from forge.services.usage import record_run_outcome
 from forge.daemon.worktree_retention import maybe_reclaim
-from forge.services.provider_limit import USAGE_LIMIT_REASON, plan_parking
+from forge.services.provider_limit import UNREACHABLE_REASON, plan_parking
 from forge.services.memory_usage import measured
 from forge.state.manager import StateManager
 from forge.tools.codebase_skeleton import build_workspace_skeleton
@@ -314,7 +315,7 @@ def _ignore_build_output_on_epic(epic: dict, writable_roots: dict[str, str], wor
     entries its .gitignore is missing (`target/` for Maven, `node_modules/`
     for Vite, … — LanguageProfile.build_output), so the epic's pull request
     fixes the repo for everyone rather than forge only hiding the folders
-    locally (info/exclude). MKT2-866's `mkt-apiservice` had no .gitignore on
+    locally (info/exclude). One story's `mono-apiservice` had no .gitignore on
     main. Off when the project turns `manage_gitignore` off. Runs under the
     epic's merge lock, before a story branches from the epic branch; never
     stops a run."""
@@ -429,9 +430,9 @@ def _commits_beyond_epic(sm: StateManager, story_key: str, epic: dict) -> int:
 # team closes a ticket when its work is reviewed, and the branch may still be
 # waiting to merge. That work is part of what the epic builds on, so it is
 # merged into the epic branch — otherwise every other story plans and builds
-# against a default branch that lacks it (the MKT2-846 case: two customer
+# against a default branch that lacks it (one such case: two customer
 # search tickets Done, their branches unmerged, and the next story's planner
-# finding no customer search at all).
+# finding no item search at all).
 
 
 def _bring_done_work_into_epic(sm: StateManager, epic: dict) -> dict[str, list[str]]:
@@ -1041,7 +1042,7 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
         continued = start_candidate(prior, default_label)
         # A run that failed left its work in the story's worktree, uncommitted
         # — kept, as it is in the story's other repos, so the new plan builds
-        # on it (`_earlier_run_changes`). Recreating it threw MKT2-866's
+        # on it (`_earlier_run_changes`). Recreating it threw one story's
         # compiling, tested backend away on Retry while keeping its portal.
         kept = await asyncio.to_thread(_reusable_worktree, story_repo, known_worktrees.get(default_label))
         start_ref = None if kept else await asyncio.to_thread(_prior_start_ref, story_repo, continued)
@@ -1191,7 +1192,7 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
             # (forge/agents/roles/dev_variants.py).
             state["started_clean"] = not earlier
             # Decisions a person already made survive a fresh run — Retry
-            # after a failure starts one, and MKT2-866's re-plan otherwise
+            # after a failure starts one, and one story's re-plan otherwise
             # exported the column its answer had left out. A re-plan that
             # should reconsider them clears them first (send_back_to_planning).
             state["clarification_answers"] = story.get("clarification_answers") or []
@@ -1267,7 +1268,7 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
             result["provider_limit"], retry_count=int(story.get("retry_count") or 0),
             auto_resume=resolve_bool_config("auto_run_enabled", epic["project_id"]),
         )
-        finished_reason = USAGE_LIMIT_REASON
+        finished_reason = parking.reason
     sm.set_story_status(
         story_key, new_status, parked_reason=finished_reason, failure_stage="run" if new_status == "failed" else None,
         retry_at=parking.retry_at if parking else None,
@@ -1286,6 +1287,7 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
     # planner (a QA story, an early failure) has no word on them.
     if result.get("plan"):
         sm.set_story_read_only_changes(story_key, result["plan"].get("read_only_changes"))
+        sm.set_story_person_actions(story_key, person_actions_of(result["plan"]))
     if new_status == "failed":
         logger.error("story %s failed: %s", story_key, result.get("error"))
     else:
@@ -1658,6 +1660,17 @@ def _epic_pr_body(sm: StateManager, epic: dict) -> str:
             lines.append(f"  - ⚠️ tests pass, but coverage is below the repo's threshold{detail}")
         for answer in story.get("clarification_answers") or []:
             lines.append(f"  - decided: {answer.get('question')} → {answer.get('option_label')}")
+    actions = [(story["jira_key"], action) for story in stories for action in story.get("person_actions") or []]
+    if actions:
+        lines += [
+            "", "## Left to a person",
+            "These are things the tickets' acceptance criteria lean on that no agent here can do — run against data or "
+            "an environment it cannot reach, checks outside the repositories, publication, review, sign-off. "
+            "This pull request does not include them, so they are not done until someone does them:",
+        ]
+        for key, action in actions:
+            reason = f" — {action['reason']}" if action.get("reason") else ""
+            lines.append(f"- {action.get('action')} ({key}){reason}")
     needed = [(story["jira_key"], change) for story in stories for change in story.get("read_only_changes") or []]
     if needed:
         lines += [
@@ -2046,12 +2059,17 @@ async def _resume_stories_past_their_limit(sm: StateManager) -> list[str]:
             logger.exception("story %s: could not resume where it stopped — retrying with a fresh plan", key)
         await asyncio.to_thread(sm.retry_story, key, resume_at_dev=stage is not None)
         note = RESUME_NOTES.get(stage)
+        unreachable = story.get("parked_reason") == UNREACHABLE_REASON
         await asyncio.to_thread(
             append_activity, key, type="status", phase="system",
-            title="Provider limit has lifted — retrying automatically" + (f": {note[0]}" if note else ""),
+            title=("Retrying automatically after the model endpoint was unreachable" if unreachable
+                   else "Provider limit has lifted — retrying automatically") + (f": {note[0]}" if note else ""),
             detail=note[1] if note else "The run is started again from planning.",
         )
-        logger.info("story %s: provider limit lifted — retried (%s)", key, stage or "from planning")
+        logger.info(
+            "story %s: %s — retried (%s)", key, "endpoint was unreachable" if unreachable else "provider limit lifted",
+            stage or "from planning",
+        )
         retried.append(key)
     return retried
 

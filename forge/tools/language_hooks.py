@@ -77,6 +77,12 @@ class LanguageProfile:
     analyze_command_prefixes: tuple[tuple[str, ...], ...] = ()
     # Command prefixes that run this language's tests.
     test_command_prefixes: tuple[tuple[str, ...], ...] = ()
+    # One example invocation a developer can run with run_command_tool to
+    # reproduce a failing test, shown in the gate's fix brief
+    # (verifier.format_gate_feedback). Must start with a test_command_prefix
+    # — run_command_tool allows nothing else. "" falls back to the first
+    # prefix, which runs the planned tests.
+    test_command_hint: str = ""
     # (worktree_path, matched_prefix, requested_args_after_prefix, planned_test_targets)
     # -> (error_message, final_command_tokens). error_message set means
     # BLOCKED (final_command_tokens is then ignored); final_command_tokens
@@ -107,7 +113,7 @@ class LanguageProfile:
     # (worktree_path, failed step's result) -> why the failure is the build
     # environment rather than the code, or None. Such a failure stops the
     # run instead of going back to the developer step, which cannot fix a
-    # toolchain and will "fix" working code trying (MKT2-866).
+    # toolchain and will "fix" working code trying (one story).
     environment_problem: Callable[[str, dict], str | None] | None = None
 
 
@@ -137,6 +143,18 @@ def _ensure_default_profiles_registered() -> None:
     register_profile(java_tools.java_maven_profile())
     register_profile(java_tools.java_gradle_profile())
     register_profile(vue_tools.vue_vite_profile())
+
+
+def test_command_hint(profile_key: str) -> str:
+    """How a developer runs this profile's tests to see a failure for itself
+    ("" for a profile with no test command, or one that is not registered)."""
+    _ensure_default_profiles_registered()
+    profile = _PROFILES.get(profile_key)
+    if profile is None:
+        return ""
+    if profile.test_command_hint:
+        return profile.test_command_hint
+    return " ".join(profile.test_command_prefixes[0]) if profile.test_command_prefixes else ""
 
 
 def all_profiles() -> list[LanguageProfile]:

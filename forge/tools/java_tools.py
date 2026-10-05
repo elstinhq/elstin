@@ -29,7 +29,7 @@ _JAVAC_ERROR_RE = re.compile(r"\[ERROR\]\s+(\S+\.java):\[(\d+),(\d+)\]\s*(.*)")
 _PACKAGE_RE = re.compile(r"^\s*package\s+([\w.]+)\s*;", re.MULTILINE)
 _DTEST_FLAG_RE = re.compile(r"^-Dtest=")
 # javac itself failing, not failing to compile the code: Maven's "Fatal error
-# compiling" (the compiler crashed — MKT2-866's Lombok on a JDK newer than it
+# compiling" (the compiler crashed — one story's Lombok on a JDK newer than it
 # supports), a class file or release the running JDK cannot handle, or no
 # usable JDK at all.
 _TOOLCHAIN_FAILURE_RES = tuple(re.compile(p) for p in (
@@ -113,7 +113,7 @@ def run_maven_analyze(worktree_path: str, targets: list[str]) -> dict:
 
 def run_gradle_analyze(worktree_path: str, targets: list[str]) -> dict:
     """No fine-grained error_lines for Gradle yet — pass/fail + raw output
-    is still a real, useful compile gate. (Both mkt services use Maven;
+    is still a real, useful compile gate. (Both services use Maven;
     this exists so a bare `build.gradle`/`build.gradle.kts` project isn't
     left with nothing.)"""
     wrapper = _gradle_wrapper(worktree_path)
@@ -294,6 +294,7 @@ def java_maven_profile() -> LanguageProfile:
         ),
         analyze_command_prefixes=(("mvn", "compile"), ("./mvnw", "compile")),
         test_command_prefixes=(("mvn", "test"), ("./mvnw", "test")),
+        test_command_hint="./mvnw test -Dtest=<TestClass>",
         format_test_command=_format_maven_test_command,
         dev_conventions=JAVA_PROMPT_CONVENTIONS,
         command_env=jdk.java_env,
@@ -321,6 +322,7 @@ def java_gradle_profile() -> LanguageProfile:
         ),
         analyze_command_prefixes=(("./gradlew", "compileJava"), ("gradle", "compileJava")),
         test_command_prefixes=(("./gradlew", "test"), ("gradle", "test")),
+        test_command_hint="./gradlew test --tests <TestClass>",
         format_test_command=_format_gradle_test_command,
         dev_conventions=JAVA_PROMPT_CONVENTIONS,
         command_env=jdk.java_env,

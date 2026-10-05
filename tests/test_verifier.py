@@ -233,7 +233,10 @@ def test_format_gate_feedback_truncates_long_test_output_to_its_tail():
     text = verifier.format_gate_feedback(gate, attempt=1, max_attempts=3)
 
     assert "FAILED test_x — assertion" in text
-    assert len(text) < 3_000
+    # 12,000 characters of noise went in; a tail and the closing instructions
+    # came out. The cap leaves room for those instructions (the test-run
+    # paragraph is ~500 of it) and nothing like the noise.
+    assert len(text) < 3_500
 
 
 async def test_run_verifier_reuses_a_precomputed_gate_instead_of_rerunning_the_toolchain(git_repo, registered_fake_profiles, monkeypatch):
@@ -423,27 +426,27 @@ def test_feedback_with_no_unwritten_files_is_the_fix_these_failures_message_it_a
 
 
 def test_changes_left_to_a_person_are_not_the_reviewers_to_demand():
-    """A plan's read_only_changes (a contract repo's YAML, for MKT2-866) are
+    """A plan's read_only_changes (a contract repo's YAML, for one story) are
     made by a person outside the story: the reviewer is shown them apart
     from the plan and told not to fail the run over them."""
     from forge.agents.roles.verifier import _VERIFIER_REVIEW_CORE, _build_llm_payload
 
     plan = {
         "files_to_modify": [{"path": "src/Search.java", "purpose": "export"}],
-        "read_only_changes": [{"path": "@contracts/orders.yaml", "purpose": "add the export path"}],
+        "read_only_changes": [{"path": "@contracts/items.yaml", "purpose": "add the export path"}],
         "plan_markdown": "# Plan",
     }
 
     payload = _build_llm_payload(plan, ["the export works"], [], [], {})
 
     assert "read_only_changes" not in payload["plan"]
-    assert payload["left_to_a_person"] == [{"path": "@contracts/orders.yaml", "purpose": "add the export path"}]
+    assert payload["left_to_a_person"] == [{"path": "@contracts/items.yaml", "purpose": "add the export path"}]
     assert "Never set passed=false because they are missing" in _VERIFIER_REVIEW_CORE
     assert "left_to_a_person" not in _build_llm_payload({"files_to_modify": []}, [], [], [], {})
 
 
 async def test_the_review_sees_every_repo_the_story_changed(git_repo, tmp_path, registered_fake_profiles, monkeypatch):
-    """MKT2-866: backend and portal changed, the review was shown only the
+    """One story: backend and portal changed, the review was shown only the
     backend, and rejected the story for "no frontend diffs"."""
     import json
     import subprocess
@@ -513,3 +516,153 @@ async def test_the_review_call_is_made_for_the_callers_project(git_repo, registe
     await verifier.run_verifier(**common)
 
     assert seen == [7, None]
+
+
+# --- actions left to a person, as the reviewer sees them ---------------------
+
+
+def test_the_reviewer_is_given_person_actions_apart_from_the_plan():
+    plan = {
+        "files_to_modify": [{"path": "docs/report.md", "purpose": "the report"}],
+        "person_actions": [
+            {"action": "Run the script against the reference extract", "reason": "no data access"},
+            "Publish the delta sheet",
+        ],
+        "plan_markdown": "# Plan",
+    }
+
+    payload = verifier._build_llm_payload(plan, ["reconciled"], [], [], {})
+
+    assert payload["person_actions"] == [
+        {"action": "Run the script against the reference extract", "reason": "no data access"},
+        {"action": "Publish the delta sheet", "reason": None},
+    ]
+    assert "person_actions" not in payload["plan"] and "plan_markdown" not in payload["plan"]
+    assert "person_actions" not in verifier._build_llm_payload({"files_to_modify": []}, [], [], [], {})
+
+
+def test_the_review_prompt_never_asks_for_a_persons_work_or_what_the_developer_cannot_do():
+    core = verifier._VERIFIER_REVIEW_CORE
+
+    assert "`person_actions` lists things no agent here can do" in core
+    assert "never put one in required_fixes" in core
+    assert "judge a criterion that leans on one only on" in core
+    # The two things a reviewer once sent its developer to do: an audit of
+    # open pull requests, and the complete build.
+    assert "never put in\nrequired_fixes \"run the complete build or suite\", a check against open pull requests" in core
+
+
+# --- the brief for a failing test ---------------------------------
+
+
+def _tests_failed_gate(*reasons: str) -> dict:
+    issues = [{"severity": "blocker", "file": None, "reason": r, "details": "AssertionError: expected false to be true"} for r in reasons]
+    return {"passed": False, "issues": issues, "required_fixes": list(reasons)}
+
+
+def test_a_failing_test_brief_says_to_run_the_test_and_that_the_analyzer_does_not():
+    """A story finished three rounds on "analyzer passed" with the failing
+    test never run. The brief ended every failure with "then run
+    analyze_changed_files_tool"; for a test that is a tool that cannot see the
+    failure."""
+    text = verifier.format_gate_feedback(_tests_failed_gate("[adminportal] vue_vite: tests failed"), attempt=1, max_attempts=3)
+
+    assert "run it yourself before you finish — run_command_tool with `npx vitest run <path/to/the.spec.ts>`" in text
+    assert "analyze_changed_files_tool only compiles and lints, so it passing says nothing about this failure" in text
+    assert "stop only when it passes" in text
+    # A collection assertion fails again on its next case.
+    assert "work out the whole set it must cover first" in text
+    assert "you have 3 attempts in all" in text
+    # Not the old ending, which sent dev to the analyzer and called that done.
+    assert "then run analyze_changed_files_tool. When it passes" not in text
+    assert "then re-run the failing tests as below" in text
+
+
+def test_the_test_command_named_is_the_one_for_the_profile_that_failed():
+    java = verifier.format_gate_feedback(_tests_failed_gate("java_maven: tests failed"), attempt=1, max_attempts=3)
+    both = verifier.format_gate_feedback(
+        _tests_failed_gate("[web] vue_vite: tests failed", "[api] java_maven: tests failed"), attempt=2, max_attempts=3
+    )
+    unknown = verifier.format_gate_feedback(_tests_failed_gate("nosuchlang: tests failed"), attempt=1, max_attempts=3)
+
+    assert "`./mvnw test -Dtest=<TestClass>`" in java and "vitest" not in java
+    assert '`npx vitest run <path/to/the.spec.ts>` with repo="web" or `./mvnw test -Dtest=<TestClass>` with repo="api"' in both
+    # No repo tag on the failure (a one-repo story): nothing to name.
+    assert 'with repo=' not in java
+    assert "run_command_tool with the project's test command" in unknown
+
+
+def test_a_compile_failure_brief_is_unchanged_and_does_not_send_dev_to_run_tests():
+    gate = {"passed": False, "issues": [{"severity": "blocker", "file": None, "reason": "vue_vite: analyze failed", "details": "a.ts:1:1 error TS2304"}],
+            "required_fixes": ["vue_vite: analyze failed"]}
+
+    text = verifier.format_gate_feedback(gate, attempt=1, max_attempts=3)
+
+    assert "then run analyze_changed_files_tool. When it passes for your files" in text
+    assert "run it yourself" not in text
+
+
+def test_a_failing_test_alongside_unwritten_files_gets_both_instructions():
+    gate = _tests_failed_gate("vue_vite: tests failed")
+    gate["issues"].append({"severity": "blocker", "file": "src/New.vue", "kind": verifier.KIND_MISSING_NEW_FILE, "reason": "Missing planned new file: src/New.vue"})
+
+    text = verifier.format_gate_feedback(gate, attempt=1, max_attempts=3)
+
+    assert "PLANNED FILES STILL NOT WRITTEN" in text and "Create these with write_file_tool" in text
+    assert "run it yourself before you finish" in text
+
+
+def test_a_failing_test_in_another_repo_names_that_repo_so_it_runs_there():
+    """run_command_tool runs in the default repo unless told which. One story's
+    default was the API; the failing test was the portal's."""
+    text = verifier.format_gate_feedback(_tests_failed_gate("[adminportal] vue_vite: tests failed"), attempt=1, max_attempts=3)
+
+    assert 'run_command_tool with `npx vitest run <path/to/the.spec.ts>` with repo="adminportal"' in text
+
+
+# --- a coverage miss is not a failure the reviewer may send back --------
+
+
+def _coverage_only_gate() -> dict:
+    return {
+        "passed": True,
+        "coverage_gap": True,
+        "coverage_gap_detail": "vue_vite: statements 66.46% < 80%; functions 37.5% < 80%",
+        "profiles": {"vue_vite": {"test_results": {
+            "passed": False, "coverage_gap": True, "coverage_gap_detail": "statements 66.46% < 80%",
+            "stdout": "Tests 94 passed (94)",
+            "stderr": "ERROR: Coverage for lines (66.46%) does not meet global threshold (80%)",
+        }}},
+    }
+
+
+def test_the_reviewer_sees_a_coverage_only_miss_as_one_not_as_a_failed_test_run():
+    """Vitest exits non-zero for a missed threshold just as for a failed
+    assertion, and its output tail carried "ERROR: Coverage ... does not meet" —
+    which the reviewer read as a failure and rejected three times while the gate
+    had passed."""
+    payload = verifier._build_llm_payload({}, ["coverage stays at or above 80%"], [], [], _coverage_only_gate())
+
+    gate = payload["deterministic_gate"]
+    section = gate["profiles"]["vue_vite"]["test_results"]
+    assert gate["coverage_gap"] is True and "functions 37.5% < 80%" in gate["coverage_gap_detail"]
+    assert "Every test passed; only the coverage threshold was missed" in section["note"]
+    assert section["stdout"] == "" and section["stderr"] == ""  # the threshold errors are not shown as a failure
+
+
+def test_a_real_test_failure_keeps_its_output_for_the_reviewer():
+    gate = {"passed": False, "profiles": {"vue_vite": {"test_results": {
+        "passed": False, "stdout": "", "stderr": "FAIL x > y\nAssertionError: expected false to be true",
+    }}}}
+
+    section = verifier._build_llm_payload({}, [], [], [], gate)["deterministic_gate"]["profiles"]["vue_vite"]["test_results"]
+
+    assert "AssertionError" in section["stderr"] and "note" not in section
+
+
+def test_the_review_prompt_says_a_coverage_gap_is_flagged_not_failed():
+    core = verifier._VERIFIER_REVIEW_CORE
+
+    assert "`deterministic_gate.coverage_gap` (with `coverage_gap_detail`) means the planned tests PASSED" in core
+    assert "Never set\npassed=false because of it and never put it in required_fixes" in core
+    assert "including shared code other stories own" in core

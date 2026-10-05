@@ -2,7 +2,7 @@ import type { ScanFolderResult } from "../../types/api";
 import { cn } from "../../lib/utils";
 
 // A folder that is not a git repo but holds several (one checkout per
-// service), like ~/dev/mkt: forge works inside one repository at a time — a
+// service), like ~/dev/mono: forge works inside one repository at a time — a
 // branch and a worktree per story, local merges, the epic's pull request — so
 // each repo picked here is attached as a folder of its own
 // (forge/services/repo_clone.py's scan_folder). Every folder a project has is

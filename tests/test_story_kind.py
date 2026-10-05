@@ -17,7 +17,7 @@ _PROJ_3480_DEV_SUMMARIES = [
     "[Shop App] Select multiple item types on the search form",
     "[Shop App] Search and retrieve offers for a multi-item order",
     "[Shop App] View multi-item pricing on the results list and details",
-    "[Shop App] Complete booking for multiple item types through review and acknowledgement",
+    "[Shop App] Complete checkout for multiple item types through review and acknowledgement",
     "[Shop App] Handle multi-item errors and persist selections",
 ]
 
@@ -77,7 +77,7 @@ def test_validate_without_scope_term_stays_dev():
     is an ordinary dev story that happens to open with the word Validate.
     Treating it as QA would skip implementing it entirely."""
     kind, reason = classify_story_kind(
-        summary="Validate quantity input on the booking form",
+        summary="Validate quantity input on the checkout form",
         description="Reject quantities below 1 and show an inline error.",
         issue_type="Story",
     )
@@ -86,12 +86,12 @@ def test_validate_without_scope_term_stays_dev():
 
 
 def test_lead_token_qa_is_strong_enough_alone():
-    kind, reason = classify_story_kind(summary="QA sign-off for the booking epic", issue_type="Story")
+    kind, reason = classify_story_kind(summary="QA sign-off for the checkout epic", issue_type="Story")
     assert (kind, reason) == (KIND_QA, "lead_token:qa")
 
 
 def test_regression_lead_token_is_strong_enough_alone():
-    kind, _reason = classify_story_kind(summary="Regression sweep across booking flows", issue_type="Story")
+    kind, _reason = classify_story_kind(summary="Regression sweep across checkout flows", issue_type="Story")
     assert _reason == "lead_token:regression"
 
 
@@ -104,8 +104,8 @@ def test_bracket_prefixes_are_stripped_before_reading_the_lead_token():
 
 def test_scope_term_in_description_alone_is_enough():
     kind, reason = classify_story_kind(
-        summary="Verify the booking capability",
-        description="Full regression pass over the booking journey before release.",
+        summary="Verify the checkout capability",
+        description="Full regression pass over the checkout journey before release.",
         issue_type="Story",
     )
     assert kind == KIND_QA

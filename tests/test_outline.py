@@ -61,16 +61,16 @@ public class OrderSearchServiceImpl implements OrderSearchService {
 
 DART = '''import 'package:flutter/material.dart';
 
-class ShipmentScreen extends StatefulWidget {
-  const ShipmentScreen({super.key});
+class DetailScreen extends StatefulWidget {
+  const DetailScreen({super.key});
 
-  factory ShipmentScreen.fromRoute(RouteSettings settings) => const ShipmentScreen();
+  factory DetailScreen.fromRoute(RouteSettings settings) => const DetailScreen();
 
   @override
-  State<ShipmentScreen> createState() => _ShipmentScreenState();
+  State<DetailScreen> createState() => _DetailScreenState();
 }
 
-class _ShipmentScreenState extends State<ShipmentScreen> {
+class _DetailScreenState extends State<DetailScreen> {
   @override
   void initState() {
     super.initState();
@@ -167,9 +167,9 @@ def test_line_numbers_point_at_the_declaration():
 def test_dart_two_space_indentation_and_named_constructors():
     names = _names(DART)
 
-    assert "class ShipmentScreen extends StatefulWidget {" in names
-    assert "const ShipmentScreen({super.key});" in names
-    assert "factory ShipmentScreen.fromRoute(RouteSettings settings) => const ShipmentScreen();" in names
+    assert "class DetailScreen extends StatefulWidget {" in names
+    assert "const DetailScreen({super.key});" in names
+    assert "factory DetailScreen.fromRoute(RouteSettings settings) => const DetailScreen();" in names
     assert "void initState() {" in names
     assert "Widget build(BuildContext context) {" in names
     assert not any(n.startswith(("setState", "return", "child", "body", "super.")) for n in names)

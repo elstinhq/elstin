@@ -79,6 +79,13 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         "The slowest legitimate dev step seen took about 7.5 minutes",
         False, "900", "string",
     ),
+    ConfigField(
+        "llm_connect_timeout_seconds",
+        "Give up on reaching the model endpoint after this many seconds. A corporate proxy reached over a VPN can be "
+        "slower to answer than the OpenAI SDK's own 5s, and a connection that fails is retried several times before "
+        "the story is parked and retried later (0 = the SDK's 5s)",
+        False, "30", "string",
+    ),
     ConfigField("openai_api_key", "OpenAI API key", True, None, "string"),
     ConfigField(
         "llm_base_url",
@@ -262,7 +269,7 @@ CONFIG_CATEGORIES: tuple[ConfigCategory, ...] = (
     ),
     ConfigCategory(
         "models", "Model provider", "Where model calls go, and how long one may take.",
-        ("llm_provider", "openai_api_key", "llm_base_url", "llm_request_timeout_seconds"),
+        ("llm_provider", "openai_api_key", "llm_base_url", "llm_request_timeout_seconds", "llm_connect_timeout_seconds"),
     ),
     ConfigCategory(
         "workflow", "Workflow", "How stories are picked up, approved and run.",

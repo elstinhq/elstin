@@ -59,6 +59,7 @@ from forge.agents.roles.dev import (
     _plan_path_set,
     build_dev_system,
 )
+from forge.agents.roles.plan_gate import person_actions_of
 from forge.config.store import get_bool_config, get_config, get_float_config, get_int_config, resolve_text
 from forge.llm.errors import LlmError, ProviderLimit, provider_limit_of
 from forge.llm.registry import LlmNotConfiguredError, get_provider
@@ -69,7 +70,7 @@ from forge.services.memory_usage import measured
 from forge.services.run_activity import append_activity
 from forge.services.usage import effective_budget_usd, record_phase_usage, record_run_outcome, turn_usage_meta
 from forge.tools import language_hooks
-from forge.tools.dev_tools import BOOKKEEPING_TOOLS, PROGRESS_TOOLS, READ_ONLY_TOOLS, WEB_TOOLS, make_dev_tools
+from forge.tools.dev_tools import BOOKKEEPING_TOOLS, PROGRESS_TOOLS, READ_ONLY_TOOLS, WEB_TOOLS, _targets_for_repo, make_dev_tools
 from forge.tools.git_tools import list_changed_files
 from forge.tools.progress import render_progress, seed_progress_items
 from forge.tools.workspace import REFERENCE_SIGIL, Workspace, labels_in_plan
@@ -136,6 +137,24 @@ def _fix_mode_detail(required_fixes: list[str], analyze_errors: list[str]) -> st
     return "\n\n".join(parts)[:_FIX_MODE_DETAIL_CHARS]
 
 
+def planned_test_commands(
+    workspace: Workspace, write_roots: dict[str, str], planned_test_files: list[str], default_label: str,
+) -> list[tuple[str | None, str]]:
+    """For each repo that holds planned tests: (repo to name, command that runs
+    them). The repo is None for the default one, which is where run_command_tool
+    runs unless told otherwise. The command is "" when the repo's profile has no
+    test command to suggest. What the fix brief tells dev to run
+    (dev.test_run_instruction)."""
+    commands: list[tuple[str | None, str]] = []
+    for label, root in write_roots.items():
+        repo_tests = _targets_for_repo(workspace, label, planned_test_files)
+        if not repo_tests:
+            continue
+        profile = language_hooks.profile_for_path(root, repo_tests[0])
+        commands.append((label if label != default_label else None, language_hooks.test_command_hint(profile.key) if profile else ""))
+    return commands
+
+
 def idle_budget_for_plan(base: int, planned_files: int) -> int:
     """The idle-turn budget for a plan of this many files. 0 (off) stays off."""
     if base <= 0:
@@ -163,7 +182,7 @@ def _build_prompt(*, continuing: bool, plan: dict[str, Any], context_bundle: dic
         "new ones to avoid duplicating completed work.\n\n"
         if prior_work.get("found") else ""
     )
-    dev_plan = {k: v for k, v in plan.items() if k not in ("plan_markdown", "read_only_changes")}
+    dev_plan = {k: v for k, v in plan.items() if k not in ("plan_markdown", "read_only_changes", "person_actions")}
     # Changes left to a person — read-only repos, or files the project says
     # agents must not change (plan_gate.normalize_plan):
     # named so dev neither attempts them nor re-creates them where it can write.
@@ -175,9 +194,22 @@ def _build_prompt(*, continuing: bool, plan: dict[str, Any], context_bundle: dic
         + "\n\n"
         if read_only_changes else ""
     )
+    # Things no agent here can do (plan_gate.person_actions_of): said outright,
+    # because a developer a reviewer keeps sending back for evidence it cannot
+    # produce will, left to itself, write something that looks like it
+    # (one run dated an "audit" it had no way to run).
+    person_actions = person_actions_of(plan)
+    person_text = (
+        "Not yours to do — a person does these, outside this change. Leave them open: do not attempt them, and never "
+        "write a comment, report row, count or name that makes one look done:\n"
+        + "\n".join(f"- {a['action']}" + (f" — {a['reason']}" if a.get("reason") else "") for a in person_actions)
+        + "\n\n"
+        if person_actions else ""
+    )
     return (
         f"Approved plan:\n{json.dumps(dev_plan, indent=2)}\n\n"
         + read_only_text
+        + person_text
         + (f"{project_guide_text}\n\n" if project_guide_text else "")
         + project_context_text
         + dev_skills_text
@@ -439,6 +471,7 @@ async def run_dev(
             analyze_targets.extend(workspace.display_path(label, t) for t in repo_analyze)
             planned_test_files.extend(workspace.display_path(label, t) for t in repo_tests)
         allow_test_run = bool(planned_test_files)
+        test_commands = planned_test_commands(workspace, write_roots, planned_test_files, default_label)
 
         if gate_feedback:
             brief = gate_feedback
@@ -446,7 +479,9 @@ async def run_dev(
                 append_activity(run_id, type="status", phase="dev", title="Fix mode: deterministic gate feedback carried into dev loop", detail=gate_feedback[:8000])
         else:
             required_fixes, analyze_errors = _collect_required_fixes(verifier_report)
-            brief = _build_iteration_brief(worktree_path, allowed_paths, required_fixes, analyze_errors, continuing=continuing)
+            brief = _build_iteration_brief(
+                worktree_path, allowed_paths, required_fixes, analyze_errors, continuing=continuing, test_commands=test_commands,
+            )
             if run_id and (required_fixes or analyze_errors):
                 # The fixes themselves, not just how many: they are what the
                 # reviewer found wrong, so they are what the activity feed

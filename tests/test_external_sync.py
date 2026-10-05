@@ -310,7 +310,7 @@ def test_reopening_restores_only_a_skip_that_sync_made(project_id):
 
 
 def test_a_ticket_on_hold_when_added_is_set_aside_and_does_not_block_the_epic(project_id):
-    """MKT2-856: On Hold in JIRA (filed under To Do, so not closed), and
+    """One story: On Hold in JIRA (filed under To Do, so not closed), and
     forge planned it anyway."""
     _epic(project_id, _t("ENG-2", parent="ENG-1", status="On Hold"), _t("ENG-3", parent="ENG-1"))
 

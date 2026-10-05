@@ -1,7 +1,7 @@
 """Vue 3 + Vite `vue-tsc` / Vitest invocation, and the `LanguageProfile`
 that wires it into forge/tools/language_hooks.py's registry.
 
-Modeled on apps like mkt-adminportal: Vite at the root, TypeScript via
+Modeled on apps like mono-adminportal: Vite at the root, TypeScript via
 `vue-tsc`, unit tests via Vitest, npm as the package manager. Uses the
 shared default verify pipeline (ensure_dependencies -> analyze ->
 run_tests) — no codegen/DI step between install and typecheck.
@@ -118,9 +118,9 @@ def _has_tsconfig(worktree_path: str) -> bool:
 
 # --- ESLint on what the story changed ------------------------------------------
 #
-# A repo's lint rules (Prettier through ESLint, for MKT) are its standard, and
-# vue-tsc does not check them: MKT2-866 reached its pull request with 22
-# prettier/prettier errors. But a repo is not necessarily lint-clean — the MKT
+# A repo's lint rules (Prettier through ESLint, say) are its standard, and
+# vue-tsc does not check them: one story reached its pull request with 22
+# prettier/prettier errors. But a repo is not necessarily lint-clean — one
 # portal has 17,000 errors in 82 older files — so a story is held to its own
 # changes, measured against each file's committed version (HEAD, the epic
 # branch the story started from): a file it creates, or one that was clean,
@@ -470,6 +470,7 @@ def vue_vite_profile() -> LanguageProfile:
             ("npm", "run", "test"),
             ("npm", "test"),
         ),
+        test_command_hint="npx vitest run <path/to/the.spec.ts>",
         format_test_command=_format_vue_test_command,
         planner_conventions=VUE_PLANNER_CONVENTIONS,
         dev_conventions=VUE_DEV_CONVENTIONS,

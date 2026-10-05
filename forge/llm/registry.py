@@ -63,5 +63,6 @@ def get_provider(project_id: int | None = None) -> LlmProvider:
             base_url=base_url,
             name="openai",
             request_timeout_seconds=get_float_config("llm_request_timeout_seconds", 900.0),
+            connect_timeout_seconds=get_float_config("llm_connect_timeout_seconds", 30.0),
         )
     raise LlmNotConfiguredError(f"Unknown llm_provider {provider_name!r} — only 'openai' is wired today.")

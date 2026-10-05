@@ -264,7 +264,7 @@ async def gate_node(state: FeatureRunState) -> dict:
 
     # The build environment, not the code (LanguageProfile.environment_problem):
     # the developer step cannot fix a toolchain, and sent back it "fixes"
-    # working code trying — MKT2-866 lost three passes to a JDK. Stop, say why.
+    # working code trying — one story lost three passes to a JDK. Stop, say why.
     environment = [issue["environment"] for issue in gate.get("issues") or [] if isinstance(issue, dict) and issue.get("environment")]
     if environment:
         reason = "; ".join(dict.fromkeys(environment))
@@ -585,7 +585,7 @@ def route_after_planner(state: FeatureRunState) -> str:
     # `aupdate_state`, which re-evaluates this same edge against the patched
     # state) must land back on "planner" to actually finish planning, not on
     # "dev", which would be scoped to write the files of a plan that was
-    # never finished — see MKT2-858, where this sent an unanswered-shaped
+    # never finished — see one story, where this sent an unanswered-shaped
     # plan straight to dev and the run failed with "nothing to verify".
     if state.get("status") == "awaiting_clarification":
         return "planner"

@@ -1,7 +1,7 @@
 """forge adding a repo's missing build-output entries to its .gitignore
 (forge/tools/worktree.py's missing_gitignore_entries / add_to_gitignore,
-forge/daemon/main.py's _ignore_build_output_on_epic). MKT2-866: the
-`mkt-apiservice` main branch had no .gitignore, and a build left target/
+forge/daemon/main.py's _ignore_build_output_on_epic). One story: the
+`mono-apiservice` main branch had no .gitignore, and a build left target/
 to be committed. Real git; agents are fakes."""
 from __future__ import annotations
 

@@ -4,6 +4,7 @@ and the mixed-language case (two marker files in one worktree)."""
 from __future__ import annotations
 
 import os
+import re
 
 from forge.tools import language_hooks
 
@@ -177,3 +178,44 @@ def test_run_full_test_suites_dispatches_to_every_supporting_profile(tmp_path, m
     assert result["ran"] is True
     assert result["passed"] is False  # beta failed
     assert result["profiles"]["alpha"]["passed"] is True
+
+
+# --- how a developer runs a failing test -------------------------------------
+
+
+def test_every_profile_with_a_test_command_names_a_way_to_run_it():
+    for profile in language_hooks.all_profiles():
+        if profile.test_command_prefixes:
+            assert language_hooks.test_command_hint(profile.key), profile.key
+
+
+def test_every_test_command_hint_is_a_command_run_command_tool_allows():
+    """The fix brief tells dev to run this. One the allowlist refuses sends it
+    back with "blocked by safety policy" — which is how a developer
+    lost a round on `./mvnw -q -Dtest=...`."""
+    from forge.tools.safe_shell import is_safe_command
+
+    for profile in language_hooks.all_profiles():
+        hint = language_hooks.test_command_hint(profile.key)
+        if not hint:
+            continue
+        tokens = hint.split()
+        assert any(tuple(tokens[: len(prefix)]) == prefix for prefix in profile.test_command_prefixes), (profile.key, hint)
+        assert is_safe_command(re.sub(r"<[^>]+>", "Example", hint)), (profile.key, hint)
+
+
+def test_a_profile_without_a_hint_falls_back_to_its_first_test_prefix_and_an_unknown_one_to_nothing():
+    language_hooks._ensure_default_profiles_registered()
+    plain = language_hooks.LanguageProfile(
+        key="plain", marker_files=("plain.marker",), is_source=lambda p: False, is_test=lambda p: False,
+        ensure_dependencies=lambda w: {"passed": True}, analyze=lambda w, t: {"passed": True}, run_tests=lambda w, t: {"passed": True},
+        test_command_prefixes=(("plain", "test"), ("plain", "check")),
+    )
+    saved = dict(language_hooks._PROFILES)
+    try:
+        language_hooks.register_profile(plain)
+        assert language_hooks.test_command_hint("plain") == "plain test"
+    finally:
+        language_hooks._PROFILES.clear()
+        language_hooks._PROFILES.update(saved)
+    assert language_hooks.test_command_hint("nosuchlang") == ""

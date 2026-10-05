@@ -355,7 +355,7 @@ def exclude_build_output(project_path: str, extra_paths: tuple[str, ...] = ()) -
     worktree of it shares and which is never committed or pushed. Rewritten
     in place, so it stays one block. Returns the patterns.
 
-    MKT2-866: `mkt-apiservice`'s main branch has no .gitignore, the build
+    One story: `mono-apiservice`'s main branch has no .gitignore, the build
     check left `target/` behind, and forge staged 168 build files for the
     epic's pull request. Folders come from the profiles detected in the repo
     and in `extra_paths` (its worktrees, whose branch may add a toolchain)."""

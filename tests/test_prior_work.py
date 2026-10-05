@@ -196,5 +196,5 @@ def test_a_repo_without_origin_is_looked_up_locally(tmp_path):
 
 
 def test_only_jira_style_keys_are_looked_for():
-    assert is_searchable_key("MKT2-848") and is_searchable_key("ENG-2")
+    assert is_searchable_key("PROJ-848") and is_searchable_key("ENG-2")
     assert not is_searchable_key("gh.acme.widgets.3") and not is_searchable_key("3")

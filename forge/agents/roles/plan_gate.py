@@ -31,6 +31,12 @@ model does and a `os.path.isfile` cannot. Asserting it mechanically would
 mean guessing, and a gate that guesses is worse than no gate: it rejects
 good plans and teaches the planner to pad its file list.
 
+Ahead of all of that sits `check_plan_integrity`, which asks whether the
+answer is a plan object at all — tool-call markup swallowing the fields after
+it, an array field that is not an array, a stub summary — on the answer as it
+arrived, and stands in for these checks when it finds something, since a
+mangled answer fails them for the wrong reason ("names no files").
+
 Multi-repo: every path is resolved through the story's Workspace, so an
 `@api/`-prefixed path is checked against the API repo's root and an
 unknown label is itself a defect (see forge/tools/workspace.py).
@@ -49,6 +55,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import Iterator
 from typing import Any
 
 from forge.tools.grep import DEFAULT_EXCLUDES
@@ -64,6 +71,8 @@ KIND_UNKNOWN_REPO = "unknown_repo"
 KIND_READ_ONLY_REPO = "read_only_repo"
 KIND_EVIDENCE_MISSING = "evidence_path_missing"
 KIND_QUESTION_PLACEHOLDER = "question_placeholder"
+KIND_MALFORMED_OUTPUT = "malformed_output"
+KIND_STUB_PLAN = "stub_plan"
 
 # Stub tokens seen in place of real clarification content — a model that
 # decides to ask a question before it has one ready has, in practice,
@@ -74,6 +83,20 @@ _PLACEHOLDER_TOKENS = frozenset({"placeholder", "todo", "tbd", "xxx", "n/a", "na
 
 def _looks_like_placeholder(text: Any) -> bool:
     return str(text or "").strip().strip(".").lower() in _PLACEHOLDER_TOKENS
+
+
+# Fields the plan schema declares as arrays (planner_loop._PLAN_JSON_SCHEMA).
+# `acceptance_criteria` is deliberately not here: a single string in its place
+# is a shape `criteria_list` has always tolerated.
+_ARRAY_FIELDS = (
+    "questions", "files_to_create", "files_to_modify", "read_only_changes", "person_actions", "context_files",
+    "discovery_evidence",
+)
+
+# Tool-call markup — what a model writes when it falls out of the JSON it was
+# asked for and into its own function-call syntax. See check_plan_integrity.
+_MARKUP_RE = re.compile(r"</?\s*(?:antml:)?(?:parameter|invoke|function_calls)\b", re.IGNORECASE)
+_MARKUP_FIELD_RE = re.compile(r"<\s*(?:antml:)?parameter\s+name\s*=\s*[\"']([\w.-]+)[\"']", re.IGNORECASE)
 
 # Cap on the filename index built to suggest "did you mean". Only built
 # when something is already missing, so the common case pays nothing.
@@ -211,14 +234,161 @@ def check_questions(questions: list[Any]) -> list[dict[str, Any]]:
     return defects
 
 
+def _string_values(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
+    """(path, text) for every string anywhere in `value`, outermost first."""
+    if isinstance(value, str):
+        yield path, value
+    elif isinstance(value, dict):
+        for key, inner in value.items():
+            yield from _string_values(inner, f"{path}.{key}" if path else str(key))
+    elif isinstance(value, list):
+        for index, inner in enumerate(value):
+            yield from _string_values(inner, f"{path}[{index}]")
+
+
+def _json_type(value: Any) -> str:
+    return {str: "string", dict: "object", bool: "boolean", int: "number", float: "number"}.get(type(value), type(value).__name__)
+
+
+def check_plan_integrity(plan: dict[str, Any], *, clarifying: bool = False) -> list[dict[str, Any]]:
+    """Whether `plan` is a plan object at all, ahead of whether it is a good one.
+
+    Run on the provider's answer exactly as it arrived — before
+    `normalize_plan`, which iterates the file lists and would turn a string
+    where an array belongs into one entry per character — and, when it finds
+    anything, instead of `check_plan` rather than beside it. A mangled answer
+    fails `check_plan` too, but for the wrong reason: "the plan names no files"
+    sent the planner back to look for files it had already named.
+
+    The failure this exists for is a run on `claude-sonnet-5` behind an
+    OpenAI-compatible proxy. The structured answer parsed as JSON, but its
+    first value was one long string holding `["..."]\\n<parameter
+    name="architecture">{...}<parameter name="files_to_modify">...` — the
+    model had slipped into its own tool-call syntax, so every field after the
+    first was inside that string and none was a field of the plan. The gate
+    saw empty file lists, said so, and the retries came back as stubs. Three
+    things are checked, each of which is blocking:
+
+    - tool-call markup inside any value, naming the fields it swallowed;
+    - an array field that is not an array;
+    - a `feature_summary` that is stub text. Not applied to a clarification
+      round-trip (`clarifying`): there the plan fields are allowed to be thin
+      until a person answers (planner_loop.py), and `check_questions` judges
+      the part that reaches them.
+
+    A field that is simply absent is not judged here; an empty plan is
+    `check_plan`'s to report."""
+    defects: list[dict[str, Any]] = []
+
+    reported: set[str] = set()
+    for path, text in _string_values(plan):
+        match = _MARKUP_RE.search(text)
+        field = re.split(r"[.\[]", path, maxsplit=1)[0]
+        if not match or field in reported or len(reported) >= 3:
+            continue
+        reported.add(field)
+        swallowed = list(dict.fromkeys(_MARKUP_FIELD_RE.findall(text)))
+        reason = f'"{path}" holds tool-call markup ({match.group(0).strip()}…) instead of plain text'
+        if swallowed:
+            reason += f", so the fields written after it were swallowed into that value and are missing from the plan: {', '.join(swallowed)}"
+        defects.append({"kind": KIND_MALFORMED_OUTPUT, "path": None, "suggestions": [], "reason": reason})
+
+    for key in _ARRAY_FIELDS:
+        value = plan.get(key)
+        if value is None or isinstance(value, list):
+            continue
+        hint = " (a JSON list written inside a string)" if isinstance(value, str) and value.lstrip().startswith("[") else ""
+        defects.append({
+            "kind": KIND_MALFORMED_OUTPUT, "path": None, "suggestions": [],
+            "reason": f'"{key}" must be a JSON array but is a {_json_type(value)}{hint}',
+        })
+
+    if not clarifying and "feature_summary" in plan:
+        summary = plan["feature_summary"]
+        if isinstance(summary, str) and _looks_like_placeholder(summary.strip().strip("#*_`-: \t\n")):
+            defects.append({
+                "kind": KIND_STUB_PLAN, "path": None, "suggestions": [],
+                "reason": f"feature_summary is stub text ({summary.strip()[:40]!r}), not a description of the plan",
+            })
+    return defects
+
+
+def plan_shape(plan: dict[str, Any]) -> dict[str, Any]:
+    """What the provider's answer was made of, small enough to keep: the
+    fields it had and how much each held. Recorded when the gate rejects a
+    plan, because the activity feed cuts the plan's own text at 4,000
+    characters — well short of the file lists, which come after the
+    acceptance criteria — and a rejection that cannot say whether the lists
+    were empty or never arrived cannot be diagnosed from the feed."""
+
+    def size(key: str) -> Any:
+        if key not in plan:
+            return "missing"
+        value = plan[key]
+        if value is None:
+            return "null"
+        if isinstance(value, list):
+            return len(value)
+        if isinstance(value, str):
+            return f"string ({len(value)} chars)"
+        return _json_type(value)
+
+    shape: dict[str, Any] = {
+        "fields": sorted(str(key) for key in plan),
+        **{key: size(key) for key in ("files_to_create", "files_to_modify", "read_only_changes", "acceptance_criteria", "questions")},
+    }
+    summary = plan.get("feature_summary")
+    shape["feature_summary"] = summary.strip()[:40] if isinstance(summary, str) else size("feature_summary")
+    return shape
+
+
+def describe_plan_shape(shape: dict[str, Any]) -> str:
+    return (
+        "Received: "
+        + ", ".join(f"{key} {shape[key]}" for key in ("files_to_create", "files_to_modify", "read_only_changes", "acceptance_criteria", "questions"))
+        + f"; feature_summary {shape['feature_summary']!r}; fields present: {', '.join(shape['fields']) or 'none'}"
+    )
+
+
+def person_actions_of(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """The plan's `person_actions` as `[{action, reason}]`, whatever shape the
+    model left them in: a bare string is an action with no reason, an entry
+    with no action text is dropped, and a repeat is kept once. A plan from
+    before the field existed has none.
+
+    Actions are things the ticket's acceptance criteria lean on that no agent
+    here can do — see PLANNER_SYSTEM_CORE's "what the dev agent can and cannot do":
+    open pull requests and branches it cannot see, data it has no access to,
+    a publication or a sign-off. They are the non-file counterpart of
+    `read_only_changes`, and travel the same way: the plan's reader is told,
+    the developer is told not to attempt them, and the reviewer never fails a
+    run for their absence."""
+    raw = plan.get("person_actions")
+    if not isinstance(raw, list):
+        return []
+    actions: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw:
+        if isinstance(item, dict):
+            text = str(item.get("action") or "").strip()
+            reason = str(item.get("reason") or "").strip() or None
+        else:
+            text, reason = str(item or "").strip(), None
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        actions.append({"action": text, "reason": reason})
+    return actions
+
+
 def normalize_plan(plan: dict[str, Any], workspace: Workspace) -> tuple[dict[str, Any], list[str]]:
     """The plan with two fixes made instead of sent back. Returns (plan,
     notes), one note per fix, for the activity feed.
 
-    - A path naming another repo without its `@` — `mkt-adminportal/src/x.ts`
-      where `mkt-adminportal` is one of the project's repos, not a folder of
-      the default one — becomes `@mkt-adminportal/src/x.ts`. Sent back, a
-      planner fixing one path tends to break another (MKT2-866's retry
+    - A path naming another repo without its `@` — `mono-adminportal/src/x.ts`
+      where `mono-adminportal` is one of the project's repos, not a folder of
+      the default one — becomes `@mono-adminportal/src/x.ts`. Sent back, a
+      planner fixing one path tends to break another (one story's retry
       dropped every `@` and then had eight "missing" files).
     - A file to create or modify in a read-only repo or reference folder is
       moved to `read_only_changes`: a change the ticket needs that forge may
@@ -231,8 +401,8 @@ def normalize_plan(plan: dict[str, Any], workspace: Workspace) -> tuple[dict[str
     A `read_only_changes` entry in a repo forge CAN write stays there — the
     planner is only to do that for a file the project says agents must not
     change — and is noted, for the person approving the plan to check.
-    Moving it back into the plan undid exactly that: MKT2-866's planner left
-    `orders-oas.yaml`, an untracked copy of the contract, to a
+    Moving it back into the plan undid exactly that: one story's planner left
+    `bundled-oas.yaml`, an untracked copy of the contract, to a
     person as the workspace's CLAUDE.md says, and was overruled into
     hand-writing it. A path the plan also lists as a file to change is
     planned work, and leaves this list."""
@@ -297,6 +467,7 @@ def normalize_plan(plan: dict[str, Any], workspace: Workspace) -> tuple[dict[str
                 kept.append(entry)
         plan[key] = kept
     plan["read_only_changes"] = kept_read_only
+    plan["person_actions"] = person_actions_of(plan)
     return plan, notes
 
 
@@ -453,6 +624,8 @@ _KIND_HEADINGS = (
     (KIND_EVIDENCE_MISSING, "These discovery_evidence citations do not resolve. Every claim in the plan must come from a file you actually read, so re-read before you re-state:"),
     (KIND_UNKNOWN_REPO, "These paths name a repo this project does not have. Use the exact `@label/` prefixes listed in your prompt:"),
     (KIND_READ_ONLY_REPO, "These paths are in a read-only repo or reference folder. Read them for context (context_files), but plan the change where it belongs — and if the ticket truly needs one there, say so in reasoning for a person to make:"),
+    (KIND_MALFORMED_OUTPUT, "Your answer was not a well-formed plan object, so parts of it were lost. Answer with ONE JSON object in which every field is a top-level key holding its declared type — arrays as arrays, never a JSON list inside a string, and never <parameter> or <invoke> tags:"),
+    (KIND_STUB_PLAN, "Your answer was a stub, not a plan. Do the investigation first (find_files_tool, grep_tool, read_file_tool), then write the real plan — never answer with placeholder text to buy time:"),
     (KIND_QUESTION_PLACEHOLDER, "These clarification questions are stub placeholders, not real questions. Only ask a question when you have a concrete, project-grounded question and options to offer; otherwise leave `questions` empty and produce the full plan:"),
 )
 
@@ -475,9 +648,17 @@ def format_plan_feedback(defects: list[dict[str, Any]], *, attempt: int, max_att
         else:
             by_kind.setdefault(str(kind), []).append(defect)
 
+    # A mangled or stub answer is rejected before any check against the
+    # repository runs, and says nothing of the files — so it must not be
+    # worded as though they were looked at.
+    answer_defects = by_kind.keys() & {KIND_MALFORMED_OUTPUT, KIND_STUB_PLAN}
     lines = [
         "=== YOUR PREVIOUS PLAN WAS REJECTED ===",
-        f"Checks against the repository found {len(defects)} problem(s) (plan attempt {attempt}/{max_attempts}).",
+        (
+            f"The plan gate found {len(defects)} problem(s) with the answer itself (plan attempt {attempt}/{max_attempts})."
+            if answer_defects else
+            f"Checks against the repository found {len(defects)} problem(s) (plan attempt {attempt}/{max_attempts})."
+        ),
     ]
 
     if general:
@@ -487,7 +668,10 @@ def format_plan_feedback(defects: list[dict[str, Any]], *, attempt: int, max_att
             "A plan must name every file to create or modify and state the acceptance criteria the "
             "finished work is checked against. The dev agent may only write files this plan names, so "
             "an empty plan ships the ticket as an empty change. If the feature looks already "
-            "implemented, plan the files that still need changing to satisfy it — its tests, most often."
+            "implemented, that is still a plan: list the existing files that implement it, and the "
+            "existing tests that prove it, under files_to_modify with a purpose starting "
+            "\"Already satisfied:\". The dev agent confirms each needs no edit and the story finishes "
+            "as done with no change. Do not invent an edit to fill the list."
         )
 
     for kind, heading in _KIND_HEADINGS:
@@ -504,9 +688,14 @@ def format_plan_feedback(defects: list[dict[str, Any]], *, attempt: int, max_att
 
     lines += [
         "",
-        "Verify each path with your find_files_tool/grep_tool/read_file_tool before you name it — a "
-        "path you have not confirmed is a guess, and this check runs again on your next answer. "
-        "Then produce the plan JSON again, corrected.",
+        (
+            "Produce the plan JSON again: one object, every field a top-level key with its declared type, "
+            "no markup, and real content in place of any stub."
+            if answer_defects else
+            "Verify each path with your find_files_tool/grep_tool/read_file_tool before you name it — a "
+            "path you have not confirmed is a guess, and this check runs again on your next answer. "
+            "Then produce the plan JSON again, corrected."
+        ),
         "=== END ===",
     ]
     return "\n".join(lines)

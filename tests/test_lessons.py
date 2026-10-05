@@ -158,13 +158,13 @@ async def test_known_lessons_are_shown_to_the_model(world, monkeypatch):
     sm, epic, project_id = world
     _enable(project_id)
     _trouble()
-    sm.add_lesson_candidate(project_id, "Never edit orders-oas.yaml by hand.")
+    sm.add_lesson_candidate(project_id, "Never edit bundled-oas.yaml by hand.")
     fake = _reply()
     monkeypatch.setattr(lessons, "chat_completion_json", fake)
 
     await lessons.capture_story_lessons(sm, epic, sm.get_story("ENG-2"))
 
-    assert "Never edit orders-oas.yaml by hand." in fake.calls[0]["messages"][1]["content"]
+    assert "Never edit bundled-oas.yaml by hand." in fake.calls[0]["messages"][1]["content"]
 
 
 async def test_a_model_failure_is_swallowed(world, monkeypatch):

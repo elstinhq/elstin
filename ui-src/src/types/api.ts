@@ -265,6 +265,15 @@ export interface ReadOnlyChange {
   purpose: string | null;
 }
 
+// Something the ticket's criteria lean on that no agent here can do, so a
+// person has to: run a script against data the agent cannot reach, check open
+// pull requests, publish, review (forge/agents/roles/plan_gate.py's
+// person_actions_of). The non-file counterpart of ReadOnlyChange.
+export interface PersonAction {
+  action: string;
+  reason: string | null;
+}
+
 export interface Story {
   jira_key: string;
   epic_key: string;
@@ -293,6 +302,8 @@ export interface Story {
   coverage_gap_detail: string | null;
   // From the latest plan; empty when it needs none.
   read_only_changes: ReadOnlyChange[];
+  // From the latest plan; empty when it needs none.
+  person_actions: PersonAction[];
   pr_open_error: string | null;
   retry_count: number;
   failure_stage: string | null;

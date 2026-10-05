@@ -3,8 +3,8 @@
 Maven and Gradle run on whatever `JAVA_HOME` (else `java` on PATH) the
 process inherits — on a developer's machine, the newest JDK installed. A
 project states the version it targets, and a build tool on a much newer
-JDK than that can fail before compiling a single file: MKT2-866's
-`mkt-apiservice` targets Java 21 with Lombok 1.18.36, forge ran it on JDK 26,
+JDK than that can fail before compiling a single file: one story's
+`mono-apiservice` targets Java 21 with Lombok 1.18.36, forge ran it on JDK 26,
 and javac crashed (`TypeTag :: UNKNOWN`) three builds in a row while the
 developer step "fixed" working code.
 

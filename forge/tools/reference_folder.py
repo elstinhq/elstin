@@ -1,8 +1,8 @@
 """A reference folder: a plain folder read for context, never written.
 
-The motivating case is a workspace folder like `~/dev/mkt`: one checkout per
+The motivating case is a workspace folder like `~/dev/mono`: one checkout per
 service side by side, plus what sits around them — a CLAUDE.md about how the
-repos relate ("API-Contract-Definitions is off limits"), `docs/` with a
+repos relate ("API-Schemas is off limits"), `docs/` with a
 knowledge base and plans, a shell script, and gigabytes of database dumps and
 spreadsheets. The repos are attached one by one (forge/services/repo_clone.py).
 The rest is context the planner and dev should read — the dumps are not.

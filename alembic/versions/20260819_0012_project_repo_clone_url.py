@@ -3,7 +3,7 @@
 API process controls (see forge/db/models/project.py's ProjectRepo
 docstring) instead of pointing at a pre-existing local path, so the UI can
 show provenance instead of just an opaque container-local path like
-/data/cloned-repos/3/mkt-adminportal.
+/data/cloned-repos/3/mono-adminportal.
 
 Nullable, no backfill: rows created before this migration were attached via
 the old pick-folder/manual-path flow and never had a source URL to record.

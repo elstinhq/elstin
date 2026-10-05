@@ -211,8 +211,10 @@ class Story(Base):
 
     # When a story that failed on a provider limit (parked_reason ==
     # "usage_limit") is retried automatically — the instant the provider said
-    # the limit lifts. NULL: no retry is scheduled (the provider did not say
-    # when, or the story failed some other way). Cleared by every status
+    # the limit lifts — or on the model endpoint being unreachable
+    # ("provider_unreachable") — forge's own short wait. NULL: no retry is
+    # scheduled (the provider did not say when, or the story failed some other
+    # way). Cleared by every status
     # transition, like parked_reason. See forge/daemon/main.py's
     # _resume_stories_past_their_limit.
     retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -240,6 +242,13 @@ class Story(Base):
     # copy of the checkpoint's plan field, so the board and the epic's pull
     # request can name them. NULL: none.
     read_only_changes: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    # What the plan leaves to a person that is not a file: [{action, reason}]
+    # from the latest plan (forge/agents/roles/plan_gate.py's
+    # person_actions_of) — run something against data the agent cannot reach,
+    # check open pull requests, publish, review. The non-file counterpart of
+    # read_only_changes, kept for the same reason. NULL: none.
+    person_actions: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     # Set when _maybe_open_pull_request (forge/daemon/main.py) attempts a
     # push or GitHub API call and it fails — that function is best-effort

@@ -136,15 +136,40 @@ def _collect_required_fixes(verifier_report: dict[str, Any] | None) -> tuple[lis
     return fixes, error_lines
 
 
+def test_run_instruction(test_commands: list[tuple[str | None, str]] | None) -> str:
+    """The sentence that sends dev to run the plan's tests itself, or "" when
+    the plan has none. `test_commands`: (repo to name or None for the default
+    repo, command) for each repo that holds planned tests.
+
+    A fix brief used to end "then run analyze_changed_files_tool", a tool that
+    compiles and lints and never runs a test — so a developer sent back for
+    missing coverage, or a failing test, finished each round on "analyzer
+    passed" with the tests unrun. The tests are allowed through
+    run_command_tool, in the repo that holds them."""
+    if not test_commands:
+        return ""
+    ways = []
+    for repo, command in test_commands:
+        what = f"`{command}`" if command else "the project's test command"
+        ways.append(f'{what} with repo="{repo}"' if repo else what)
+    return (
+        "Run the plan's tests yourself before you finish — run_command_tool with " + " or ".join(ways) + ". "
+        "analyze_changed_files_tool only compiles and lints; it does NOT run tests, so a clean analyze says nothing "
+        "about them. "
+    )
+
+
 def _build_iteration_brief(
     worktree_path: str,
     allowed_paths: set[str],
     required_fixes: list[str],
     analyze_errors: list[str],
     continuing: bool = False,
+    test_commands: list[tuple[str | None, str]] | None = None,
 ) -> str:
     """Task brief for the dev loop. First iteration: implement. Retry
     iterations: FIX MODE — an explicit fix checklist."""
+    run_tests = test_run_instruction(test_commands)
     if not required_fixes and not analyze_errors:
         return "Begin implementation. Analyze your options, call tools, and verify your changes with analyze_changed_files iteratively."
 
@@ -165,8 +190,8 @@ def _build_iteration_brief(
         lines.append(
             "You already have the earlier context from this session. Re-read a file "
             "with read_file_tool only if you need to confirm its current on-disk state, "
-            "then apply the fixes and run analyze_changed_files. When every fix is "
-            "applied and analyze passes for your files, respond with a plain-text summary."
+            "then apply the fixes and run analyze_changed_files. " + run_tests + "When every fix is "
+            "applied and the checks pass for your files, respond with a plain-text summary."
         )
         return "\n".join(lines)
 
@@ -191,8 +216,8 @@ def _build_iteration_brief(
 
     lines.append("")
     lines.append(
-        "Apply each fix with edit_file_tool, then run analyze_changed_files_tool. "
-        "When every fix is applied and analyze passes for your files, respond with a plain-text summary."
+        "Apply each fix with edit_file_tool, then run analyze_changed_files_tool. " + run_tests +
+        "When every fix is applied and the checks pass for your files, respond with a plain-text summary."
     )
     return "\n".join(lines)
 

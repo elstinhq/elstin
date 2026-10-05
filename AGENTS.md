@@ -197,7 +197,7 @@ project create (`repo_url` / `repo_path`):
   normalize_plan` moves it to the plan's `read_only_changes`, and the
   story plans and runs on the rest. That list means "left to a person": the
   planner may also put there a file in a writable repo that the project's
-  guide says agents must not change (MKT2-866: `orders-oas.yaml`,
+  guide says agents must not change (one story: `bundled-oas.yaml`,
   an untracked copy of the contract). Such an entry stays — dev can only
   write the plan's own files, so it is never touched — and is noted in the
   activity feed for whoever approves the plan; one also listed as a file to
@@ -209,8 +209,10 @@ project create (`repo_url` / `repo_path`):
   The verifier's review gets them apart from the plan (`left_to_a_person`)
   and is told never to fail a run over them — an acceptance criterion that
   leans on one is judged on what the story itself delivers.
+  Actions that are not files (run against data, check pull requests, publish) are the
+  sibling list `person_actions` — see "Person actions".
   `normalize_plan` also gives an unprefixed path whose first folder is
-  another repo's label (`mkt-adminportal/src/…`, and no such folder in the
+  another repo's label (`mono-adminportal/src/…`, and no such folder in the
   default repo) its `@`, rather than sending the plan back over it.
   No epic branch is made there, no prior-work lookup runs there, and an
   epic never defaults to one (`writable_project_repo_id`); marking one
@@ -359,7 +361,7 @@ into the project guide; accepted ones are handed to the planner and dev.
 ## Work that already exists for a ticket
 
 Tickets rarely arrive untouched: a story is "In Progress" because someone
-already has `feature/MKT2-848-customer-search-api`, ten commits ahead of main.
+already has `feature/PROJ-848-search-api`, ten commits ahead of main.
 Before any of an epic's branches exist, forge looks (git only, no model —
 `services/prior_work.py`; the daemon's half in `daemon/prior_work_lookup.py`):
 
@@ -556,6 +558,19 @@ edits "so every planned file is actually written". Now it can say so.
   "Work that already exists"): then it is `ready_to_merge`, so those land. A run with
   no declarations and no changes is unchanged. The state field is
   `FeatureRunState.declared_unchanged`, carried into fix rounds.
+- **Getting there from the planner:** the ending above only exists for files the plan
+  *modifies*, and the plan gate rejects a plan naming none (`no_files`) — so a ticket
+  that is already built must still reach dev with its existing files listed. The
+  planner prompt (`planner.py`, files_to_modify completeness block) and the gate's
+  retry brief (`plan_gate.format_plan_feedback`) both say so: list each file that
+  already does the job, and the existing tests that prove it, under `files_to_modify`
+  with a purpose starting "Already satisfied:", and never invent an edit or return an
+  empty plan. They used to say "plan the files that still need changing — its tests,
+  most often", which a planner facing a finished feature answered with an empty list;
+  it failed three gate rejections and the story (an epic continued from a
+  branch that had built the whole feature). Asking a question is for "cannot tell
+  whether the existing code meets the ticket", not for "the work exists". The claim
+  is still checked: dev declares, Tier 1 and the always-run review verify.
 
 ## Removing a ticket
 
@@ -663,7 +678,7 @@ locally, like removing a ticket:
   JIRA files On Hold under To Do, so it is not "closed") is set aside the
   same way while it has not started — `skipped`, parked_reason
   `on_hold_in_source`, a plan awaiting approval dropped with it — and goes
-  back to `pending` when the status moves on (MKT2-856 was planned while On
+  back to `pending` when the status moves on (one story was planned while On
   Hold). The epic completes and opens its PR without it; the PR says it was
   on hold. A story is only called deleted
   after the source confirms it, and never from a walk that hit its size cap.
@@ -736,7 +751,7 @@ keeps them for a person's Re-plan (`POST /api/stories/{key}/replan`).
 A fresh run (Retry after a failed run that could not resume at dev — see
 "Retry after a dev failure") keeps the story's worktrees and the
 uncommitted work in them — in its default repo too (`_reusable_worktree`;
-recreating it lost MKT2-866's passing backend while its portal was kept).
+recreating it lost one story's passing backend while its portal was kept).
 The planner's brief lists that work (`_earlier_run_changes`, "Work from
 this story's earlier run"), and `dev_loop` keeps every repo the story
 already changed writable and those files editable even when the new plan
@@ -745,6 +760,101 @@ still possible. Removing the epic is the clean slate.
 Their tokens roll up into the planner's `story_usage` row via the same
 `on_turn` hook, and their spend caps are carved out of
 `planner_sdk_max_budget_usd` rather than each inheriting the whole cap.
+
+**Plan integrity** (`plan_gate.check_plan_integrity`, called by
+`planner_loop` on the provider's answer *before* `normalize_plan`): whether the
+answer is a plan object at all, ahead of whether it is a good one. Blocking, and
+run instead of `check_plan`, not beside it — a mangled answer fails `check_plan`
+too, but as "the plan names no files", which sent the planner back to look for
+files it had already named. It rejects (1) tool-call markup (`<parameter
+name=…>`, `<invoke>`) inside any value — the model fell out of JSON into its own
+function-call syntax, so every field after the first sat inside one string and
+none was a field of the plan (`claude-sonnet-5` behind an
+OpenAI-compatible proxy) — naming the fields it swallowed; (2) an array field
+(`files_to_*`, `read_only_changes`, `person_actions`, `context_files`,
+`discovery_evidence`, `questions`) that is not an array — `normalize_plan` would otherwise read a string
+there one character at a time; and (3) a stub `feature_summary` (`placeholder`,
+`TBD`, empty), which is how the retries of that run came back. A
+single-string `acceptance_criteria` is still tolerated, and a clarification
+round-trip may carry stub fields (only the markup/type checks apply). Each
+rejection's activity event carries `meta.plan_shape` and a "Received: …" line —
+which fields arrived and how much each held — because the feed cuts the plan's own
+text at 4,000 characters, before its file lists, and without it "empty" and "never
+arrived" look the same. A model that does this repeatedly is a settings problem
+(`/settings` → the project's planner model), not something to retry around.
+
+**Person actions** (`plan_gate.person_actions_of`; `stories.person_actions`,
+migration `20261003_0036`): the non-file counterpart of `read_only_changes` — things
+the acceptance criteria lean on that no agent here can do. One story's reviewer
+demanded an audit of open pull requests the developer could not see, and it
+dated one into two migration files; another's demanded results captured from a
+reference extract the developer never had, and the story failed after three
+rejections. A criterion no tool can meet is not a criterion for the agent: the
+reviewer judges it from the diff and the gate, so it can only be failed. The
+planner's prompt (`planner.py`, "what the dev agent can and cannot do") states what
+the agent has — files, the project's own build/test/codegen commands, nothing
+outside the checked-out repos — and sends such a criterion to `person_actions`
+(`[{action, reason}]`, strict-schema like the rest): needs data or an environment it
+cannot reach → the criterion becomes what the change can deliver (a committed,
+re-runnable script; a report with a place for each result) and the run is a person's;
+knowledge outside the repos, publication, review and sign-off → a person's; a
+whole-project criterion ("complete build, every test") → dropped, since the gate runs
+the planned tests and epic QA runs the suite. It travels the way `read_only_changes`
+does: `normalize_plan` tidies it (a bare string becomes an action, blanks and
+repeats go), the daemon copies it to the story, the board's "left to a person" tag
+and the story details show it, dev's brief names it ("Not yours to do … never write
+a comment, report row, count or name that makes one look done") and drops it from
+the plan JSON, the epic's pull request lists it under "Left to a person", and the
+review gets it as `person_actions` with the rule: never fail a run for it, never put
+it in `required_fixes`, judge a dependent criterion only on what the change
+delivers. The reviewer is also told not to ask the developer for what it cannot
+do — a complete build, a check against pull requests, a capture from data it has not
+got. It is **not a way out of planning work**: a plan that only hands things to a
+person is still `KIND_NO_FILES`.
+
+**A failing test is run, not guessed at** (`verifier.format_gate_feedback`,
+`language_hooks.test_command_hint`, `dev_tools._ANALYZE_NOTE`): the gate's fix brief
+used to end every failure with "then run analyze_changed_files_tool", which compiles
+and lints and never runs a test. One story's developer fixed a failing assertion,
+saw "analyzer passed", and finished three rounds with the test never run — each
+round a guess (first the 16 default columns, then all but `Owner`, while five more
+columns were also not sortable) and the story failed with the reviewer never
+reached. For a `<profile>: tests failed` issue the brief now names the command
+(`LanguageProfile.test_command_hint`; every hint starts with a `test_command_prefix`,
+so `run_command_tool` allows it — `tests/test_language_hooks.py` checks that against
+the allowlist), says the analyzer does not run tests, to re-run after every change and
+stop only when it passes, and — for an assertion over a collection — to work out the
+whole set before editing, because one case per attempt fails on the next. A passing
+analyze result carries a `note` that it did not run the unit tests, and both tools'
+descriptions say which one does. A compile-only failure's brief is unchanged.
+
+Two follow-ups from the same story (rejected three times by the reviewer
+over coverage while the gate had passed):
+
+- **`run_command_tool` takes an optional `repo`** (`dev_tools._schemas_with_repo_argument`).
+  It ran only in the story's default worktree, so a story whose plan wrote the portal
+  while the default repo was the API could not run the portal's tests at all — vitest
+  was not installed there ("No test files found"). The argument is offered only when
+  the plan writes a repo other than the default (a one-repo run still sends the exact
+  schema bytes a provider caches); the command then runs in that repo's own worktree
+  with the plan's test files in the form its profile expects, and a test command in a
+  repo with no planned tests is refused per repo, not because some repo has one. The
+  gate's brief takes the repo from the failure's `[label]` tag, and the **reviewer-
+  requested** fix brief (`dev.test_run_instruction`, with `dev_loop.planned_test_commands`
+  working out the command per repo) now ends by sending dev to run the plan's tests too,
+  where it used to say "then run analyze_changed_files_tool" — a plan with no tests
+  keeps the old text.
+- **A coverage-only miss is not a failure the reviewer may send back.** Vitest exits
+  non-zero for a missed threshold exactly as for a failed assertion; the gate tells them
+  apart (`vue_tools._coverage_only_failure`), records a `coverage_gap` and passes, and the
+  epic's pull request flags it. The reviewer was not told, saw `test_results.passed:
+  false` with `ERROR: Coverage … does not meet global threshold` in the output tail next
+  to a plan criterion ("coverage stays at or above 80%"), and rejected. The payload now
+  marks such a section ("Every test passed; only the coverage threshold was missed") and
+  drops the threshold errors from it, and the review prompt says never to fail a run or
+  request a fix over `coverage_gap`: the figure counts every file the tests load,
+  including shared code other stories own, which dev may not edit. The criterion is
+  judged on whether the change's own code is tested.
 
 **Agent loop mechanics** (`forge/agents/loop.py`, model-agnostic — the
 same loop drives GPT, DeepSeek, or a local vLLM/Ollama endpoint):
@@ -876,7 +986,7 @@ state, not a bespoke table.
     Pass → `verifier`, which reuses the gate report
     (`tier1_gate`) instead of re-running the toolchain, and shows the
     review what the story changed in every repo it wrote (`_story_diffs`,
-    another repo's paths `@label/`-prefixed — MKT2-866's review saw only
+    another repo's paths `@label/`-prefixed — one story's review saw only
     the backend and rejected it for "no frontend diffs"), every file cut to
     its share of one budget (`_budgeted_diffs`) rather than a file count. Review fail →
     `dev` (verifier iteration budget, separate from the gate's).
@@ -964,14 +1074,14 @@ and three things about the toolchain itself:
   installed JDK of the version the project states (pom `maven.compiler.
   release` / `java.version` / `maven.compiler.source`, Gradle toolchain or
   `sourceCompatibility`, `.java-version`), newest patch first; none stated
-  or none installed leaves the environment alone. MKT2-866 built a Java 21
+  or none installed leaves the environment alone. One story built a Java 21
   project on the machine's default JDK 26 and javac crashed.
 - `build_output` — the toolchain's output folders (`target/`,
   `node_modules/`, …). `tools/worktree.py`'s `exclude_build_output` writes
   them into the repo's `info/exclude` (a marked block, shared by every
   worktree of the repo, never committed) when a worktree is made and at
   every run start, so they are never staged even where the repo does not
-  ignore them — MKT2-866's `mkt-apiservice` has no .gitignore on main, and
+  ignore them — one story's `mono-apiservice` has no .gitignore on main, and
   168 files under `target/` were staged for the epic's pull request. For
   an attached local folder that is the person's own repo's `info/exclude`.
   The same list fixes the repo itself: at dispatch, under the epic's merge
@@ -984,10 +1094,10 @@ and three things about the toolchain itself:
 - Vue's analyze also runs ESLint on what the story changed
   (`vue_tools.lint_story_changes`), and its `after_dev_changes` runs
   `eslint --fix` on those files — the repo's own lint/Prettier rules, which
-  vue-tsc does not check (MKT2-866 reached its PR with 22 prettier errors).
+  vue-tsc does not check (one story reached its PR with 22 prettier errors).
   Measured against each file's committed version: a file the story created,
   or one that was clean, is auto-formatted and must stay clean; an older
-  file that already had errors (the MKT portal has 17,000 in 82 files) is
+  file that already had errors (the portal has 17,000 in 82 files) is
   never reformatted wholesale and fails only when the story added errors.
 - `environment_problem` — (worktree, failed step's result) → why the
   failure is the environment, not the code. Java's: no compiler error in
@@ -1155,6 +1265,42 @@ forge parks the story and retries it itself.
 - **Retry now resumes at review too**, but only after a provider limit: a review
   that ran and rejected (retries exhausted, nothing to verify) would only reject
   again, so that keeps the full redispatch. `arm_resume_at_dev` is unchanged.
+
+### An endpoint that cannot be reached
+
+A story failed in dev at its first model call: the connection to the corporate
+proxy took longer than the OpenAI SDK's own 5-second connect timeout, twice, twelve
+seconds apart, and two timeouts ended the run — halting the epic over a blip that
+had passed by the time anyone looked. The same machinery now covers it.
+
+- **Told apart at the adapter** (`llm/openai_compat.py`): a call that failed
+  *before any connection existed* — a connect timeout, a refused or unresolvable
+  connect, a proxy that would not pass it on — is `LlmUnreachableError`, not
+  `LlmTimeoutError`. The SDK chains the transport error as the cause, so it is
+  recognised by that cause's class name (`ConnectTimeout`, `ConnectError`,
+  `ProxyError`; by name because the SDK has moved between `httpx` and `httpx2`). A
+  read timeout, or a connection that dropped mid-request, keeps its old class.
+- **A longer connect timeout** (`llm_connect_timeout_seconds`, default 30,
+  Settings → Model provider): the SDK's 5 seconds is too short for a proxy reached
+  over a VPN. Only the connect phase changes; read/write/pool stay the SDK's, and
+  `llm_request_timeout_seconds` is still the call's overall bound. 0 keeps the SDK's 5.
+- **Waited out by the loop** (`agents/loop.py`): up to five attempts, waiting 2, 5, 15
+  then 30 seconds, on a budget of its own — they do not use up the three retries other
+  transient errors get, and the timeout rule ("a stalled provider stalls again, allow
+  one more try") does not apply: nothing was sent and it cost seconds.
+- **Then parked, not failed.** `provider_limit_of` reports it as a `ProviderLimit` of
+  kind `"unreachable"` (never a `reset_at`), which rides the same road as a rate limit:
+  `LoopResult.limit` → the roles' errors → `FeatureRunState.provider_limit` →
+  `plan_parking`. The story ends `failed` / `failure_stage="run"` with
+  `parked_reason="provider_unreachable"` and a `retry_at` of forge's own: five minutes
+  on (`UNREACHABLE_RETRY_SECONDS`). Guessing a window is safe here, unlike a rate limit
+  that never said when: a failed connect costs seconds, not a provider's goodwill.
+- **Retried by the same sweep** (`_resume_stories_past_their_limit`, which now takes
+  both reasons), through `arm_resume_after_failure` — a run that failed in dev continues
+  at dev with its plan. At most `MAX_AUTO_UNREACHABLE_RETRIES` (12, about an hour of
+  trying, counted on `stories.retry_count`) and only in projects with
+  `auto_run_enabled`; past that, or in a manual project, the story says so and a person
+  presses Retry. The board labels it "model endpoint unreachable".
 
 ## Spend caps
 

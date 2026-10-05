@@ -1,5 +1,5 @@
 """forge/tools/jdk.py — which JDK a Java project is built with, and
-forge/tools/java_tools.py's toolchain-failure check. MKT2-866: the project
+forge/tools/java_tools.py's toolchain-failure check. One story: the project
 targets Java 21, forge built it on JDK 26, javac crashed, and three passes
 went on "fixing" working code. Fake JDK homes on disk; no JVM runs."""
 from __future__ import annotations
@@ -97,9 +97,9 @@ def test_every_command_in_a_java_worktree_runs_on_that_jdk(tmp_path, jdks):
 
 # --- a failure that is the toolchain, not the code ------------------------------
 
-_MKT2_866 = (
+_JDK_CRASH_OUTPUT = (
     "[INFO] BUILD FAILURE\n[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin:3.8.1:compile "
-    "(default-compile) on project mkt-apiservice: Fatal error compiling: java.lang.ExceptionInInitializerError: "
+    "(default-compile) on project mono-apiservice: Fatal error compiling: java.lang.ExceptionInInitializerError: "
     "com.sun.tools.javac.code.TypeTag :: UNKNOWN -> [Help 1]\n"
 )
 
@@ -107,7 +107,7 @@ _MKT2_866 = (
 def test_a_javac_crash_is_the_environment(tmp_path, jdks):
     _write(tmp_path / "pom.xml", "<java.version>21</java.version>")
 
-    reason = java_tools.java_environment_problem(str(tmp_path), {"passed": False, "error_count": 0, "stdout": _MKT2_866})
+    reason = java_tools.java_environment_problem(str(tmp_path), {"passed": False, "error_count": 0, "stdout": _JDK_CRASH_OUTPUT})
 
     assert reason.startswith(
         "The Java build fails before compiling any source: Fatal error compiling: java.lang.ExceptionInInitializerError: "
@@ -117,8 +117,8 @@ def test_a_javac_crash_is_the_environment(tmp_path, jdks):
 
 
 @pytest.mark.parametrize("result", [
-    {"passed": True, "stdout": _MKT2_866},  # passed
-    {"passed": False, "error_count": 2, "stdout": _MKT2_866},  # a compiler error in the source is the code's
+    {"passed": True, "stdout": _JDK_CRASH_OUTPUT},  # passed
+    {"passed": False, "error_count": 2, "stdout": _JDK_CRASH_OUTPUT},  # a compiler error in the source is the code's
     {"passed": False, "error_count": 0, "stdout": "[ERROR] Failed to execute goal ... Could not resolve dependencies"},
 ])
 def test_anything_else_is_the_codes(tmp_path, result):
@@ -133,7 +133,7 @@ def test_the_build_check_flags_it(tmp_path, jdks):
     profile = dataclasses.replace(
         java_tools.java_maven_profile(),
         ensure_dependencies=lambda path: {"passed": True},
-        analyze=lambda path, targets: {"passed": False, "error_count": 0, "stdout": _MKT2_866},
+        analyze=lambda path, targets: {"passed": False, "error_count": 0, "stdout": _JDK_CRASH_OUTPUT},
     )
     ctx = language_hooks.VerifyContext(
         worktree_path=str(tmp_path), plan={}, changed=set(), dev_targets=set(), analyze_targets=["A.java"],
@@ -154,7 +154,7 @@ def _git(repo, *args) -> str:
 
 
 def test_build_output_is_excluded_in_every_worktree_of_the_clone(git_repo, tmp_path):
-    """MKT2-866: no .gitignore on main, and 168 files under target/ were
+    """One story: no .gitignore on main, and 168 files under target/ were
     staged for the epic's pull request."""
     from forge.tools.git_tools import list_changed_files
     from forge.tools.worktree import exclude_build_output

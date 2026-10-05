@@ -123,6 +123,15 @@ def _truncate_tail(text: str, limit: int) -> str:
     return f"...[truncated {len(text) - limit} chars]...\n{text[-limit:]}"
 
 
+# Appended to a passing analyze result. The gate's own run of the planned tests
+# is what the story is judged on, so a developer that has not run them has not
+# checked what it will be judged on.
+_ANALYZE_NOTE = (
+    "Compile/lint only — this did NOT run the unit tests. If the plan includes test files, run them with "
+    "run_command_tool (the project's test command) before you finish: the deterministic gate runs them after you do."
+)
+
+
 def _analyze_one_repo(worktree_path: str, analyze_targets: list[str]) -> dict[str, Any] | None:
     """Analyze one repo's slice of the planned files, or None when it has
     no planned file on disk yet."""
@@ -140,6 +149,11 @@ def _analyze_one_repo(worktree_path: str, analyze_targets: list[str]) -> dict[st
     }
     if not payload["passed"] and not payload["error_lines"]:
         payload["output_tail"] = _truncate_tail(result.get("stdout") or result.get("stderr") or "", 1500)
+    if payload["passed"]:
+        # "passed" is all a developer reads, and it read it as "done": one run
+        # finished three rounds on "analyzer passed" with the failing test
+        # never run. Said in the result, where it cannot be missed.
+        payload["note"] = _ANALYZE_NOTE
     return payload
 
 
@@ -441,7 +455,9 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "Run the project's analyzer/compiler check scoped ONLY to planned files "
                 "(Dart/Flutter's `analyze`, Java's `mvn compile`/`gradle compileJava`, "
                 "depending on the project). Use after every meaningful change to verify "
-                "compilation. Do NOT call run_command_tool for this — use this instead."
+                "compilation. Do NOT call run_command_tool for this — use this instead. It compiles and lints "
+                "only: it does NOT run unit tests, so a pass here says nothing about a failing test — run the "
+                "plan's tests with run_command_tool."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
@@ -508,7 +524,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "read_file_tool for that. Do NOT use for the project's analyze/compile "
                 "command (e.g. 'flutter analyze', 'mvn compile') — use "
                 "analyze_changed_files_tool instead. Running the project's test command is "
-                "only allowed when the plan includes test files."
+                "only allowed when the plan includes test files — use it to run them after a change; "
+                "analyze_changed_files_tool does not."
             ),
             "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
         },
@@ -546,6 +563,53 @@ def _schemas_with_workspace_note(note: str) -> list[dict[str, Any]]:
             continue
         function = dict(schema["function"])
         function["description"] = function["description"] + note
+        patched.append({**schema, "function": function})
+    return patched
+
+
+def _targets_for_repo(workspace: Workspace, label: str, displays: list[str]) -> list[str]:
+    """The repo-relative form of those display paths (`@web/tests/a.spec.ts`)
+    that belong to repo `label` — the shape a profile's test formatter expects."""
+    relatives: list[str] = []
+    for display in displays:
+        try:
+            owner, relative = workspace.split(display)
+        except Exception:  # noqa: BLE001 — an unknown repo is not this helper's to report
+            continue
+        if owner == label:
+            relatives.append(relative)
+    return relatives
+
+
+def _schemas_with_repo_argument(schemas: list[dict[str, Any]], labels: list[str]) -> list[dict[str, Any]]:
+    """`schemas` with `run_command_tool` taking an optional `repo`.
+
+    Added only when the plan writes a repo other than the default one: until
+    then the tool had one place to run, and a single-repo run keeps sending
+    exactly the bytes it always did (the prompt prefix a provider caches).
+    Without it a developer — whose plan wrote only the portal while the
+    default repo was the API — had no way to run the portal's failing test: the
+    command ran in the API's worktree, where there is no vitest."""
+    patched: list[dict[str, Any]] = []
+    for schema in schemas:
+        if schema["function"]["name"] != "run_command_tool":
+            patched.append(schema)
+            continue
+        function = dict(schema["function"])
+        function["description"] = (
+            function["description"]
+            + " The command runs in the default repo unless you name another with `repo`; to run a test you must name "
+            f"the repo that holds it. Repos you can run commands in: {', '.join(labels)}."
+        )
+        parameters = dict(function["parameters"])
+        parameters["properties"] = {
+            **parameters["properties"],
+            "repo": {
+                "type": "string",
+                "description": "Label of the repo to run the command in (the part after @ in its paths). Omit for the default repo.",
+            },
+        }
+        function["parameters"] = parameters
         patched.append({**schema, "function": function})
     return patched
 
@@ -809,12 +873,25 @@ def make_dev_tools(
         merge_progress_update(progress_items, [{"path": rel, "status": "done"}])
         return f"Recorded: {rel} needs no change. Your reason will be shown to the reviewer.\n" + render_progress(progress_items)
 
-    def run_command_tool(command: str) -> str:
-        guard_result, safe_command = _guard_run_command(command, worktree_path, analyze_targets, allow_test_run, planned_test_files)
+    def run_command_tool(command: str, repo: str | None = None) -> str:
+        root, scoped_analyze, scoped_tests, may_test = worktree_path, analyze_targets, planned_test_files, allow_test_run
+        if repo:
+            label = str(repo).strip().removeprefix("@")
+            if label not in resolved_write:
+                known = ", ".join(sorted(resolved_write)) or "none"
+                return f"BLOCKED: this story writes no repo '{repo}'. Repos you can run commands in: {known}. Omit `repo` for the default repo."
+            # That repo's own worktree, with the plan's targets in the form its
+            # profile expects (relative to its root): vitest in the portal's
+            # tree, not in the API's.
+            root = resolved_write[label]
+            scoped_analyze = _targets_for_repo(write_workspace, label, analyze_targets)
+            scoped_tests = _targets_for_repo(write_workspace, label, planned_test_files)
+            may_test = bool(scoped_tests)
+        guard_result, safe_command = _guard_run_command(command, root, scoped_analyze, may_test, scoped_tests)
         if guard_result is not None:
             return guard_result
         try:
-            res = run_safe_command(worktree_path, safe_command)
+            res = run_safe_command(root, safe_command)
             if res.returncode == BLOCKED_RETURN_CODE:
                 return f"Return Code: {res.returncode}\nSTDOUT:\n\nSTDERR:\n{res.stderr}\n{_blocked_command_hint(command)}"
             return f"Return Code: {res.returncode}\nSTDOUT:\n{_truncate_tail(res.stdout, _RUN_COMMAND_STDOUT_TAIL)}\nSTDERR:\n{_truncate_tail(res.stderr, _RUN_COMMAND_STDERR_TAIL)}"
@@ -838,6 +915,8 @@ def make_dev_tools(
     }
 
     schemas = _schemas_with_workspace_note(workspace_note)
+    if any(label != default_label for label in resolved_write):
+        schemas = _schemas_with_repo_argument(schemas, sorted(resolved_write))
     if web_access:
         def web_fetch_tool(url: str, max_chars: int | None = None) -> str:
             return fetch_url(url, max_chars=max_chars or 20_000)

@@ -67,7 +67,7 @@ async def test_run_parks_at_planner_gate_and_resumes_after_reconnect(postgres_ur
 async def test_answering_a_clarification_resumes_into_planner_not_dev(
     postgres_url: str, monkeypatch: pytest.MonkeyPatch
 ):
-    """Regression for MKT2-858. route_after_planner only special-cased
+    """Regression. route_after_planner only special-cased
     "failed"; every other status, including "awaiting_clarification",
     routed to "dev" — computed once, right when planner_node returns and
     interrupt_after=["planner"] pauses the graph, and frozen into the
@@ -344,7 +344,7 @@ async def test_gate_failure_routes_back_to_dev_with_feedback_and_never_enters_th
 async def test_a_build_environment_problem_stops_the_run_instead_of_going_back_to_dev(
     postgres_url: str, monkeypatch: pytest.MonkeyPatch
 ):
-    """MKT2-866: javac crashed on the wrong JDK, and three dev passes went on
+    """One story: javac crashed on the wrong JDK, and three dev passes went on
     "fixing" working code. A failure the profile says is the environment
     ends the run at once, saying why."""
     import forge.orchestration.graph as graph_module

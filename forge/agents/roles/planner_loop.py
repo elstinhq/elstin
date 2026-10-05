@@ -50,7 +50,10 @@ from typing import Any
 from forge.agents.loop import LoopConfig, run_agent_loop, tool_defs_from_schemas
 from forge.agents.roles import explorer as explorer_defaults
 from forge.agents.roles.explorer import gather_exploration
-from forge.agents.roles.plan_gate import blocking, check_plan, check_questions, format_plan_feedback, normalize_plan
+from forge.agents.roles.plan_gate import (
+    blocking, check_plan, check_plan_integrity, check_questions, describe_plan_shape, format_plan_feedback, normalize_plan,
+    plan_shape,
+)
 from forge.agents.roles.planner import _format_prior_work_block, build_planner_system
 from forge.config.store import get_bool_config, get_config, get_float_config, get_int_config, resolve_text
 from forge.llm.errors import LlmError, ProviderLimit, provider_limit_of
@@ -92,6 +95,15 @@ _FILE_ITEM_SCHEMA = {
     "additionalProperties": False,
 }
 
+# A thing the ticket needs that no agent can do (see plan_gate.person_actions_of),
+# as opposed to a file forge may not change (read_only_changes).
+_PERSON_ACTION_SCHEMA = {
+    "type": "object",
+    "properties": {"action": {"type": "string"}, "reason": _NULLABLE_STRING},
+    "required": ["action", "reason"],
+    "additionalProperties": False,
+}
+
 _PLAN_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -122,6 +134,7 @@ _PLAN_JSON_SCHEMA: dict[str, Any] = {
         "files_to_create": {"type": "array", "items": _FILE_ITEM_SCHEMA},
         "files_to_modify": {"type": "array", "items": _FILE_ITEM_SCHEMA},
         "read_only_changes": {"type": "array", "items": _FILE_ITEM_SCHEMA},
+        "person_actions": {"type": "array", "items": _PERSON_ACTION_SCHEMA},
         "context_files": {"type": "array", "items": {"type": "string"}},
         "architecture": {
             "type": "object",
@@ -135,7 +148,7 @@ _PLAN_JSON_SCHEMA: dict[str, Any] = {
     },
     "required": [
         "feature_summary", "reasoning", "questions", "files_to_create", "files_to_modify", "read_only_changes",
-        "context_files", "architecture", "acceptance_criteria", "discovery_evidence", "plan_markdown",
+        "person_actions", "context_files", "architecture", "acceptance_criteria", "discovery_evidence", "plan_markdown",
     ],
     "additionalProperties": False,
 }
@@ -464,9 +477,16 @@ async def run_planner(
                 run_id, attempt, max_attempts, result.terminal_reason, result.is_error, result.structured_output is not None,
             )
             if not result.is_error and isinstance(result.structured_output, dict):
-                candidate = result.structured_output
+                candidate = raw_plan = result.structured_output
                 questions_field = candidate.get("questions") or []
-                if not questions_field:
+                # Whether this is a plan object at all, judged on the answer as
+                # it arrived and ahead of normalize_plan, which would read a
+                # string where a list belongs one character at a time. A
+                # mangled or stub answer is sent back for being that, instead
+                # of for the empty file lists it leaves behind
+                # (plan_gate.check_plan_integrity).
+                integrity = check_plan_integrity(candidate, clarifying=bool(questions_field))
+                if not questions_field and not integrity:
                     # A missing `@`, or a change in a read-only repo, is fixed
                     # here rather than spent a retry on (plan_gate.normalize_plan).
                     candidate, fixes = normalize_plan(candidate, gate_workspace)
@@ -484,7 +504,9 @@ async def run_planner(
                 # own check instead of no check at all — see
                 # plan_gate.check_questions's docstring for the failure this
                 # closes.
-                defects = check_questions(questions_field) if questions_field else check_plan(candidate, gate_workspace)
+                defects = integrity or (
+                    check_questions(questions_field) if questions_field else check_plan(candidate, gate_workspace)
+                )
                 blockers = blocking(defects)
                 if not blockers:
                     plan = candidate
@@ -503,11 +525,16 @@ async def run_planner(
                 # being re-run anyway, so it may as well fix them too.
                 correction = format_plan_feedback(defects, attempt=attempt, max_attempts=max_attempts)
                 if run_id:
+                    # What arrived, beside why it was refused: the feed cuts
+                    # the plan's own text before its file lists, so without
+                    # this a rejection cannot say whether they were empty or
+                    # never made it into the answer (plan_gate.plan_shape).
+                    shape = plan_shape(raw_plan)
                     append_activity(
                         run_id, type="status", phase="planner",
                         title=f"Plan gate rejected the plan: {len(blockers)} problem(s)",
-                        detail="\n".join(f"- {d['reason']}" for d in defects)[:4000],
-                        meta={"kinds": sorted({str(d["kind"]) for d in blockers})},
+                        detail=("\n".join(f"- {d['reason']}" for d in defects) + "\n" + describe_plan_shape(shape))[:4000],
+                        meta={"kinds": sorted({str(d["kind"]) for d in blockers}), "plan_shape": shape},
                     )
             else:
                 # A loop that ended in error already exhausted forge/agents/

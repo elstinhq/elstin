@@ -282,7 +282,7 @@ def _lint_repo(git_repo: str, monkeypatch, errors_now: dict[str, int], errors_at
 
 
 def test_a_story_is_held_to_its_own_lint_errors_not_the_repos(git_repo, monkeypatch):
-    """MKT2-866 reached its PR with prettier errors; the MKT portal also has
+    """One story reached its PR with prettier errors; the portal also has
     17,000 errors in older files a story may touch. New and previously clean
     files must be clean; an older file fails only when the story added to it."""
     _lint_repo(
