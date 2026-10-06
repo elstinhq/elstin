@@ -1,11 +1,11 @@
-"""forge/config/store.py's project-override-with-global-fallback logic:
+"""elstin/config/store.py's project-override-with-global-fallback logic:
 resolve_config/resolve_bool_config, and the JiraService constructor that
 consumes them."""
 from __future__ import annotations
 
 import pytest
 
-from forge.config.store import (
+from elstin.config.store import (
     clear_project_config,
     get_project_config,
     resolve_bool_config,
@@ -13,9 +13,9 @@ from forge.config.store import (
     set_config,
     set_project_config,
 )
-from forge.state.manager import StateManager
+from elstin.state.manager import StateManager
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
 
 def test_resolve_config_falls_back_to_global_when_no_override():

@@ -1,4 +1,4 @@
-# AGENTS.md — Code Forge
+# AGENTS.md — Elstin
 
 Guidance for AI agents and humans working in this repository. Prefer this
 file over inventing architecture: the module docstrings are normative, and
@@ -6,7 +6,7 @@ this document is the map of where those contracts live.
 
 ## What this project is
 
-**code_forge** is a local, single-tenant JIRA-epic-to-PR platform (a
+**elstin** is a local, single-tenant JIRA-epic-to-PR platform (a
 project's tickets can come from GitHub Issues instead). A deterministic
 reconciler decides what to do next; a LangGraph loop runs planner → dev →
 verifier (or epic QA) per story in an isolated git worktree, with
@@ -26,19 +26,19 @@ state, no Kubernetes, no multi-tenancy.
 ## Quick start
 
 ```bash
-scripts/forge.sh
+scripts/elstin.sh
 # Dashboard: http://localhost:8000/
 # Settings:  http://localhost:8000/settings
 ```
 
-`scripts/forge.sh` is a wrapper over `docker compose` (or `podman
+`scripts/elstin.sh` is a wrapper over `docker compose` (or `podman
 compose`): it rebuilds the image on every `up` so the container runs the
-working tree rather than a stale copy of `forge/` and `alembic/`, waits
+working tree rather than a stale copy of `elstin/` and `alembic/`, waits
 for `/healthz`, and adds `stop`/`down`/`logs`/`status`/`rebuild`/`psql`/
 `reset`. `scripts/stop.sh` stops the stack (`--keep` to leave the
 containers in place); only `reset` deletes data, and it asks first. Plain
-`docker compose up` still works and nothing in `forge/` depends on either
-script. `scripts/clear_db.py` (local dev) empties every forge table *and*
+`docker compose up` still works and nothing in `elstin/` depends on either
+script. `scripts/clear_db.py` (local dev) empties every elstin table *and*
 LangGraph's checkpoint tables — without those a "cleared" story would
 resume mid-run — and keeps both schema-version tables, so nothing needs
 migrating afterwards; it asks first unless given `--yes`.
@@ -49,7 +49,7 @@ Local develop without the full stack:
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 docker compose up postgres -d
-export DATABASE_URL=postgresql+psycopg://forge:forge@localhost:5433/forge
+export DATABASE_URL=postgresql+psycopg://elstin:elstin@localhost:5433/elstin
 alembic upgrade head
 pytest
 ```
@@ -61,7 +61,7 @@ at `/settings` — no `.env` file.
 ## Architecture at a glance
 
 ```
-Settings UI ──HTTP──► FastAPI (forge/app.py)
+Settings UI ──HTTP──► FastAPI (elstin/app.py)
                          │
                          ├── /api/*  (config, projects, epics, stories)
                          ├── lifespan → ticket-filter sweep (5m by default, per project)
@@ -93,7 +93,7 @@ Agent activity flows the other way, same process:
 ```
 
 The ticket source — JIRA or GitHub Issues, chosen per project — owns what
-a ticket *says*; forge's Postgres board mirrors that text (a change under a
+a ticket *says*; elstin's Postgres board mirrors that text (a change under a
 plan is held for a person — see "The board vs. its source") and owns all
 orchestration state: status, kind, dependencies and levels, gates,
 worktrees, prior work. The daemon's only write back to the source is epic
@@ -109,7 +109,7 @@ into the epic branch ("Work that already exists for a ticket"). The API's
 intent handling on the same event loop, which is how a manual-run project
 moves at all.
 
-## Package map (`forge/`)
+## Package map (`elstin/`)
 
 | Package | Responsibility | Do not |
 |---------|----------------|--------|
@@ -117,7 +117,7 @@ moves at all.
 | `llm/` | The provider port: `types.py` (normalized vocabulary), `base.py` (`LlmProvider`/`Capabilities`), `openai_compat.py` (the OpenAI adapter — the only module that imports `openai`), `registry.py` (config → provider), `pricing.py`, `errors.py` | Import a provider SDK anywhere outside `llm/openai_compat.py` |
 | `orchestration/` | LangGraph graph, pure reconciler, run state (`FeatureRunState`), the git side of landing a story (`integration.py`) | Put I/O in the reconciler |
 | `daemon/` | Poll loop, ticket-filter sweep, worktree create, intent handling, merge queue, the epic's PR and its CI, QA brief assembly, prior-work lookup, provider-limit retries, worktree retention, ticket and project removal | Call agents without going through the graph |
-| `state/` | **Only** DB access for epics/stories/PRs/projects/lessons/watermarks — one `manager_*.py` mixin per concern, composed into `StateManager` in `manager.py` | Import `forge.db.models` outside the allow-list in hard constraint #1 |
+| `state/` | **Only** DB access for epics/stories/PRs/projects/lessons/watermarks — one `manager_*.py` mixin per concern, composed into `StateManager` in `manager.py` | Import `elstin.db.models` outside the allow-list in hard constraint #1 |
 | `db/` | SQLAlchemy models + engine | Business logic here |
 | `services/` | JIRA/GitHub clients and the per-project ticket source (`ticket_source.py`, `github_issues.py`), epic sync and reconciling with the source (`external_sync.py`), ticket filters, story_kind, generation (verifier/QA's single-shot LLM call), repo clone / attach, project guide, lessons, prior work, guidance, provider limits, run activity + its live fan-out, run telemetry (cost, run shape, peak memory), redaction, LangSmith tracing (`tracing.py`), model options | Bypass StateManager for persistence |
 | `tools/` | Dev-agent tools (web search/fetch included), planner's read-only tools, language profiles (+ `jdk.py`), worktree, path guard, the allowlisted shell, the agent environment, the process monitor, workspace (multi-repo read roots), reference folders, codebase skeleton | Hardcode language names — use `language_hooks`; give a reference repo a write path |
@@ -125,9 +125,9 @@ moves at all.
 | `api/` | FastAPI routers: `config_routes`, `project_routes`, `epic_routes`, `run_routes` (stories) | Long-running work — daemon owns that |
 | `config/` | Postgres config store | Read secrets from env (except `DATABASE_URL`) |
 
-Entry points (`pyproject.toml`): `forge-daemon`, `forge-mcp-jira`,
-`forge-mcp-github`. Production serves via
-`uvicorn forge.app:create_app --factory`.
+Entry points (`pyproject.toml`): `elstin-daemon`, `elstin-mcp-jira`,
+`elstin-mcp-github`. Production serves via
+`uvicorn elstin.app:create_app --factory`.
 
 ## Multi-repo projects
 
@@ -180,7 +180,7 @@ the task rather than configured ahead of it.
 
 **The trade-off, stated plainly:** a story spanning two repos produces two
 branches, and git has no transaction across them, so it can land in one and
-fail in the other. Forge makes that unlikely (every repo is verified before
+fail in the other. Elstin makes that unlikely (every repo is verified before
 any is fast-forwarded) and visible (a failed fast-forward fails the story's
 merge) rather than pretending otherwise.
 
@@ -197,19 +197,19 @@ project create (`repo_url` / `repo_path`):
   app owns, so it works identically on the host and inside Docker.
 - **Attach** a git repo already on disk, used in place
   (`attach_local_repository`). The path must be absolute, a directory the
-  forge process can see, the repo's top level (a subfolder is refused,
+  elstin process can see, the repo's top level (a subfolder is refused,
   naming the top), have at least one commit, and not sit under
   `worktrees_base_dir`; one folder is attached once (`409`). Inside Docker
   that means a bind mount (`docker-compose.yml` has the commented example)
   and the in-container path; the image trusts every repo
   (`safe.directory '*'`) because a mounted one is owned by the host user.
 - **Picking the path**: "Browse…" beside the path field walks the machine
-  forge runs on (`POST /api/projects/browse-folder` → `browse_folder`:
+  elstin runs on (`POST /api/projects/browse-folder` → `browse_folder`:
   subfolder names only, hidden ones skipped, git repos marked). A browser
   cannot give a page a real path from the OS folder dialog, and the path
-  that matters is forge's own — a mount point inside Docker.
+  that matters is elstin's own — a mount point inside Docker.
 - **A folder holding repos** (a workspace with one checkout per service,
-  itself not a repo) is attached repo by repo: every git operation forge
+  itself not a repo) is attached repo by repo: every git operation elstin
   makes happens inside one repository. `scan_folder` /
   `POST /api/projects/scan-folder` lists the repos directly inside it (one
   level, hidden folders skipped, each with why it cannot be attached, if
@@ -264,7 +264,7 @@ last — `poll_once` assigns one when a folder is added) and stories that
 pointed at it inherit their epic's again. It is refused (409) only while a
 story has unfinished work in it — a worktree there, not merged/done/skipped.
 
-**An attached folder's own checkout is never touched** — forge only adds
+**An attached folder's own checkout is never touched** — elstin only adds
 branches and worktrees to its `.git`, exactly as with a clone. An attached
 repo may have no `origin` (never pushed): `tools/worktree.py` then skips
 the fetch and branches from the local default branch (`origin/<default>`,
@@ -273,14 +273,14 @@ and the epic ends `complete` with the reason recorded on its
 `epic_pull_requests` row ("origin is not a GitHub remote") — there is
 nothing to open a PR against.
 
-## Project guide (an AGENTS.md for the repos forge works on)
+## Project guide (an AGENTS.md for the repos elstin works on)
 
 The planner and dev prompts have a slot for the target repo's own guide —
 its layout, commands and what already exists — so the agents do not
 rediscover it every run (or get it wrong: one run planned a new codegen
 script for a repo that already had one). `services/project_guide.py` fills
 it, per repo, in this order: the repo's own `AGENTS.md`, then `CLAUDE.md`,
-then a guide forge generated and stored, then nothing.
+then a guide elstin generated and stored, then nothing.
 
 - Resolved by the daemon at first dispatch (`project_guide_for_run`) and
   carried in `FeatureRunState.project_guide` → planner → `context_bundle`,
@@ -293,8 +293,8 @@ then a guide forge generated and stored, then nothing.
   from the Folders panel in the UI.
 - A reference folder's own CLAUDE.md/AGENTS.md comes first — it is the one
   that says how the repos relate (e.g. "this contract repo is off limits").
-  forge never generates a guide for a reference folder.
-- The generated guide lives on `ProjectRepo.generated_guide`. **forge never
+  elstin never generates a guide for a reference folder.
+- The generated guide lives on `ProjectRepo.generated_guide`. **elstin never
   writes it into the repo** — it does not edit checkouts it does not own —
   and a repo that ships its own guide is never generated for, and cannot be
   overwritten through the API (`409`).
@@ -311,7 +311,7 @@ then a guide forge generated and stored, then nothing.
 
 ## Lessons from runs
 
-Every run starts cold, so a mistake forge made on one story (the wrong JDK,
+Every run starts cold, so a mistake elstin made on one story (the wrong JDK,
 build output staged in a PR) is made again on the next. `services/lessons.py`
 mines a finished story's own evidence for short lessons a person can accept
 into the project guide; accepted ones are handed to the planner and dev.
@@ -349,7 +349,7 @@ into the project guide; accepted ones are handed to the planner and dev.
   The removal report gains `lessons_detached` / `lessons_dropped`.
 - **Storage:** `project_lessons` (`db/models/lesson.py`,
   `state/manager_lesson.py`; migration `20260929_0031`). Status `proposed` →
-  `accepted` | `rejected`. Kept in forge, never written into a repo.
+  `accepted` | `rejected`. Kept in elstin, never written into a repo.
 - **Review (API):** `GET /api/projects/{id}/lessons[?status=]`,
   `PUT .../lessons/{lesson_id}` (`{text?, status?}` — a person may reword
   before accepting; an edit is held to the same 300-char cap),
@@ -376,7 +376,7 @@ into the project guide; accepted ones are handed to the planner and dev.
   (`services/lessons.py`'s `pr_lessons_section`, via `_lessons_for_pr`): the
   epic's **accepted** lessons whose evidence includes one of the epic's own
   stories, as a markdown block ready to paste into the repo's `AGENTS.md`
-  (forge writes nothing into the repo; the reviewer decides). Older lessons
+  (elstin writes nothing into the repo; the reviewer decides). Older lessons
   are not repeated in every PR. The PR opens right after the last story
   merges, so a late lesson may not be accepted yet — those are counted
   ("N more … still waiting for review"), never shown, and the body is not
@@ -389,7 +389,7 @@ into the project guide; accepted ones are handed to the planner and dev.
 
 Tickets rarely arrive untouched: a story is "In Progress" because someone
 already has `feature/PROJ-848-search-api`, ten commits ahead of main.
-Before any of an epic's branches exist, forge looks (git only, no model —
+Before any of an epic's branches exist, elstin looks (git only, no model —
 `services/prior_work.py`; the daemon's half in `daemon/prior_work_lookup.py`):
 
 - **What:** every local and `origin/` branch whose name carries the ticket's
@@ -415,10 +415,10 @@ Before any of an epic's branches exist, forge looks (git only, no model —
   (`update_story_from_epic`; a conflict is aborted and left to the merge
   queue). Non-default repos with a `continue` get their worktree eagerly, so
   the planner reads that code. The epic branch starts from a branch named
-  after the epic, or from forge's own epic branch already on origin
+  after the epic, or from elstin's own epic branch already on origin
   (`ensure_integration_worktree`'s `start_point`). The found branch is only
-  ever read: forge never writes to, pushes or checks it out.
-- **`choose`:** forge does not guess which code to build on. The reconciler
+  ever read: elstin never writes to, pushes or checks it out.
+- **`choose`:** elstin does not guess which code to build on. The reconciler
   holds the story (`StorySnapshot.needs_branch_choice` →
   `choose_prior_branch`); dependents wait as for any dependency, nothing
   else does. `POST /api/stories/{key}/prior-work {repo_label, branch|null}`
@@ -450,7 +450,7 @@ Before any of an epic's branches exist, forge looks (git only, no model —
 
 ## The PR gate
 
-The epic's branch is the only thing forge pushes to GitHub, and a pull request is
+The epic's branch is the only thing elstin pushes to GitHub, and a pull request is
 visible to other people. `require_pr_approval` (settings → Workflow; off by default,
 project-overridable) puts a person between "every story merged" and "the branch is
 pushed".
@@ -616,7 +616,7 @@ stories and sub-tasks.
   the same key would otherwise resume the old thread.
 - **Never touched — local only:** nothing is sent to GitHub or JIRA. An opened
   pull request stays open and a pushed branch stays pushed; the report's
-  `left_on_remote` lists them so they can be closed by hand. forge keeps no
+  `left_on_remote` lists them so they can be closed by hand. elstin keeps no
   record that a ticket was removed, so a project whose ticket filter still
   matches it ingests it again on the next sweep (`ticket_filter_may_readd`).
 - **Order and guards:** a story with a run in flight is refused (`409`), and the
@@ -635,20 +635,20 @@ stories and sub-tasks.
 
 `DELETE /api/projects/{id}` (`daemon/project_removal.py`; the Delete section
 at the bottom of the project's Settings dialog, confirmed by typing the
-project's name) deletes the project and everything forge holds for it —
+project's name) deletes the project and everything elstin holds for it —
 locally, like removing a ticket:
 
 - **Each ticket**, exactly as Remove ticket does (above): rows, worktrees,
   local branches, the epic branch in every repo, checkpoints, baselines,
   attachments.
-- **The clones forge made** — a folder added by URL, under
+- **The clones elstin made** — a folder added by URL, under
   `cloned_repos_base_dir/<project id>` — and that folder once empty. A
   stored path outside it is reported, never deleted.
 - **The project's rows**: settings overrides, ticket filter, folders, the
   project (`state/manager_project.py`'s `delete_project_records`, one
   transaction; it refuses while any epic still belongs to the project).
 - **Never**: an attached folder (someone's own checkout — only the branches
-  and worktrees forge added go, with the tickets), and anything on GitHub
+  and worktrees elstin added go, with the tickets), and anything on GitHub
   or JIRA. The report lists open pull requests and possibly-pushed branches.
 - **Order**: a run in flight anywhere in the project refuses it (409) before
   anything is touched. Then the ticket filter is dropped and every epic put
@@ -660,7 +660,7 @@ locally, like removing a ticket:
 
 ### `dev` vs `qa`
 
-- Classified once at sync (`forge/services/story_kind.py`): labels >
+- Classified once at sync (`elstin/services/story_kind.py`): labels >
   issue type > summary/description heuristics.
 - Biased toward **`dev`** — inventing a QA story stalls less badly than
   missing implementation work.
@@ -677,12 +677,12 @@ locally, like removing a ticket:
 - **Story-level sync:** "Add ticket" (the project page) accepts an Epic or a lone
   Story/Task. Non-epic roots with no story-level children become the sole
   work unit (same JIRA key as the epic row); empty Epics get no levels until
-  children appear. See `forge/services/epic_sync.py` for the full contract.
+  children appear. See `elstin/services/epic_sync.py` for the full contract.
 - **Filter sync:** a project can instead carry one saved JIRA query
   (`ProjectTicketFilter`) that a slow background loop re-runs, ingesting
   every new root it matches. Structured fields compile to JQL in
-  `forge/services/jira_filter.py`. A sweep ingests every new root, and
-  **re-walks** roots forge already has (and every epic still in progress,
+  `elstin/services/jira_filter.py`. A sweep ingests every new root, and
+  **re-walks** roots elstin already has (and every epic still in progress,
   whether or not the filter matches it any more — the filter selects on
   status, so a finished epic drops out of it) through the idempotent
   `sync_epic_from_jira`: `create_epic`/`create_story` no-op on existing
@@ -691,7 +691,7 @@ locally, like removing a ticket:
   matches, and keys owned by another project are skipped, and nothing is
   unsynced when a ticket stops matching. Ingested epics land paused, exactly
   like "Add ticket", with the project's default folder when it has one.
-- **The board vs. its source** (`forge/services/external_sync.py`,
+- **The board vs. its source** (`elstin/services/external_sync.py`,
   `ticket_source.py`): the Postgres board is what agents read; the source
   owns what a ticket *says*. A ticket whose text changed is applied at once
   when no plan depends on it (unplanned or finished story, sub-task, epic)
@@ -971,7 +971,7 @@ over coverage while the gate had passed):
   including shared code other stories own, which dev may not edit. The criterion is
   judged on whether the change's own code is tested.
 
-**Agent loop mechanics** (`forge/agents/loop.py`, model-agnostic — the
+**Agent loop mechanics** (`elstin/agents/loop.py`, model-agnostic — the
 same loop drives GPT, DeepSeek, or a local vLLM/Ollama endpoint):
 
 - Compaction is **tombstoning, not summarization**: tool results (and old
@@ -1056,7 +1056,7 @@ same loop drives GPT, DeepSeek, or a local vLLM/Ollama endpoint):
   with `-` is not read as an option. Callers ask for one more than they
   show to know when to say the list was cut.
 
-**Pointing forge at a non-OpenAI model** (any OpenAI-compatible endpoint
+**Pointing elstin at a non-OpenAI model** (any OpenAI-compatible endpoint
 via `llm_base_url` — OpenRouter, vLLM, Ollama, Azure):
 
 - `reasoning_effort` is gated per model by `llm/openai_compat.py`'s
@@ -1083,18 +1083,18 @@ via `llm_base_url` — OpenRouter, vLLM, Ollama, Azure):
 - Raise/lower `agent_compaction_token_threshold` to suit the context
   window; the default assumes roughly 1M tokens.
 
-Every role reaches the LLM through `forge/llm/registry.py`'s configured
+Every role reaches the LLM through `elstin/llm/registry.py`'s configured
 provider — never a provider SDK directly. `dev`/`planner`'s multi-turn,
-tool-calling runs go through `forge/agents/loop.py`; `verifier`/`qa`'s
-single-shot JSON completions go through `forge/services/generation.py`
+tool-calling runs go through `elstin/agents/loop.py`; `verifier`/`qa`'s
+single-shot JSON completions go through `elstin/services/generation.py`
 instead, since a full agent loop would be pure overhead for a call with no
 tools and no multi-turn state. Dev's turn-capped resume state
-(`dev_history`, forge/llm/types.py's normalized message history,
+(`dev_history`, elstin/llm/types.py's normalized message history,
 JSON-serialized) is a plain `FeatureRunState` field — durably checkpointed
 by LangGraph's `AsyncPostgresSaver` alongside every other piece of run
 state, not a bespoke table.
 
-**Graph paths** (`forge/orchestration/graph.py`):
+**Graph paths** (`elstin/orchestration/graph.py`):
 
 - dev story: `planner` → (interrupt for approval when `require_plan_approval`
   is on — read once per compile) → `dev` → `gate` → `verifier` → `END`
@@ -1243,7 +1243,7 @@ Like every tool, they never raise: a failure is a string the model reads.
 Neither is read-only in the loop's sense, so a web call runs alone. Off,
 `make_dev_tools` offers neither and the schemas are the shared object.
 
-**Language extension point:** `forge/tools/language_hooks.py`
+**Language extension point:** `elstin/tools/language_hooks.py`
 
 1. Add a profile module (see `dart_tools.py`, `java_tools.py`, `vue_tools.py`).
 2. Register in `_ensure_default_profiles_registered()`.
@@ -1295,7 +1295,7 @@ itself:
   output, with `jdk.describe` saying which JDK was used or that the stated
   one is not installed. The gate stops the run on it (above).
 
-**Environment for agent commands** (`forge/tools/agent_env.py`). Everything
+**Environment for agent commands** (`elstin/tools/agent_env.py`). Everything
 run in a worktree on an agent's behalf — the dev step's allowlisted shell, the
 gate's build/lint/test commands, the Dart analysis server — executes code the
 agent may have just written, so it gets a **minimal** environment, not the
@@ -1312,13 +1312,13 @@ like a credential (`SECRET_NAME_RE`). A profile's `command_env` is applied on to
 - All of it goes through `language_hooks.profile_command_env(worktree)`; a new
   subprocess in a toolchain module that omits `env=` fails
   `tests/test_architecture.py` (hard constraint #12).
-- Forge's own git and ripgrep calls are unaffected — they execute no repo code.
+- Elstin's own git and ripgrep calls are unaffected — they execute no repo code.
 
 ## Reconciler and daemon
 
-- `forge/orchestration/reconciler.py` is a **pure** function: snapshots in,
+- `elstin/orchestration/reconciler.py` is a **pure** function: snapshots in,
   `Intent` list out. No DB, no LLM, no network.
-- Daemon (`forge/daemon/main.py`) applies intents. Runs and merges start as
+- Daemon (`elstin/daemon/main.py`) applies intents. Runs and merges start as
   **background tasks** (`_launch`), up to `max_parallel_stories` (default 3)
   across every epic, and `poll_once` returns without waiting — a story that
   becomes ready when another merges starts on the next poll. A story is
@@ -1374,16 +1374,16 @@ like a credential (`SECRET_NAME_RE`). A profile's `command_env` is applied on to
   person's Retry; the PR gate's decision runs the epic's finish itself
   (`run_epic_finish`).
 - **Commit identity** (`git_author_name` / `git_author_email`, settings →
-  Git and storage): forge runs where no git identity can be assumed (a
+  Git and storage): elstin runs where no git identity can be assumed (a
   container, a fresh clone), so it passes one on every commit as `-c
   user.name=… -c user.email=…`, never writing a repo's config. With both
-  set, the commits forge makes — a story's, the .gitignore fix, done-work
+  set, the commits elstin makes — a story's, the .gitignore fix, done-work
   merges — are authored by that person, `git_tools.commit_all` /
-  `commit_paths` add a `Co-authored-by: code_forge <forge@localhost>`
+  `commit_paths` add a `Co-authored-by: elstin <elstin@localhost>`
   trailer, and the epic PR body ends with the same line, so GitHub credits
-  the person. Either one blank: authored by `code_forge <forge@localhost>`,
+  the person. Either one blank: authored by `elstin <elstin@localhost>`,
   no trailer.
-- The ticket-filter sweep (`forge/daemon/ticket_sync.py`) is a **second,
+- The ticket-filter sweep (`elstin/daemon/ticket_sync.py`) is a **second,
   slower loop** in the same process, deliberately not folded into
   `poll_once`: it hits someone else's API for a set that changes a few
   times a day, and a JIRA outage must not stall stories mid-run. Each
@@ -1395,7 +1395,7 @@ like a credential (`SECRET_NAME_RE`). A profile's `command_env` is applied on to
   fails a run.
 - `stories.coverage_gap` (set when the verifier's only blocker was a
   coverage-threshold miss, not a real failure — see
-  `forge/tools/vue_tools.py`'s coverage-only-failure detection) no longer
+  `elstin/tools/vue_tools.py`'s coverage-only-failure detection) no longer
   stops a story: it merges, and the gap is called out in the epic's pull
   request.
 
@@ -1452,7 +1452,7 @@ the plan's tests and covers the planned files.
 A model call refused because the account is rate-limited or out of quota used to
 end the run as a plain `failed` story until a person noticed. When the provider
 says when it will accept calls again there is nothing for a person to decide, so
-forge parks the story and retries it itself.
+elstin parks the story and retries it itself.
 
 - **Classified at the adapter** (`llm/errors.py`, `llm/openai_compat.py`):
   `LlmRateLimitError` (429; retryable) and `LlmQuotaError` (out of credit or
@@ -1515,7 +1515,7 @@ had passed by the time anyone looked. The same machinery now covers it.
   kind `"unreachable"` (never a `reset_at`), which rides the same road as a rate limit:
   `LoopResult.limit` → the roles' errors → `FeatureRunState.provider_limit` →
   `plan_parking`. The story ends `failed` / `failure_stage="run"` with
-  `parked_reason="provider_unreachable"` and a `retry_at` of forge's own: five minutes
+  `parked_reason="provider_unreachable"` and a `retry_at` of elstin's own: five minutes
   on (`UNREACHABLE_RETRY_SECONDS`). Guessing a window is safe here, unlike a rate limit
   that never said when: a failed connect costs seconds, not a provider's goodwill.
 - **Retried by the same sweep** (`_resume_stories_past_their_limit`, which now takes
@@ -1573,7 +1573,7 @@ StateManager (hard constraint #1's documented exception):
   them.
 
 A third thing is recorded on the same `story_run_outcomes` row: **how heavy the run's
-commands were** (`peak_memory_mb`, `peak_memory_command`). forge runs up to
+commands were** (`peak_memory_mb`, `peak_memory_command`). elstin runs up to
 `max_parallel_stories` stories at once and each runs builds — a JVM, a Node process and
 whatever they spawn — so whether three fit on the machine is a question about memory.
 
@@ -1613,10 +1613,10 @@ tuning against invented tasks now.
 
 `services/redaction.py`. Tool output is not curated — a command that prints its
 environment, a file read that turns out to be a `.env`, a build log that echoes a
-token — and forge persists it (the activity feed, re-read and streamed to the UI)
+token — and elstin persists it (the activity feed, re-read and streamed to the UI)
 and, with tracing on, sends it to LangSmith. Both pass through `redact` first:
 
-- **By value, then by shape.** Exact values forge holds: every secret setting
+- **By value, then by shape.** Exact values elstin holds: every secret setting
   (`config/store.py`'s `secret_values()` — global and any project's override) and
   the host's credential-named environment variables, plus `DATABASE_URL`. Then
   well-known token formats (GitHub, OpenAI/OpenRouter, Anthropic, AWS, Google,
@@ -1633,7 +1633,7 @@ and, with tracing on, sends it to LangSmith. Both pass through `redact` first:
 - **The secret values are cached for 30 s**; a key saved at /settings is covered
   within that. An unreadable settings table falls back to shapes alone — redaction
   never fails a run.
-- **Best effort, not a guarantee**: a credential that is neither a value forge
+- **Best effort, not a guarantee**: a credential that is neither a value elstin
   holds nor a known shape gets through. Rows written before this existed are not
   rewritten.
 - `SECRET_NAME_RE` (`tools/agent_env.py`) is shared with the environment filter,
@@ -1644,14 +1644,14 @@ and, with tracing on, sends it to LangSmith. Both pass through `redact` first:
 `services/tracing.py`. Off by default and opt-in, because a trace carries
 whole prompts — ticket text, source code, tool output — to a third party.
 Settings (`/settings`, Postgres, like everything else): `langsmith_tracing_enabled`,
-`langsmith_api_key` (secret), `langsmith_project` (default `forge`),
+`langsmith_api_key` (secret), `langsmith_project` (default `elstin`),
 `langsmith_endpoint` (blank = LangSmith cloud; the EU region or a
 self-hosted instance goes here), `langsmith_workspace_id` (only for an
 org-scoped key). The **enabled flag and the LangSmith project name are
 project-overridable**, so one project's code can stay out of LangSmith while
 another's is traced; the key is global.
 
-One story run is one trace, `forge:<story key>`, in the configured project:
+One story run is one trace, `elstin:<story key>`, in the configured project:
 
 - **The graph** — a child per node (planner, dev, gate, verifier, qa) from a
   `LangChainTracer` that `daemon/main.py`'s `_invoke_graph` puts in the
@@ -1673,7 +1673,7 @@ One story run is one trace, `forge:<story key>`, in the configured project:
 
 Rules that keep it safe:
 
-- **Config from Postgres, never env** (hard constraint #8). forge does not
+- **Config from Postgres, never env** (hard constraint #8). elstin does not
   read `LANGSMITH_*`; the SDK client is built from the settings, and while a
   run executes with tracing off it is switched off explicitly, because the
   SDK would otherwise obey an ambient `LANGSMITH_TRACING=true` and send the
@@ -1682,7 +1682,7 @@ Rules that keep it safe:
   be built log a warning and the run goes untraced; delivery is the SDK's own
   background thread, which logs and drops what it cannot send.
 - **Cost is not filled in.** LangSmith prices tokens from its own model
-  table, which does not know `openai/gpt-5.6-terra`-style ids; forge's
+  table, which does not know `openai/gpt-5.6-terra`-style ids; elstin's
   `story_usage` (OpenRouter's reported cost) stays the record of spend.
 
 ## Per-project models and provider
@@ -1735,23 +1735,23 @@ other model), caps it at 200 rows, and is keyboard operable.
 | `app_config`, `project_config` | `config.py`, `project.py` | Global settings; a project's overrides | `config/store.py` |
 | `epics`, `stories` | `gameplan.py` | The board: ticket text and its source link, coarse status, kind, dependencies and levels, gates, worktree/branch, prior work, queued guidance, parking and retries, what is left to a person | `state/manager_epic.py`, `manager_story.py`, `manager_external.py` |
 | `story_worktrees` | `story_worktree.py` | One row per (story, repo) worktree | `state/manager_story.py` |
-| `epic_pull_requests` | `gameplan.py` | The epic's PR, one per repo — the only pull requests forge opens | `state/manager_epic.py` |
+| `epic_pull_requests` | `gameplan.py` | The epic's PR, one per repo — the only pull requests elstin opens | `state/manager_epic.py` |
 | `pull_requests` | `gameplan.py` | Per-story PRs from before stories merged locally; nothing writes it now (the API still attaches a story's row as `pull_request`) | `state/manager_pr.py` |
 | `project_lessons` | `lesson.py` | Lessons proposed from finished runs | `state/manager_lesson.py` |
 | `jira_watermarks` | `gameplan.py` | Last-seen comment id per issue | `state/manager_watermark.py` |
 | `activity_events`, `story_usage`, `story_run_outcomes` | `activity.py`, `story_usage.py`, `run_outcome.py` | The feed, cost, run shape and peak memory, keyed by `run_id` | `services/run_activity.py`, `services/usage.py` (hard constraint #1's exception) |
 
 Plus LangGraph's own checkpoint tables — every story's plan, diffs, dev
-history and fine-grained run state — which forge never duplicates: `GET
+history and fine-grained run state — which elstin never duplicates: `GET
 /api/stories/{key}/plan` reads the plan back from the checkpoint.
 
 ## Config and migrations
 
-- Config schema and UI fields: `forge/config/store.py` (`CONFIG_FIELDS`,
+- Config schema and UI fields: `elstin/config/store.py` (`CONFIG_FIELDS`,
   `PROJECT_OVERRIDABLE_KEYS`).
 - **A new setting needs a section.** The settings page groups fields into
   collapsible sections, and the server owns the grouping:
-  `CONFIG_CATEGORIES` (`forge/config/store.py`, served at
+  `CONFIG_CATEGORIES` (`elstin/config/store.py`, served at
   `GET /api/config/categories`) lists each section's title, description and
   the keys in it, in display order. Add the key to the section it belongs to
   when you add the `ConfigField` — `tests/test_config_store.py` fails on a
@@ -1773,7 +1773,7 @@ history and fine-grained run state — which forge never duplicates: `GET
   explain backfill/default semantics for existing rows.
 - Adding a column: model → migration → StateManager mixin → keep backfill
   meaning stable. Tests build the schema from the models
-  (`Base.metadata.create_all` in `forge_db`), not from migrations, so a
+  (`Base.metadata.create_all` in `elstin_db`), not from migrations, so a
   missing migration passes the suite and breaks a real database. A few
   tests run Alembic in-process: `tests/test_ticket_source.py` upgrades to
   the revision before one, writes old-shape rows, then upgrades and checks
@@ -1790,7 +1790,7 @@ LangGraph checkpointer creates its own tables on first use
 | Area | Prefix | Routes |
 |------|--------|--------|
 | Config | `/api/config` | `GET ""` (every field, secrets masked), `GET /categories` (the settings sections), `GET /models[?project_id=]` (model-picker suggestions), `PUT /{key}` |
-| Projects | `/api/projects` | `GET`/`POST ""` (create, optionally with `repo_url`, `repo_path` or `repo_paths`, `read_only_paths`, `reference_path`); `GET`/`PUT`/`DELETE /{id}` (`PUT` takes `name`, `description`, `ticket_source`; `DELETE` removes the project and everything forge holds for it); `POST /browse-folder`, `POST /scan-folder`; `GET`/`POST /{id}/repos` (clone a `url` or attach a `path` — `forge/services/repo_clone.py`), `PUT`/`DELETE /{id}/repos/{repo_id}` (read-only flag; detach); `GET`/`PUT .../repos/{repo_id}/guide`, `POST .../guide/generate`; `GET /{id}/lessons[?status=]`, `PUT`/`DELETE .../lessons/{lesson_id}`; `GET /{id}/config`, `PUT`/`DELETE /{id}/config/{key}` (overrides); `GET /{id}/epics` (the board); `GET`/`PUT`/`DELETE /{id}/ticket-filter`, `POST .../preview`, `POST .../sync` |
+| Projects | `/api/projects` | `GET`/`POST ""` (create, optionally with `repo_url`, `repo_path` or `repo_paths`, `read_only_paths`, `reference_path`); `GET`/`PUT`/`DELETE /{id}` (`PUT` takes `name`, `description`, `ticket_source`; `DELETE` removes the project and everything elstin holds for it); `POST /browse-folder`, `POST /scan-folder`; `GET`/`POST /{id}/repos` (clone a `url` or attach a `path` — `elstin/services/repo_clone.py`), `PUT`/`DELETE /{id}/repos/{repo_id}` (read-only flag; detach); `GET`/`PUT .../repos/{repo_id}/guide`, `POST .../guide/generate`; `GET /{id}/lessons[?status=]`, `PUT`/`DELETE .../lessons/{lesson_id}`; `GET /{id}/config`, `PUT`/`DELETE /{id}/config/{key}` (overrides); `GET /{id}/epics` (the board); `GET`/`PUT`/`DELETE /{id}/ticket-filter`, `POST .../preview`, `POST .../sync` |
 | Epics | `/api/epics` | `GET ""`, `GET /{key}`, `GET /{key}/usage`; `POST /sync` (Add ticket: `{jira_key, project_id}` — a key or URL, an epic or a lone story); `POST /{key}/sync` (refresh the epic's own text, no tree walk); `PUT /{key}/repo` (its default folder); `PUT /{key}/gate` (Pause / Resume); `POST /{key}/prior-work/refresh`; `POST /{key}/pr-approval`; `DELETE /{key}` (remove the ticket) |
 | Stories | `/api/stories` | `GET /{key}`, `/plan`, `/activity`, `/stream` (SSE), `/usage`; `POST /{key}/start`, `/approve`, `/answer`, `/replan`, `/retry[?replan=true]`, `/cancel`, `/guidance`, `/prior-work`, `/external-change`, `/sync` (refresh its text); `PUT /{key}/kind`, `PUT /{key}/repo` (pending top-level stories only) |
 | Pages | — | `/` and `/projects`, `/projects/{id}`, `/settings` (the three HTML shells), `/settings-ui/*` (the bundles), `/healthz`. Shells and bundles are served `Cache-Control: no-cache`: they keep fixed names, so without it a browser could run an old bundle after a rebuild, missing a button the server already has |
@@ -1808,7 +1808,7 @@ and only gets there sooner elsewhere.
 ## UI
 
 - `settings-ui/*.html` — three thin shells (projects list, settings,
-  project detail), one per `forge/app.py` route. Each just mounts a React
+  project detail), one per `elstin/app.py` route. Each just mounts a React
   root (`<div id="root">` + one `<script type="module"
   src="/settings-ui/vendor/app-*.js">`); only the pre-paint theme script
   and the one `app.css` `<link>` stay as raw HTML — those must run before
@@ -1840,7 +1840,7 @@ and only gets there sooner elsewhere.
   sections (`SettingsSection`) built from `GET /api/config` plus
   `GET /api/config/categories` — the page holds no per-setting knowledge, so
   a new setting needs no UI change. Which sections are open is remembered in
-  `localStorage` (`forge.settings.open`; every read and write is guarded,
+  `localStorage` (`elstin.settings.open`; every read and write is guarded,
   since storage can be blocked), `/settings#tracing` opens and scrolls to a
   section, and filtering opens every section that has a match. Underscores
   and spaces match each other, so a key and its label find the same setting.
@@ -1881,7 +1881,7 @@ and only gets there sooner elsewhere.
 
 ## Testing conventions
 
-- `tests/conftest.py`: `postgres_url` (testcontainers), `forge_db` (points
+- `tests/conftest.py`: `postgres_url` (testcontainers), `elstin_db` (points
   the engine at it and creates the tables from the models), `project_id` (a
   bare project, for tests that only need the foreign key), `git_repo` (a
   real repo with an `origin` remote), `fake_agents` (patches all five graph
@@ -1891,16 +1891,16 @@ and only gets there sooner elsewhere.
   `run_deterministic_gate` by name as well; `fake_agents` leaves those
   alone, which is safe while `dev_variants` stays at its default of 1, and
   `tests/test_dev_variants.py` patches them on
-  `forge.agents.roles.dev_variants`.
+  `elstin.agents.roles.dev_variants`.
 - **Never** call a real LLM provider / GitHub / live JIRA in
   unit/integration tests. Patch agent entry points on
-  `forge.orchestration.graph` (names imported at module load), or fake
-  `forge.llm.registry.get_provider` directly when testing a role module
+  `elstin.orchestration.graph` (names imported at module load), or fake
+  `elstin.llm.registry.get_provider` directly when testing a role module
   itself (see `tests/test_dev_loop.py`, `tests/test_generation.py`).
 - Pure reconciler tests need no DB. Graph/daemon/API tests use Postgres.
 - Prefer fakes at service boundaries over broad mocks.
 - `tests/test_architecture.py` enforces the hard constraints below by
-  walking the real import graph — provider-SDK isolation, `forge.db.models`
+  walking the real import graph — provider-SDK isolation, `elstin.db.models`
   access, reconciler purity, no language names in the shared tool layer.
   Adding a legitimate exception means adding it to that test's allow-list
   *and* to the constraint it belongs to, so the two never drift apart.
@@ -1921,7 +1921,7 @@ and only gets there sooner elsewhere.
 ## Hard constraints (do not violate)
 
 1. Use **StateManager** for epic/story/PR/project DB access — never import
-   `forge.db.models` outside `forge/db/`, `forge/state/`, `forge/config/`
+   `elstin.db.models` outside `elstin/db/`, `elstin/state/`, `elstin/config/`
    (the config store owns `AppConfig`/`ProjectConfig` the same way
    StateManager owns the rest), and the run-telemetry pair
    `services/run_activity.py` + `services/usage.py` + their
@@ -1929,7 +1929,7 @@ and only gets there sooner elsewhere.
    enforced, not advisory — see `tests/test_architecture.py`.
 2. Keep the **reconciler pure**.
 3. Assemble QA context in the **daemon** so roles stay free of StateManager.
-4. Framework owns JIRA/GitHub writes today; MCP (`forge/mcp/jira_server.py`,
+4. Framework owns JIRA/GitHub writes today; MCP (`elstin/mcp/jira_server.py`,
    `github_server.py`) is the agent integration boundary for those tools,
    not a free-for-all write path from roles.
 5. **Sub-tasks are never dispatched.**
@@ -1939,12 +1939,12 @@ and only gets there sooner elsewhere.
 7. Dev writes stay **plan-scoped** (`dev_tools` + `path_guard`).
 8. Config from Postgres — not env (except `DATABASE_URL`). That includes
    LangSmith: `LANGSMITH_*` is not read (see "Tracing (LangSmith)").
-9. Planner/dev run **only** through `forge/agents/loop.py`; verifier/qa
-   **only** through `forge/services/generation.py`. No role constructs an
+9. Planner/dev run **only** through `elstin/agents/loop.py`; verifier/qa
+   **only** through `elstin/services/generation.py`. No role constructs an
    `LlmProvider` or imports a provider SDK (`openai`, etc.) directly —
-   always go through `forge/llm/registry.py:get_provider()`.
+   always go through `elstin/llm/registry.py:get_provider()`.
 10. Do not add `.env` support for product settings.
-11. `forge/llm/` is the only package that may import a provider SDK, and
+11. `elstin/llm/` is the only package that may import a provider SDK, and
     `openai_compat.py` is the only module in it that may import `openai`
     — every other adapter (present or future) gets its own module next to
     it, never a branch inside it.
@@ -1970,12 +1970,12 @@ and only gets there sooner elsewhere.
   removal where such files would be.
 - Anything behind `qdrant-client`, `tree-sitter`, `tree-sitter-python` or
   `pydantic-settings`: they are declared in `pyproject.toml`, but nothing in
-  `forge/` or `tests/` imports them. `outline_file_tool` and the codebase
+  `elstin/` or `tests/` imports them. `outline_file_tool` and the codebase
   skeleton are text heuristics, not parsers.
-- A second `forge/llm/` provider adapter — `openai_compat.py` (OpenAI's
+- A second `elstin/llm/` provider adapter — `openai_compat.py` (OpenAI's
   own API, or any OpenAI-compatible endpoint via `llm_base_url`: Azure,
   OpenRouter, vLLM, Ollama, etc.) is the only one wired today. The port
-  (`forge/llm/base.py`'s `LlmProvider`/`Capabilities`) is built to take a
+  (`elstin/llm/base.py`'s `LlmProvider`/`Capabilities`) is built to take a
   second one without touching `agents/loop.py` or any role.
 
 ## Where to change what
@@ -2013,7 +2013,7 @@ and only gets there sooner elsewhere.
 | Disk a finished story's worktree holds (retention) | `daemon/worktree_retention.py`, `state/manager_story.py`'s `list_worktrees_of_stories_in` |
 | Removing a ticket (rows, worktrees, branches, checkpoints — local only) | `daemon/ticket_removal.py`, `state/manager_removal.py`, `tools/worktree.py`'s `discard_worktree` |
 | Deleting a project (its tickets, clones, settings — local only) | `daemon/project_removal.py`, `state/manager_project.py`'s `delete_project_records` |
-| What the agents are told about a repo (its AGENTS.md, or one forge generates) | `services/project_guide.py`; routes in `api/project_routes.py` |
+| What the agents are told about a repo (its AGENTS.md, or one elstin generates) | `services/project_guide.py`; routes in `api/project_routes.py` |
 | Lessons proposed from finished runs | `services/lessons.py` (capture), `state/manager_lesson.py` |
 | A person's message to a running agent | `services/guidance.py`, `agents/loop.py`'s `pending_messages`, `api/run_routes.py`'s `send_guidance`, `state/manager_story.py` |
 | Persistence API | `state/manager_*.py` + Alembic |

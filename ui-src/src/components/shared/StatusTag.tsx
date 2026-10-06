@@ -1,5 +1,5 @@
 import { continuedBranches, doneWorkOutcome, needsChoice, onlyInDefault } from "../../lib/priorWork";
-import type { EpicPhase, Story, StoryStatus } from "../../types/api";
+import type { EpicPhase, PoAssessment, PoMode, PoStatus, Story, StoryStatus } from "../../types/api";
 import { Badge } from "../ui/badge";
 
 type TagVariant = "default" | "secondary" | "destructive" | "success" | "warning" | "info" | "outline";
@@ -71,14 +71,14 @@ export const GATE_ACTION: Partial<Record<StoryStatus, GateAction>> = {
 export const PARKED_REASON_LABEL: Record<string, string> = {
   already_satisfied: "already satisfied — no changes needed",
   cancelled: "cancelled",
-  // forge/services/external_sync.py: set aside while the source has it On
+  // elstin/services/external_sync.py: set aside while the source has it On
   // Hold (or another ticket_hold_statuses status), back to pending after.
   on_hold_in_source: "on hold in the source — picked up once it is not",
-  // forge/services/provider_limit.py: the provider refused calls on a rate or
-  // quota limit. With a retry time forge retries the story itself then.
+  // elstin/services/provider_limit.py: the provider refused calls on a rate or
+  // quota limit. With a retry time elstin retries the story itself then.
   usage_limit: "provider limit",
-  // forge/services/provider_limit.py: the model endpoint could not be reached
-  // (a proxy or VPN blip, usually). Forge retries the story itself shortly.
+  // elstin/services/provider_limit.py: the model endpoint could not be reached
+  // (a proxy or VPN blip, usually). Elstin retries the story itself shortly.
   provider_unreachable: "model endpoint unreachable",
 };
 
@@ -96,6 +96,53 @@ export const ACTIVITY_PHASE_LABEL: Record<string, string> = {
   verifier: "Verifier",
   qa: "QA",
   system: "System",
+  po: "PO",
+};
+
+// PO sessions (the backlog the PO agent drafts with a person): their status,
+// the mode elstin chose for them, and the agent's verdict on an existing story.
+export const PO_STATUS_APPEARANCE: Record<PoStatus, TagVariant> = {
+  queued: "secondary",
+  running: "info",
+  awaiting_input: "warning",
+  ready: "success",
+  publishing: "info",
+  published: "success",
+  failed: "destructive",
+  discarded: "secondary",
+};
+
+export const PO_STATUS_LABEL: Record<PoStatus, string> = {
+  queued: "waiting for the agent",
+  running: "agent working",
+  awaiting_input: "needs your answers",
+  ready: "draft ready",
+  publishing: "publishing",
+  published: "published",
+  failed: "failed",
+  discarded: "discarded",
+};
+
+export const PO_MODE_LABEL: Record<PoMode, string> = {
+  brainstorm: "new epic",
+  split: "split an epic",
+  gap: "gap analysis",
+};
+
+export const PO_ASSESSMENT_APPEARANCE: Record<PoAssessment, TagVariant> = {
+  done: "success",
+  partial: "warning",
+  not_started: "secondary",
+  obsolete: "outline",
+  unclear: "warning",
+};
+
+export const PO_ASSESSMENT_LABEL: Record<PoAssessment, string> = {
+  done: "done",
+  partial: "partly done",
+  not_started: "not started",
+  obsolete: "obsolete",
+  unclear: "unclear",
 };
 
 interface TagProps {
@@ -110,6 +157,10 @@ export function Tag({ label, appearance = "secondary", title }: TagProps) {
       {label}
     </Badge>
   );
+}
+
+export function PoStatusTag({ status }: { status: PoStatus }) {
+  return <Tag label={PO_STATUS_LABEL[status] || status} appearance={PO_STATUS_APPEARANCE[status]} />;
 }
 
 export function StatusTagFor({ status }: { status: StoryStatus }) {
@@ -129,7 +180,7 @@ export function ExternalChangedTag({ story }: { story: Story }) {
 
 // The source reports the ticket done, closed or gone. A story that had not
 // started is skipped; one in flight is only flagged, which is what the
-// title says, so nobody reads the tag as "forge stopped it".
+// title says, so nobody reads the tag as "elstin stopped it".
 export function ClosedExternallyTag({ story }: { story: Story }) {
   if (!story.external_closed) return null;
   const inFlight = story.status !== "skipped" && story.status !== "merged" && story.status !== "done";
@@ -151,13 +202,13 @@ export function KindTag({ story }: { story: Story }) {
 }
 
 // Tests passed; only the coverage-threshold check fell short — distinct
-// from a real implementation failure (see forge/tools/vue_tools.py).
+// from a real implementation failure (see elstin/tools/vue_tools.py).
 export function CoverageGapTag({ story }: { story: Story }) {
   if (!story.coverage_gap) return null;
   return <Tag label="Coverage gap" appearance="warning" />;
 }
 
-// The plan needs changes forge will not make — in a read-only repo, or a file
+// The plan needs changes elstin will not make — in a read-only repo, or a file
 // the project says agents must not change. The rest of the story runs; these
 // are for a person.
 export function ReadOnlyChangesTag({ story }: { story: Story }) {
@@ -172,7 +223,7 @@ export function ReadOnlyChangesTag({ story }: { story: Story }) {
     <Tag
       label="left to a person"
       appearance="warning"
-      title={`forge won't do these; someone has to:\n${[...changes.map((c) => c.path), ...actions.map((a) => a.action)].join("\n")}`}
+      title={`Elstin won't do these; someone has to:\n${[...changes.map((c) => c.path), ...actions.map((a) => a.action)].join("\n")}`}
     />
   );
 }
@@ -194,8 +245,8 @@ export function WaitingOnTag({ story, statusByKey }: { story: Story; statusByKey
   return <Tag label={`waits for ${waiting.join(", ")}`} appearance="secondary" title="Starts once these have merged into the epic branch" />;
 }
 
-// Work that already existed for this ticket before forge made its branch
-// (forge/services/prior_work.py): the branch it continues from, or that the
+// Work that already existed for this ticket before elstin made its branch
+// (elstin/services/prior_work.py): the branch it continues from, or that the
 // work is already in the default branch — so a story that "does nothing new"
 // is never a surprise. A pending story still waiting for a branch pick shows
 // the Choose branch button instead (PriorWorkChoice.tsx).
@@ -238,8 +289,8 @@ export function PriorWorkTag({ story }: { story: Story }) {
 }
 
 // A ticket closed as done in its source is not run — but its branch may hold
-// work the default branch does not have yet, which forge merges into the
-// epic branch (forge/daemon/main.py's _bring_done_work_into_epic).
+// work the default branch does not have yet, which elstin merges into the
+// epic branch (elstin/daemon/main.py's _bring_done_work_into_epic).
 function DoneWorkTag({ story }: { story: Story }) {
   const results = Object.entries(story.prior_work?.epic_merge ?? {});
   const lines = results.map(([label, r]) => `${label}: ${r.branch ?? ""} ${r.detail ? `— ${r.detail}` : ""}`.trim()).join("\n");
@@ -274,7 +325,7 @@ export function MergeAttemptsTag({ story }: { story: Story }) {
 // wrote code but the build or the reviewer rejected it read the same in the
 // plain status tag — the second is real progress, not a dead end, and is
 // worth a click into the run before retrying blind. gate_runs/dev_passes
-// are the cheapest signal that dev actually ran (see forge/api/
+// are the cheapest signal that dev actually ran (see elstin/api/
 // epic_routes.py's _story_with_pr): the deterministic gate only runs after
 // dev writes something.
 export function CodeWrittenTag({ story }: { story: Story }) {

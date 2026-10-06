@@ -1,4 +1,4 @@
-# code_forge — local single-process stack.
+# elstin — local single-process stack.
 #
 # Two services: Postgres, and the app (FastAPI settings UI/API + the daemon
 # poll loop running as a background task inside the same process — no
@@ -22,25 +22,25 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: forge
-      POSTGRES_PASSWORD: forge
-      POSTGRES_DB: forge
+      POSTGRES_USER: elstin
+      POSTGRES_PASSWORD: elstin
+      POSTGRES_DB: elstin
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "forge"]
+      test: ["CMD", "pg_isready", "-U", "elstin"]
       interval: 5s
       timeout: 5s
       retries: 10
       start_period: 10s
     volumes:
-      - forge-pgdata:/var/lib/postgresql/data
+      - elstin-pgdata:/var/lib/postgresql/data
     ports:
-      - "${FORGE_PG_PORT:-5433}:5432"
+      - "${ELSTIN_PG_PORT:-5433}:5432"
 
   migrate:
     build: .
     command: ["alembic", "upgrade", "head"]
     environment:
-      DATABASE_URL: postgresql+psycopg://forge:forge@postgres:5432/forge
+      DATABASE_URL: postgresql+psycopg://elstin:elstin@postgres:5432/elstin
     depends_on:
       postgres:
         condition: service_healthy
@@ -48,28 +48,28 @@ services:
 
   app:
     build: .
-    command: ["uvicorn", "forge.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["uvicorn", "elstin.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
     environment:
-      DATABASE_URL: postgresql+psycopg://forge:forge@postgres:5432/forge
+      DATABASE_URL: postgresql+psycopg://elstin:elstin@postgres:5432/elstin
     ports:
-      - "${FORGE_APP_PORT:-8000}:8000"
+      - "${ELSTIN_APP_PORT:-8000}:8000"
     volumes:
       # /data itself, not only the two directories below it: the dev
       # loop's pre-edit baselines (/data/baselines, what
       # roll_back_file_tool restores from) and downloaded JIRA
       # attachments live directly under it, and without a volume they
       # sit in the container's writable layer — gone the moment the
-      # container is recreated, which is every `scripts/forge.sh up`.
-      - forge-data:/data
-      - forge-repos:/data/repos
-      - forge-cloned-repos:/data/cloned-repos
+      # container is recreated, which is every `scripts/elstin.sh up`.
+      - elstin-data:/data
+      - elstin-repos:/data/repos
+      - elstin-cloned-repos:/data/cloned-repos
       # To ATTACH a repo that already lives on your machine instead of
       # cloning it by URL (Folders -> + -> "Attach a folder"), mount it here
       # and attach the path INSIDE the container. The container sees nothing
       # of the host filesystem otherwise. For example:
       #   - /Users/you/code/shop-app:/workspace/shop-app
       # then attach /workspace/shop-app. A folder holding several repos works
-      # too (mount it, attach it, pick which repos). Running forge directly on
+      # too (mount it, attach it, pick which repos). Running elstin directly on
       # the host (uvicorn) needs none of this — attach the host path as is.
     depends_on:
       postgres:
@@ -78,7 +78,7 @@ services:
         condition: service_completed_successfully
 
 volumes:
-  forge-pgdata:
-  forge-data:
-  forge-repos:
-  forge-cloned-repos:
+  elstin-pgdata:
+  elstin-data:
+  elstin-repos:
+  elstin-cloned-repos:

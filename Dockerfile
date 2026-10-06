@@ -26,7 +26,7 @@ RUN git config --system --add safe.directory '*'
 
 WORKDIR /app
 COPY pyproject.toml ./
-COPY forge ./forge
+COPY elstin ./elstin
 COPY alembic.ini ./
 COPY alembic ./alembic
 COPY settings-ui ./settings-ui
@@ -37,4 +37,4 @@ COPY --from=ui-build /settings-ui/vendor ./settings-ui/vendor
 RUN pip install --no-cache-dir -e .
 
 EXPOSE 8000
-CMD ["uvicorn", "forge.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "elstin.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]

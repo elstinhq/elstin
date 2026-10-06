@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import subprocess
 
-from forge.services.github_service import parse_github_remote
+from elstin.services.github_service import parse_github_remote
 
 
 def _init_repo_with_remote(tmp_path, remote_url: str) -> str:

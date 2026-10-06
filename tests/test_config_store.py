@@ -1,16 +1,16 @@
 """Round-trips every known config key through get_config/set_config, and
-through the actual HTTP API (forge/api/config_routes.py) that the settings
+through the actual HTTP API (elstin/api/config_routes.py) that the settings
 UI calls — confirms secret-flagged fields mask on read at both layers."""
 from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
 
 def test_unset_fields_fall_back_to_declared_defaults():
-    from forge.config.store import get_bool_config, get_config
+    from elstin.config.store import get_bool_config, get_config
 
     assert get_config("worktrees_base_dir") == "/data/repos"
     assert get_bool_config("require_plan_approval") is True
@@ -18,7 +18,7 @@ def test_unset_fields_fall_back_to_declared_defaults():
 
 
 def test_set_config_round_trips_and_invalidates_cache():
-    from forge.config.store import get_config, set_config
+    from elstin.config.store import get_config, set_config
 
     set_config("jira_base_url", "https://acme.atlassian.net")
     assert get_config("jira_base_url") == "https://acme.atlassian.net"
@@ -28,7 +28,7 @@ def test_set_config_round_trips_and_invalidates_cache():
 
 
 def test_bool_config_parsing():
-    from forge.config.store import get_bool_config, set_config
+    from elstin.config.store import get_bool_config, set_config
 
     set_config("require_plan_approval", "false")
     assert get_bool_config("require_plan_approval") is False
@@ -38,7 +38,7 @@ def test_bool_config_parsing():
 
 
 def test_list_config_for_display_masks_secrets_but_not_plain_fields():
-    from forge.config.store import list_config_for_display, set_config
+    from elstin.config.store import list_config_for_display, set_config
 
     set_config("jira_base_url", "https://acme.atlassian.net")
     set_config("openai_api_key", "sk-openai-super-secret")
@@ -55,7 +55,7 @@ def test_list_config_for_display_masks_secrets_but_not_plain_fields():
 
 
 def test_unset_secret_field_is_not_masked_as_if_set():
-    from forge.config.store import list_config_for_display
+    from elstin.config.store import list_config_for_display
 
     items = {item["key"]: item for item in list_config_for_display()}
     assert items["github_token"]["is_set"] is False
@@ -63,7 +63,7 @@ def test_unset_secret_field_is_not_masked_as_if_set():
 
 
 def _client() -> TestClient:
-    from forge.app import create_app
+    from elstin.app import create_app
 
     return TestClient(create_app())
 
@@ -100,7 +100,7 @@ def test_api_put_nonsecret_field_returns_it_in_plain_text():
 def test_every_declared_setting_belongs_to_exactly_one_section():
     """The screen renders sections, not a flat list: a setting added to
     CONFIG_FIELDS without a home would have nowhere to show."""
-    from forge.config.store import CONFIG_CATEGORIES, CONFIG_FIELDS
+    from elstin.config.store import CONFIG_CATEGORIES, CONFIG_FIELDS
 
     placed = [key for category in CONFIG_CATEGORIES for key in category.keys]
 
@@ -109,7 +109,7 @@ def test_every_declared_setting_belongs_to_exactly_one_section():
 
 
 def test_sections_are_named_and_not_empty():
-    from forge.config.store import CONFIG_CATEGORIES
+    from elstin.config.store import CONFIG_CATEGORIES
 
     ids = [category.id for category in CONFIG_CATEGORIES]
 
@@ -119,7 +119,7 @@ def test_sections_are_named_and_not_empty():
 
 
 def test_api_lists_the_sections_in_order_with_their_fields():
-    from forge.config.store import CONFIG_CATEGORIES
+    from elstin.config.store import CONFIG_CATEGORIES
 
     with _client() as client:
         response = client.get("/api/config/categories")

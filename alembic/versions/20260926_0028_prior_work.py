@@ -1,7 +1,7 @@
-"""Work already done on a ticket, looked up before forge makes a branch.
+"""Work already done on a ticket, looked up before elstin makes a branch.
 
 `stories.prior_work` and `epics.prior_work` hold what the lookup in
-forge/services/prior_work.py found for the ticket's key: per repo, the
+elstin/services/prior_work.py found for the ticket's key: per repo, the
 branches carrying it, how far ahead of the default branch they are, and
 whether their work is already in it — plus a human's pick where several
 diverged. A story's branch (and the epic branch) starts from what it found.

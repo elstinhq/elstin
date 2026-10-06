@@ -1,6 +1,6 @@
 """The per-story spend ceiling (`story_max_budget_usd`).
 
-Every other cap in forge is per loop: the planner has one, dev has one,
+Every other cap in elstin is per loop: the planner has one, dev has one,
 each explorer carves a slice out of the planner's. Nothing bounded a story
 end to end, so planning plus investigation plus however many dev fix
 rounds plus a review could each stay inside their own limit while the
@@ -14,15 +14,15 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from forge.config.store import set_config
-from forge.services.usage import (
+from elstin.config.store import set_config
+from elstin.services.usage import (
     effective_budget_usd,
     record_phase_usage,
     remaining_story_budget_usd,
     story_spend_usd,
 )
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
 
 def _spend(run_id: str, cost: float, *, phase: str = "dev") -> None:
@@ -87,7 +87,7 @@ def test_a_tighter_phase_cap_still_wins():
 
 
 def test_exhausted_reports_a_flag_rather_than_a_zero_cap():
-    """Zero means unbounded everywhere in forge, so an exhausted remainder
+    """Zero means unbounded everywhere in elstin, so an exhausted remainder
     must never be passed through as a cap or it would do the opposite of
     what was asked."""
     set_config("story_max_budget_usd", "1.00")
@@ -114,7 +114,7 @@ def test_a_run_with_no_id_is_never_ceilinged():
 
 def test_usage_with_no_price_row_cannot_constrain_the_ceiling():
     """Documented limitation rather than a bug: with no rate to multiply
-    by there is no spend to count, so a model forge has no price for
+    by there is no spend to count, so a model elstin has no price for
     cannot be bounded. This is why the pricing table has a test pinning
     every shipped model default."""
     set_config("story_max_budget_usd", "1.00")
@@ -131,7 +131,7 @@ def test_usage_with_no_price_row_cannot_constrain_the_ceiling():
 class FakeProvider:
     script: list
     name: str = "openai"
-    capabilities: object = field(default_factory=lambda: __import__("forge.llm.base", fromlist=["Capabilities"]).Capabilities())
+    capabilities: object = field(default_factory=lambda: __import__("elstin.llm.base", fromlist=["Capabilities"]).Capabilities())
 
     async def complete(self, request):
         item = self.script.pop(0)
@@ -146,8 +146,8 @@ def _exhaust(run_id: str) -> None:
 
 
 async def test_dev_refuses_to_start_when_the_ceiling_is_exhausted(git_repo, monkeypatch):
-    import forge.agents.roles.dev_loop as dev_loop_module
-    from forge.agents.roles.dev_loop import DevLoopError, run_dev
+    import elstin.agents.roles.dev_loop as dev_loop_module
+    from elstin.agents.roles.dev_loop import DevLoopError, run_dev
 
     set_config("openai_api_key", "sk-test")
     _exhaust("ENG-1")
@@ -158,8 +158,8 @@ async def test_dev_refuses_to_start_when_the_ceiling_is_exhausted(git_repo, monk
 
 
 async def test_planner_refuses_to_start_when_the_ceiling_is_exhausted(git_repo, monkeypatch):
-    import forge.agents.roles.planner_loop as planner_module
-    from forge.agents.roles.planner_loop import PlannerLoopError, run_planner
+    import elstin.agents.roles.planner_loop as planner_module
+    from elstin.agents.roles.planner_loop import PlannerLoopError, run_planner
 
     set_config("openai_api_key", "sk-test")
     _exhaust("ENG-1")
@@ -172,8 +172,8 @@ async def test_planner_refuses_to_start_when_the_ceiling_is_exhausted(git_repo, 
 async def test_verifier_and_qa_are_skipped_when_the_ceiling_is_exhausted(monkeypatch):
     """Both reach a model only through chat_completion_json, so one check
     covers them, and GenerationError is what the graph already catches."""
-    import forge.services.generation as generation
-    from forge.services.generation import GenerationError
+    import elstin.services.generation as generation
+    from elstin.services.generation import GenerationError
 
     set_config("openai_api_key", "sk-test")
     _exhaust("ENG-1")
@@ -184,9 +184,9 @@ async def test_verifier_and_qa_are_skipped_when_the_ceiling_is_exhausted(monkeyp
 
 
 async def test_dev_runs_normally_with_budget_remaining(git_repo, monkeypatch):
-    import forge.agents.roles.dev_loop as dev_loop_module
-    from forge.agents.roles.dev_loop import run_dev
-    from forge.llm.types import LlmResponse, TextBlock, Usage
+    import elstin.agents.roles.dev_loop as dev_loop_module
+    from elstin.agents.roles.dev_loop import run_dev
+    from elstin.llm.types import LlmResponse, TextBlock, Usage
 
     set_config("openai_api_key", "sk-test")
     set_config("story_max_budget_usd", "1.00")

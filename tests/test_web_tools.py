@@ -6,8 +6,8 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from forge.tools import safe_shell, web_tools
-from forge.tools.dev_tools import TOOL_SCHEMAS, WEB_TOOLS, make_dev_tools
+from elstin.tools import safe_shell, web_tools
+from elstin.tools.dev_tools import TOOL_SCHEMAS, WEB_TOOLS, make_dev_tools
 
 
 @pytest.fixture(autouse=True)

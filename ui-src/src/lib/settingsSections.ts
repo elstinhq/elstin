@@ -8,7 +8,7 @@ export interface SettingsSectionData {
 }
 
 // The server owns which section a field is in and the order inside it
-// (forge/config/store.py's CONFIG_CATEGORIES). A saved value with no section of
+// (elstin/config/store.py's CONFIG_CATEGORIES). A saved value with no section of
 // its own still has to be reachable, so it lands in a last one. Sections with
 // nothing in them — a project only overrides some of the settings — are left
 // out.

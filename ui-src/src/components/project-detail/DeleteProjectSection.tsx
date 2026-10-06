@@ -9,9 +9,9 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 
-// Deleting a project removes everything forge holds for it — each ticket as
-// Remove ticket does, the clones forge made, its settings, filter and folders
-// (forge/daemon/project_removal.py). It can't be undone, so the confirmation
+// Deleting a project removes everything elstin holds for it — each ticket as
+// Remove ticket does, the clones elstin made, its settings, filter and folders
+// (elstin/daemon/project_removal.py). It can't be undone, so the confirmation
 // spells out what goes and what stays, and asks for the project's name.
 export function DeleteProjectSection({ projectId }: { projectId: number }) {
   const [open, setOpen] = useState(false);
@@ -20,7 +20,7 @@ export function DeleteProjectSection({ projectId }: { projectId: number }) {
       <div className="min-w-0">
         <div className="text-sm font-medium">Delete this project</div>
         <p className="text-muted-foreground text-xs">
-          Removes its tickets, run history and forge's clones. Attached folders and anything on GitHub or JIRA stay.
+          Removes its tickets, run history and Elstin's clones. Attached folders and anything on GitHub or JIRA stay.
         </p>
       </div>
       <Button variant="destructive" size="sm" className="shrink-0" onClick={() => setOpen(true)}>
@@ -68,7 +68,7 @@ function DeleteProjectDialog({ projectId, onClose }: { projectId: number; onClos
         </DialogHeader>
         <div className="flex flex-col gap-3 text-sm">
           <div>
-            <p className="font-medium">Deleted from forge</p>
+            <p className="font-medium">Deleted from Elstin</p>
             <ul className="text-muted-foreground list-disc pl-5">
               <li>
                 {epics.length} ticket{epics.length === 1 ? "" : "s"} with their run history, token usage, worktrees, local
@@ -76,7 +76,7 @@ function DeleteProjectDialog({ projectId, onClose }: { projectId: number; onClos
               </li>
               {clones.length ? (
                 <li>
-                  The clone{clones.length === 1 ? "" : "s"} forge made: {clones.map((r) => r.label || r.path).join(", ")}
+                  The clone{clones.length === 1 ? "" : "s"} Elstin made: {clones.map((r) => r.label || r.path).join(", ")}
                 </li>
               ) : null}
               <li>The project's settings, ticket filter and folder list</li>
@@ -88,7 +88,7 @@ function DeleteProjectDialog({ projectId, onClose }: { projectId: number; onClos
               {attached.length ? (
                 <li>
                   Attached folder{attached.length === 1 ? "" : "s"} ({attached.map((r) => r.path).join(", ")}) — only the
-                  branches and worktrees forge added are removed
+                  branches and worktrees Elstin added are removed
                 </li>
               ) : null}
               <li>

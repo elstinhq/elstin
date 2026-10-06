@@ -1,6 +1,6 @@
 """project_repos.clone_url — records the git URL a repo was cloned from
-(forge/services/repo_clone.py). Projects now always clone into storage the
-API process controls (see forge/db/models/project.py's ProjectRepo
+(elstin/services/repo_clone.py). Projects now always clone into storage the
+API process controls (see elstin/db/models/project.py's ProjectRepo
 docstring) instead of pointing at a pre-existing local path, so the UI can
 show provenance instead of just an opaque container-local path like
 /data/cloned-repos/3/mono-adminportal.

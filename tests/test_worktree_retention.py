@@ -1,4 +1,4 @@
-"""forge/daemon/worktree_retention.py — a finished story's checkout holds a full
+"""elstin/daemon/worktree_retention.py — a finished story's checkout holds a full
 dependency install and nothing used to take it away. Real git and real Postgres:
 what is under test is what is left on disk, in git and in the rows."""
 from __future__ import annotations
@@ -8,13 +8,13 @@ import subprocess
 
 import pytest
 
-from forge.config.store import get_config, set_config
-from forge.daemon import worktree_retention
-from forge.daemon.worktree_retention import maybe_reclaim, reclaim_finished_worktrees
-from forge.state.manager import StateManager
-from forge.tools.worktree import create_worktree, run_git
+from elstin.config.store import get_config, set_config
+from elstin.daemon import worktree_retention
+from elstin.daemon.worktree_retention import maybe_reclaim, reclaim_finished_worktrees
+from elstin.state.manager import StateManager
+from elstin.tools.worktree import create_worktree, run_git
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
 EPIC_BRANCH = "epic/ENG-1"
 
@@ -221,7 +221,7 @@ def test_the_poll_loops_sweep_is_throttled_and_never_raises(world, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_poll_once_runs_the_sweep(world, monkeypatch):
-    import forge.daemon.main as daemon
+    import elstin.daemon.main as daemon
 
     seen: list[frozenset] = []
     monkeypatch.setattr(daemon, "maybe_reclaim", lambda sm, *, live: seen.append(live))

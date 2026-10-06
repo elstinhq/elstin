@@ -1,8 +1,8 @@
 """Runs the real ported LangGraph graph against a real (testcontainers)
 Postgres checkpointer. The graph structure, node wiring, and Postgres
-checkpointer are all real production code; forge/agents/roles/*_loop.py's
-actual LLM-provider calls (via forge/agents/loop.py and
-forge/llm/registry.py) are replaced by the
+checkpointer are all real production code; elstin/agents/roles/*_loop.py's
+actual LLM-provider calls (via elstin/agents/loop.py and
+elstin/llm/registry.py) are replaced by the
 `fake_agents` fixture (conftest.py) so these tests run with no network
 access and no API key — they're proving the checkpointer/interrupt/resume
 mechanics, not agent output quality.
@@ -19,13 +19,13 @@ import uuid
 
 import pytest
 
-from forge.orchestration.graph import checkpointer_from_url, compile_graph
-from forge.orchestration.state import initial_state
+from elstin.orchestration.graph import checkpointer_from_url, compile_graph
+from elstin.orchestration.state import initial_state
 
-# forge_db: graph.py's node functions call append_activity() directly
+# elstin_db: graph.py's node functions call append_activity() directly
 # (outside the fake_agents swap), which now persists to Postgres — needs
-# DATABASE_URL set, which only the forge_db fixture does.
-pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("fake_agents", "forge_db")]
+# DATABASE_URL set, which only the elstin_db fixture does.
+pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("fake_agents", "elstin_db")]
 
 
 async def test_run_parks_at_planner_gate_and_resumes_after_reconnect(postgres_url: str):
@@ -51,7 +51,7 @@ async def test_run_parks_at_planner_gate_and_resumes_after_reconnect(postgres_ur
         snapshot = await graph.aget_state(config)
         assert snapshot.next == ("dev",)  # durably persisted, not lost with the old connection
 
-        # In production, the daemon calls forge.tools.worktree.create_worktree
+        # In production, the daemon calls elstin.tools.worktree.create_worktree
         # between plan-approval and resume, then writes worktree_path onto the
         # checkpoint — the graph itself never creates a worktree.
         await graph.aupdate_state(config, {"worktree_path": "/repo-worktrees/eng-1"})
@@ -73,14 +73,14 @@ async def test_answering_a_clarification_resumes_into_planner_not_dev(
     interrupt_after=["planner"] pauses the graph, and frozen into the
     checkpoint's `next` pointer from that point on.
 
-    forge/daemon/main.py's resume patches in a human's answer
+    elstin/daemon/main.py's resume patches in a human's answer
     (clarification_answers) via `aupdate_state` before resuming, exactly
     like this test does — but `aupdate_state` recomputes `next` by
     re-running the outgoing conditional edge, so the fix has to live in
     that edge function, not in the patch. Confirmed against the unfixed
     code: dev ran directly on a nearly-empty plan (no files, no
     acceptance_criteria) and the run failed with "nothing to verify"."""
-    import forge.orchestration.graph as graph_module
+    import elstin.orchestration.graph as graph_module
 
     calls: list[list[dict] | None] = []
     earlier: list[bool] = []
@@ -117,7 +117,7 @@ async def test_answering_a_clarification_resumes_into_planner_not_dev(
         assert result["status"] == "awaiting_clarification"
         assert len(calls) == 1
 
-        # Same shape forge/daemon/main.py's resume patch applies from
+        # Same shape elstin/daemon/main.py's resume patch applies from
         # stories.clarification_answers once a human answers.
         answer = [{"question": "Which store should own this?", "option_label": "Redux", "option_description": None}]
         await graph.aupdate_state(config, {"clarification_answers": answer})
@@ -156,10 +156,10 @@ async def test_dev_provider_error_ends_the_run_failed_not_uncaught(
     rather than let it propagate — nothing upstream of the graph (the
     daemon's poll_once loop) catches a per-story exception, so an uncaught
     one here would silently abort the whole poll cycle forever instead of
-    landing on a retryable "failed" story (see forge/daemon/main.py's
+    landing on a retryable "failed" story (see elstin/daemon/main.py's
     poll_once, which has no try/except around handle_intent)."""
-    import forge.orchestration.graph as graph_module
-    from forge.agents.roles.dev_loop import DevLoopError
+    import elstin.orchestration.graph as graph_module
+    from elstin.agents.roles.dev_loop import DevLoopError
 
     async def failing_dev(**kwargs) -> dict:
         raise DevLoopError("simulated provider failure")
@@ -186,7 +186,7 @@ def _qa_state(thread_id: str) -> dict:
         "qa_story": {"jira_key": "PROJ-3722", "summary": "Validate implemented end-to-end flow"},
         "epic": {"jira_key": "PROJ-3480", "summary": "Multi-item type selection"},
         "dev_stories": [{"jira_key": "PROJ-3481", "summary": "Select multiple item types"}],
-        "branch_diff": {"base": "main", "branch": "forge/epic/PROJ-3480", "changed_files": [], "diff": ""},
+        "branch_diff": {"base": "main", "branch": "elstin/epic/PROJ-3480", "changed_files": [], "diff": ""},
     }
     return state
 
@@ -227,7 +227,7 @@ async def test_qa_story_fails_the_run_when_the_merged_branch_suite_fails(
             "messages": [],
         }
 
-    import forge.orchestration.graph as graph_module
+    import elstin.orchestration.graph as graph_module
 
     monkeypatch.setattr(graph_module, "run_epic_qa", _suite_fails)
 
@@ -260,7 +260,7 @@ async def test_verifier_failure_retries_dev_up_to_max_iterations(postgres_url: s
     async def _always_fails(**kwargs):
         return {"verifier_report": {"passed": False, "fake": True}, "diffs": [], "messages": []}
 
-    import forge.orchestration.graph as graph_module
+    import elstin.orchestration.graph as graph_module
 
     monkeypatch.setattr(graph_module, "run_verifier", _always_fails)
 
@@ -295,7 +295,7 @@ async def test_gate_failure_routes_back_to_dev_with_feedback_and_never_enters_th
     """Tier 1 fails once (code doesn't compile), dev gets one targeted
     fix message on top of its existing history, Tier 1 then passes, and
     only THEN does the verifier run — exactly once."""
-    import forge.orchestration.graph as graph_module
+    import elstin.orchestration.graph as graph_module
 
     gate_results = [_failing_gate(blockers=["alpha: analyze failed"]), {"passed": True, "issues": [], "required_fixes": []}]
     dev_calls: list[dict] = []
@@ -347,7 +347,7 @@ async def test_a_build_environment_problem_stops_the_run_instead_of_going_back_t
     """One story: javac crashed on the wrong JDK, and three dev passes went on
     "fixing" working code. A failure the profile says is the environment
     ends the run at once, saying why."""
-    import forge.orchestration.graph as graph_module
+    import elstin.orchestration.graph as graph_module
 
     reason = "The Java build fails before compiling any source: Fatal error compiling: TypeTag :: UNKNOWN."
     gate = _failing_gate(blockers=["java_maven: analyze failed"])
@@ -383,7 +383,7 @@ async def test_gate_feedback_says_nothing_was_written_only_while_the_worktree_is
 ):
     """Round one writes nothing, round two writes a file but not the rest:
     dev is told it wrote nothing the first time and not the second."""
-    import forge.orchestration.graph as graph_module
+    import elstin.orchestration.graph as graph_module
 
     unwritten = {
         "passed": False,
@@ -428,7 +428,7 @@ async def test_gate_feedback_says_nothing_was_written_only_while_the_worktree_is
 async def test_gate_failing_every_time_fails_the_run_without_a_verifier_call(
     postgres_url: str, monkeypatch: pytest.MonkeyPatch
 ):
-    import forge.orchestration.graph as graph_module
+    import elstin.orchestration.graph as graph_module
 
     verifier_calls: list[dict] = []
 
@@ -463,7 +463,7 @@ async def test_gate_failing_every_time_fails_the_run_without_a_verifier_call(
 
 async def test_gate_runs_after_every_dev_pass_including_verifier_retries(postgres_url: str, monkeypatch: pytest.MonkeyPatch):
     """dev -> gate -> verifier(fail) -> dev -> gate -> verifier(pass)."""
-    import forge.orchestration.graph as graph_module
+    import elstin.orchestration.graph as graph_module
 
     gate_calls = {"n": 0}
     verdicts = [False, True]
@@ -503,8 +503,8 @@ async def test_verifier_generation_error_fails_the_story_instead_of_escaping(
     poll loop has no per-story handler, an unparseable model reply escaped
     all the way to run_forever's blanket except, abandoning every epic
     queued behind this one for the rest of the cycle."""
-    import forge.orchestration.graph as graph_module
-    from forge.services.generation import GenerationError
+    import elstin.orchestration.graph as graph_module
+    from elstin.services.generation import GenerationError
 
     async def verifier_gets_prose(**kwargs) -> dict:
         raise GenerationError("model reply contained no JSON object")
@@ -527,8 +527,8 @@ async def test_verifier_generation_error_fails_the_story_instead_of_escaping(
 async def test_qa_generation_error_fails_the_story_instead_of_escaping(
     postgres_url: str, monkeypatch: pytest.MonkeyPatch
 ):
-    import forge.orchestration.graph as graph_module
-    from forge.services.generation import GenerationError
+    import elstin.orchestration.graph as graph_module
+    from elstin.services.generation import GenerationError
 
     async def qa_provider_down(**kwargs) -> dict:
         raise GenerationError("epic QA failed via openai: service unavailable")
@@ -553,9 +553,9 @@ async def test_gate_and_verifier_populate_the_run_outcome_counters(
     a high gate_failures with a low verifier_rejections means it is
     catching broken builds before the expensive reviewer sees them.
     Recorded by the graph nodes themselves, so this proves the wiring, not
-    just the service (see forge/db/models/run_outcome.py)."""
-    import forge.orchestration.graph as graph_module
-    from forge.services.usage import get_run_outcome
+    just the service (see elstin/db/models/run_outcome.py)."""
+    import elstin.orchestration.graph as graph_module
+    from elstin.services.usage import get_run_outcome
 
     gate_results = [_failing_gate(blockers=["alpha: analyze failed"]), {"passed": True, "issues": [], "required_fixes": []}]
 
@@ -591,9 +591,9 @@ async def test_a_failed_verifier_is_still_counted_as_a_run(
     """Regression: the counter sat after the error handler returned, so the
     one case worth measuring — how often a cheap model fails to return
     usable JSON — was the case the table omitted."""
-    import forge.orchestration.graph as graph_module
-    from forge.services.generation import GenerationError
-    from forge.services.usage import get_run_outcome
+    import elstin.orchestration.graph as graph_module
+    from elstin.services.generation import GenerationError
+    from elstin.services.usage import get_run_outcome
 
     async def verifier_gets_prose(**kwargs) -> dict:
         raise GenerationError("model reply contained no JSON object")
@@ -622,7 +622,7 @@ async def test_a_run_with_nothing_to_verify_fails_without_sending_dev_back(
     This one cannot: dev may only write files the plan names, and the
     rejection says the plan names none. Routing it back would buy three
     more no-op passes at model prices before the run failed anyway."""
-    import forge.orchestration.graph as graph_module
+    import elstin.orchestration.graph as graph_module
 
     dev_passes = {"count": 0}
     fake_dev = graph_module.run_dev
@@ -667,8 +667,8 @@ async def test_a_planner_that_cannot_produce_a_usable_plan_fails_the_run(
     dispatched again, re-planning and re-failing every cycle forever. It
     has to end as a failure a human sees, and it must not reach dev, which
     would be scoped to write the files of a plan that does not exist."""
-    import forge.orchestration.graph as graph_module
-    from forge.agents.roles.planner_loop import PlannerLoopError
+    import elstin.orchestration.graph as graph_module
+    from elstin.agents.roles.planner_loop import PlannerLoopError
 
     dev_passes = {"count": 0}
     fake_dev = graph_module.run_dev

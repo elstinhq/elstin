@@ -5,6 +5,10 @@ import type {
   Epic,
   EpicUsage,
   ExternalChangeAction,
+  PoDraft,
+  PoModePreview,
+  PoSession,
+  PoSessionSummary,
   Project,
   ProjectLesson,
   ProjectRepo,
@@ -54,6 +58,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 const json = (body: unknown): RequestInit => ({ method: "POST", body: JSON.stringify(body) });
 const put = (body: unknown): RequestInit => ({ method: "PUT", body: JSON.stringify(body) });
 
+// One answer to one of the PO agent's open questions: an option, or the
+// person's own words (both is fine — the words qualify the option).
+export interface PoAnswerInput {
+  question_id: string;
+  option_id?: string | null;
+  text?: string | null;
+}
+
 export const api = {
   // -- projects --------------------------------------------------------
   listProjects: () => request<Project[]>("/api/projects"),
@@ -75,7 +87,7 @@ export const api = {
   // Read-only: is this folder a git repo, or one holding repos to pick from?
   scanFolder: (path: string, projectId?: number) =>
     request<ScanFolderResult>("/api/projects/scan-folder", json({ path, project_id: projectId ?? null })),
-  // The project and everything forge holds for it; attached folders stay, GitHub/JIRA untouched.
+  // The project and everything elstin holds for it; attached folders stay, GitHub/JIRA untouched.
   deleteProject: (id: number) => request<DeleteProjectReport>(`/api/projects/${id}`, { method: "DELETE" }),
 
   // -- folders (project repos) -----------------------------------------
@@ -106,7 +118,7 @@ export const api = {
   saveRepoGuide: (projectId: number, repoId: number, content: string) =>
     request<RepoGuide>(`/api/projects/${projectId}/repos/${repoId}/guide`, put({ content })),
 
-  // -- lessons forge proposed from its runs -------------------------------
+  // -- lessons elstin proposed from its runs -------------------------------
   // Only "accepted" ones are shown to the planner and dev. `text` is a
   // person's edit before accepting; both fields are optional but not both absent.
   listLessons: (projectId: number) => request<ProjectLesson[]>(`/api/projects/${projectId}/lessons`),
@@ -207,4 +219,45 @@ export const api = {
   storyActivityStreamUrl: (storyKey: string) => `/api/stories/${encodeURIComponent(storyKey)}/stream`,
   getStoryUsage: (storyKey: string) => request<StoryUsage>(`/api/stories/${encodeURIComponent(storyKey)}/usage`),
   getStoryPlan: (storyKey: string) => request<StoryPlan>(`/api/stories/${encodeURIComponent(storyKey)}/plan`),
+
+  // -- PO sessions: drafting a backlog with the PO agent --------------------
+  // What mode an epic would get (no key = a brainstorm), read from the ticket
+  // source; nothing is started.
+  previewPoMode: (projectId: number, epicKey: string) =>
+    request<PoModePreview>(`/api/projects/${projectId}/po-mode?epic_key=${encodeURIComponent(epicKey)}`),
+  startPoSession: (projectId: number, body: { brief: string; epic_key?: string | null; jira_project_key?: string | null }) =>
+    request<PoSession>(`/api/projects/${projectId}/po-sessions`, json(body)),
+  listPoSessions: (projectId: number) => request<PoSessionSummary[]>(`/api/projects/${projectId}/po-sessions`),
+  getPoSession: (sessionId: number) => request<PoSession>(`/api/po-sessions/${sessionId}`),
+  // `version` is the draft version the edit was made over; the server refuses (409) one made over a stale draft.
+  savePoDraft: (sessionId: number, draft: PoDraft, version: number) =>
+    request<PoSession>(`/api/po-sessions/${sessionId}/draft`, put({ draft, version })),
+  sendPoMessage: (sessionId: number, message: string) =>
+    request<PoSession & { delivery: "live" | "queued" }>(`/api/po-sessions/${sessionId}/messages`, json({ message })),
+  answerPoQuestions: (sessionId: number, answers: PoAnswerInput[]) =>
+    request<PoSession>(`/api/po-sessions/${sessionId}/answer`, json({ answers })),
+  // Creates the draft in JIRA in the background — or, with `refs`, only those stories; 409 with
+  // the reason when it cannot. A publish that stopped is pressed again and continues where it was.
+  publishPoSession: (sessionId: number, jiraProjectKey?: string | null, refs?: string[]) =>
+    request<PoSession>(`/api/po-sessions/${sessionId}/publish`, json({ jira_project_key: jiraProjectKey ?? null, ...(refs ? { refs } : {}) })),
+  // Let the draft stand on the agent's own best guesses instead of answering its questions.
+  dismissPoQuestions: (sessionId: number) =>
+    request<PoSession>(`/api/po-sessions/${sessionId}/questions/dismiss`, { method: "POST" }),
+  // Post one existing ticket's suggested edit to it as a comment; the ticket's text is not changed.
+  postPoSuggestion: (sessionId: number, key: string) =>
+    request<PoSession>(`/api/po-sessions/${sessionId}/suggestions/post`, json({ key })),
+  cancelPoSession: (sessionId: number) => request<PoSession>(`/api/po-sessions/${sessionId}/cancel`, { method: "POST" }),
+  deletePoSession: (sessionId: number) =>
+    request<{ deleted: number }>(`/api/po-sessions/${sessionId}`, { method: "DELETE" }),
+  // The draft as text, for "Copy as markdown" / "Copy as JSON" — works whether or not elstin may write to JIRA.
+  exportPoSession: async (sessionId: number, format: "markdown" | "json"): Promise<string> => {
+    const res = await fetch(`/api/po-sessions/${sessionId}/export?format=${format}`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new ApiError(body.detail || `Request failed (${res.status})`, res.status);
+    }
+    return format === "json" ? JSON.stringify(await res.json(), null, 2) : res.text();
+  },
+  // Not a fetch: EventSource opens it (see storyActivityStreamUrl).
+  poActivityStreamUrl: (sessionId: number) => `/api/po-sessions/${sessionId}/stream`,
 };

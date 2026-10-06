@@ -1,5 +1,5 @@
-"""Work that already exists for a ticket decides where forge's branches start
-(forge/daemon/prior_work_lookup.py, forge/daemon/main.py's first dispatch).
+"""Work that already exists for a ticket decides where elstin's branches start
+(elstin/daemon/prior_work_lookup.py, elstin/daemon/main.py's first dispatch).
 Real Postgres and git — branches pushed the way a teammate would push them;
 the agents are fakes."""
 from __future__ import annotations
@@ -10,14 +10,14 @@ import subprocess
 import pytest
 from fastapi.testclient import TestClient
 
-import forge.daemon.main as daemon
-from forge.config.store import set_config, set_project_config
-from forge.daemon.prior_work_lookup import look_up_prior_work
-from forge.orchestration.integration import integration_branch_name
-from forge.orchestration.reconciler import Blocked
-from forge.state.manager import StateManager
+import elstin.daemon.main as daemon
+from elstin.config.store import set_config, set_project_config
+from elstin.daemon.prior_work_lookup import look_up_prior_work
+from elstin.orchestration.integration import integration_branch_name
+from elstin.orchestration.reconciler import Blocked
+from elstin.state.manager import StateManager
 
-pytestmark = [pytest.mark.usefixtures("forge_db", "fake_agents"), pytest.mark.asyncio]
+pytestmark = [pytest.mark.usefixtures("elstin_db", "fake_agents"), pytest.mark.asyncio]
 
 
 def _git(repo: str, *args: str) -> str:
@@ -29,7 +29,7 @@ def _is_ancestor(repo: str, older: str, newer: str) -> bool:
 
 
 def _push_branch(repo: str, branch: str, files: dict[str, str]) -> str:
-    """A teammate's branch: committed, pushed, and — as in forge's own clone —
+    """A teammate's branch: committed, pushed, and — as in elstin's own clone —
     present only as `origin/<branch>`."""
     _git(repo, "checkout", "-q", "-b", branch, "main")
     for path, text in files.items():
@@ -57,7 +57,7 @@ def _setup(tmp_path, project_id, repo, deps: dict[str, list[str]]) -> StateManag
 
 
 def _capture_planner(monkeypatch) -> dict[str, dict]:
-    import forge.orchestration.graph as graph
+    import elstin.orchestration.graph as graph
     from tests.conftest import fake_run_planner
 
     seen: dict[str, dict] = {}
@@ -71,7 +71,7 @@ def _capture_planner(monkeypatch) -> dict[str, dict]:
 
 
 def _client() -> TestClient:
-    from forge.app import create_app
+    from elstin.app import create_app
 
     return TestClient(create_app())
 
@@ -87,7 +87,7 @@ async def test_a_story_continues_from_the_branch_its_ticket_already_has(git_repo
     assert story["prior_work"]["repos"]["widgets"]["verdict"] == "continue"
     worktree = story["worktree_path"]
     assert os.path.exists(os.path.join(worktree, "search.py"))
-    assert story["branch"].startswith("feat/ENG-2-")  # forge's own branch...
+    assert story["branch"].startswith("feat/ENG-2-")  # elstin's own branch...
     assert _is_ancestor(worktree, tip, "HEAD")  # ...starting from the teammate's work
     # The planner read that worktree and was told what it already holds.
     assert seen["ENG-2"]["project_path"] == worktree
@@ -105,7 +105,7 @@ async def test_a_story_continues_from_the_branch_its_ticket_already_has(git_repo
 async def test_continued_work_lands_even_when_the_story_needs_no_new_change(git_repo, tmp_path, project_id, monkeypatch):
     """Dev finds the ticket already done by the branch it continued: nothing
     new to write, but the branch's commits still have to reach the epic."""
-    import forge.orchestration.graph as graph
+    import elstin.orchestration.graph as graph
 
     _push_branch(git_repo, "feature/ENG-2-search-api", {"search.py": "def search(): ...\n"})
     sm = _setup(tmp_path, project_id, git_repo, {"ENG-2": []})
@@ -242,7 +242,7 @@ async def test_the_epic_branch_is_made_in_every_repo_and_removed_from_every_repo
 
     epic_branch = integration_branch_name("ENG-1")
     assert _git(api, "branch", "--list", epic_branch)
-    from forge.daemon.ticket_removal import remove_epic
+    from elstin.daemon.ticket_removal import remove_epic
 
     await remove_epic(sm, "ENG-1")
     assert sm.get_epic("ENG-1") is None

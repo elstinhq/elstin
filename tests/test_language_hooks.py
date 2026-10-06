@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 import re
 
-from forge.tools import language_hooks
+from elstin.tools import language_hooks
 
 
 def _touch(path: str, content: str = "") -> None:
@@ -193,7 +193,7 @@ def test_every_test_command_hint_is_a_command_run_command_tool_allows():
     """The fix brief tells dev to run this. One the allowlist refuses sends it
     back with "blocked by safety policy" — which is how a developer
     lost a round on `./mvnw -q -Dtest=...`."""
-    from forge.tools.safe_shell import is_safe_command
+    from elstin.tools.safe_shell import is_safe_command
 
     for profile in language_hooks.all_profiles():
         hint = language_hooks.test_command_hint(profile.key)

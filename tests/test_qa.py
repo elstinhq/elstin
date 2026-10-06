@@ -8,7 +8,7 @@ decides what the human ends up reading.
 """
 from __future__ import annotations
 
-from forge.agents.roles.qa import _test_suite_digest, format_qa_report_comment
+from elstin.agents.roles.qa import _test_suite_digest, format_qa_report_comment
 
 
 def test_digest_reports_a_suite_that_could_not_run_as_not_run():

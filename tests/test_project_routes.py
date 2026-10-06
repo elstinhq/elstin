@@ -1,5 +1,5 @@
 """/api/projects — CRUD, repo attach (which clones — see
-forge/services/repo_clone.py) and detach, and project-scoped config
+elstin/services/repo_clone.py) and detach, and project-scoped config
 overrides. clone_repository is monkeypatched throughout: these are route
 tests, not clone tests (see tests/test_repo_clone.py for those), and a real
 clone needs a real git source."""
@@ -8,14 +8,14 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-import forge.api.project_routes as project_routes
-from forge.services.repo_clone import RepoCloneError
+import elstin.api.project_routes as project_routes
+from elstin.services.repo_clone import RepoCloneError
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
 
 def _client() -> TestClient:
-    from forge.app import create_app
+    from elstin.app import create_app
 
     return TestClient(create_app())
 
@@ -71,7 +71,7 @@ def test_create_project_clone_failure_returns_400(monkeypatch: pytest.MonkeyPatc
 
 
 def test_list_projects_shows_counts():
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     project_id = sm.create_project("Widgets")
@@ -90,7 +90,7 @@ def test_get_project_404_for_unknown():
 
 
 def test_update_project():
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     project_id = StateManager().create_project("Widgets")
 
@@ -101,7 +101,7 @@ def test_update_project():
 
 
 def test_add_and_remove_project_repo(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     monkeypatch.setattr(project_routes, "clone_repository", _fake_clone_into(tmp_path))
     project_id = StateManager().create_project("Widgets")
@@ -117,7 +117,7 @@ def test_add_and_remove_project_repo(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
 
 def test_add_project_repo_clone_failure_returns_400(monkeypatch: pytest.MonkeyPatch):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     def _fail_clone(url, *, dest_base_dir, timeout=300):
         raise RepoCloneError("auth failed")
@@ -144,7 +144,7 @@ def _git_repo_at(path) -> str:
 
 
 def test_scanning_a_folder_that_holds_repos_marks_the_ones_already_attached(tmp_path):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     api = _git_repo_at(tmp_path / "workspace" / "api")
     web = _git_repo_at(tmp_path / "workspace" / "web")
@@ -200,7 +200,7 @@ def test_one_bad_folder_among_several_creates_nothing(tmp_path):
 
 
 def test_attach_an_existing_folder_and_refuse_it_twice(tmp_path):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     folder = _git_repo_at(tmp_path / "shop-app")
     project_id = StateManager().create_project("Shop")
@@ -218,7 +218,7 @@ def test_attach_an_existing_folder_and_refuse_it_twice(tmp_path):
 
 @pytest.mark.parametrize("body", [{}, {"url": "https://example.com/a.git", "path": "/tmp/a"}, {"url": " ", "path": ""}])
 def test_add_repo_needs_exactly_one_of_url_or_path(body):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     project_id = StateManager().create_project("Shop")
     with _client() as client:
@@ -228,7 +228,7 @@ def test_add_repo_needs_exactly_one_of_url_or_path(body):
 
 
 def test_attaching_a_folder_that_is_not_there_explains_docker(tmp_path):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     project_id = StateManager().create_project("Shop")
     with _client() as client:
@@ -257,7 +257,7 @@ def test_removing_an_epics_default_folder_moves_the_epic_to_the_next_one(tmp_pat
     """Every epic is given a default folder automatically and there is no
     control to reassign it, so refusing here (as it used to) made the folder
     impossible to remove."""
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     project_id = sm.create_project("Widgets")
@@ -278,7 +278,7 @@ def test_removing_an_epics_default_folder_moves_the_epic_to_the_next_one(tmp_pat
 
 
 def test_a_folder_with_unfinished_work_in_it_is_not_removed(tmp_path):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     project_id = sm.create_project("Widgets")
@@ -302,7 +302,7 @@ def test_a_folder_with_unfinished_work_in_it_is_not_removed(tmp_path):
 
 
 def test_project_config_set_get_clear_with_fallback():
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     project_id = StateManager().create_project("Widgets")
 
@@ -325,7 +325,7 @@ def test_project_config_set_get_clear_with_fallback():
 
 
 def test_project_config_rejects_non_overridable_key():
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     project_id = StateManager().create_project("Widgets")
 
@@ -354,7 +354,7 @@ def _fake_search(tickets):
             return raw
 
         def compile_filter(self, ticket_filter):
-            from forge.services.jira_filter import build_jql
+            from elstin.services.jira_filter import build_jql
 
             return build_jql(ticket_filter)
 
@@ -368,7 +368,7 @@ def _fake_search(tickets):
 
 
 def test_ticket_filter_round_trips_over_http():
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     project_id = StateManager().create_project("Widgets")
 
@@ -390,7 +390,7 @@ def test_ticket_filter_round_trips_over_http():
 
 
 def test_ticket_filter_rejects_an_empty_query():
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     project_id = StateManager().create_project("Widgets")
 
@@ -400,9 +400,9 @@ def test_ticket_filter_rejects_an_empty_query():
 
 
 def test_ticket_filter_preview_uses_the_unsaved_filter_and_writes_nothing(monkeypatch: pytest.MonkeyPatch):
-    import forge.services.jira_filter as jira_filter
-    from forge.services.jira_service import JiraTicket
-    from forge.state.manager import StateManager
+    import elstin.services.jira_filter as jira_filter
+    from elstin.services.jira_service import JiraTicket
+    from elstin.state.manager import StateManager
 
     project_id = StateManager().create_project("Widgets")
     ticket = JiraTicket(key="ENG-1", summary="s", description="", status="To Do", issue_type="Story", priority=None)
@@ -422,10 +422,10 @@ def test_ticket_filter_preview_uses_the_unsaved_filter_and_writes_nothing(monkey
 
 
 def test_ticket_filter_sync_runs_a_disabled_filter_on_demand(monkeypatch: pytest.MonkeyPatch):
-    import forge.services.epic_sync as epic_sync
-    import forge.services.jira_filter as jira_filter
-    from forge.services.jira_service import JiraTicket
-    from forge.state.manager import StateManager
+    import elstin.services.epic_sync as epic_sync
+    import elstin.services.jira_filter as jira_filter
+    from elstin.services.jira_service import JiraTicket
+    from elstin.state.manager import StateManager
 
     project_id = StateManager().create_project("Widgets")
     ticket = JiraTicket(key="ENG-1", summary="s", description="", status="To Do", issue_type="Story", priority=None)
@@ -449,7 +449,7 @@ def test_ticket_filter_routes_404_on_unknown_project():
 
 
 def test_ticket_filter_sync_without_a_saved_filter_is_a_400():
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     project_id = StateManager().create_project("Widgets")
 

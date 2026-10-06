@@ -17,11 +17,11 @@ import subprocess
 
 import pytest
 
-from forge.config.store import set_config, set_project_config
-from forge.daemon.main import poll_once
-from forge.state.manager import StateManager
+from elstin.config.store import set_config, set_project_config
+from elstin.daemon.main import poll_once
+from elstin.state.manager import StateManager
 
-pytestmark = [pytest.mark.usefixtures("forge_db", "fake_agents"), pytest.mark.asyncio]
+pytestmark = [pytest.mark.usefixtures("elstin_db", "fake_agents"), pytest.mark.asyncio]
 
 
 def _run_git(cmd: list[str], cwd: str) -> None:
@@ -132,8 +132,8 @@ async def test_every_story_gets_the_whole_project_to_read(split_project, monkeyp
     It reads its own repo at its worktree, and every other repo at the epic
     branch's worktree there — never a clone's own checkout, which is frozen
     at clone time and knows nothing of the epic branch."""
-    import forge.orchestration.graph as graph_module
-    from forge.orchestration.integration import integration_branch_name
+    import elstin.orchestration.graph as graph_module
+    from elstin.orchestration.integration import integration_branch_name
     from tests.conftest import fake_run_planner
 
     seen: dict[str, dict] = {}
@@ -165,7 +165,7 @@ async def test_every_story_gets_the_whole_project_to_read(split_project, monkeyp
 async def test_the_branch_and_commit_land_in_the_storys_own_repo(split_project, monkeypatch):
     """A story that writes a file must commit it in its own repo, or the
     push and PR would target the wrong one."""
-    import forge.orchestration.graph as graph_module
+    import elstin.orchestration.graph as graph_module
 
     async def dev_writes_a_file(**kwargs) -> dict:
         with open(os.path.join(kwargs["worktree_path"], "endpoint.py"), "w") as handle:
@@ -206,7 +206,7 @@ async def test_the_branch_and_commit_land_in_the_storys_own_repo(split_project, 
 async def test_repo_override_route_rejects_a_repo_from_another_project(split_project, project_id):
     from fastapi.testclient import TestClient
 
-    from forge.app import create_app
+    from elstin.app import create_app
 
     # The app's lifespan starts the daemon poll loop, which would dispatch the
     # pending story mid-request — and a dispatched story is (correctly) refused
@@ -226,7 +226,7 @@ async def test_repo_override_route_refuses_a_story_already_in_flight(split_proje
     moving the target underneath them would orphan all three."""
     from fastapi.testclient import TestClient
 
-    from forge.app import create_app
+    from elstin.app import create_app
 
     split_project["sm"].set_story_status("ENG-2", "dispatched")
 
@@ -250,8 +250,8 @@ async def test_a_single_story_writes_every_repo_its_plan_names(split_project, mo
     The API worktree dev creates branches from the epic branch in the API
     repo, not from its main: it has what another story already landed
     there."""
-    import forge.orchestration.graph as graph_module
-    from forge.orchestration.integration import integration_branch_name
+    import elstin.orchestration.graph as graph_module
+    from elstin.orchestration.integration import integration_branch_name
 
     api_repo = split_project["api"]
     epic_branch = integration_branch_name("ENG-1")
@@ -280,7 +280,7 @@ async def test_a_single_story_writes_every_repo_its_plan_names(split_project, mo
     async def dev_writes_both(**kwargs):
         # The real dev loop is what creates the extra worktree, so drive
         # the real one rather than faking its result.
-        from forge.agents.roles.dev_loop import run_dev
+        from elstin.agents.roles.dev_loop import run_dev
 
         return await run_dev(**kwargs)
 
@@ -290,7 +290,7 @@ async def test_a_single_story_writes_every_repo_its_plan_names(split_project, mo
         name = "openai"
 
         def __init__(self):
-            from forge.llm.base import Capabilities
+            from elstin.llm.base import Capabilities
 
             self.capabilities = Capabilities()
             self._turns = [
@@ -302,7 +302,7 @@ async def test_a_single_story_writes_every_repo_its_plan_names(split_project, mo
             ]
 
         async def complete(self, request):
-            from forge.llm.types import LlmResponse, TextBlock, ToolCallBlock, Usage
+            from elstin.llm.types import LlmResponse, TextBlock, ToolCallBlock, Usage
 
             step = self._turns.pop(0)
             if step is None:
@@ -314,7 +314,7 @@ async def test_a_single_story_writes_every_repo_its_plan_names(split_project, mo
                 stop_reason="tool_calls", usage=Usage(), model="m",
             )
 
-    import forge.agents.roles.dev_loop as dev_loop_module
+    import elstin.agents.roles.dev_loop as dev_loop_module
 
     monkeypatch.setattr(graph_module, "run_planner", planner_spanning_both)
     monkeypatch.setattr(graph_module, "run_dev", dev_writes_both)

@@ -2,9 +2,9 @@
 
 A run that fails because the provider refused calls on a limit (a rate window,
 or a quota that resets) used to be a plain "failed" story waiting for a person.
-When the provider says when the limit lifts, forge records the instant here with
+When the provider says when the limit lifts, elstin records the instant here with
 `parked_reason = 'usage_limit'`, and the daemon retries the story on its own
-once it has passed (forge/daemon/main.py's `_resume_stories_past_their_limit`).
+once it has passed (elstin/daemon/main.py's `_resume_stories_past_their_limit`).
 The story stays "failed" until then, so nothing downstream of it starts, exactly
 as before.
 

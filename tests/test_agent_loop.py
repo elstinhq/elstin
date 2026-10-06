@@ -1,14 +1,14 @@
-"""forge/agents/loop.py — the shared agentic loop every LLM-driven role
+"""elstin/agents/loop.py — the shared agentic loop every LLM-driven role
 (dev, planner) runs through. Exercised entirely against a fake
 LlmProvider — no network, no real provider SDK — since the loop only ever
-touches forge/llm/types.py's normalized vocabulary and forge/llm/base.py's
+touches elstin/llm/types.py's normalized vocabulary and elstin/llm/base.py's
 Protocol, never a concrete adapter.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from forge.agents.loop import (
+from elstin.agents.loop import (
     ARGUMENT_TOMBSTONE,
     REMINDER_TOMBSTONE,
     TERMINAL_END_TURN,
@@ -18,9 +18,9 @@ from forge.agents.loop import (
     LoopConfig,
     run_agent_loop,
 )
-from forge.llm.base import Capabilities
-from forge.llm.errors import LlmContextOverflowError, LlmRateLimitError
-from forge.llm.types import (
+from elstin.llm.base import Capabilities
+from elstin.llm.errors import LlmContextOverflowError, LlmRateLimitError
+from elstin.llm.types import (
     LlmRequest,
     LlmResponse,
     TextBlock,
@@ -190,7 +190,7 @@ async def test_max_budget_reached_is_a_soft_stop():
         _tool_call_response("t", {}, model="gpt-5.1"),
         _tool_call_response("t", {}, model="gpt-5.1"),
     ])
-    # gpt-5.1 costs $1.25/mtok input in forge/llm/pricing.py; a single
+    # gpt-5.1 costs $1.25/mtok input in elstin/llm/pricing.py; a single
     # 10-input-token call is far too cheap to hit a real budget, so use an
     # artificially tiny cap to force the trip on the first turn.
     result = await run_agent_loop(
@@ -202,7 +202,7 @@ async def test_max_budget_reached_is_a_soft_stop():
 
 
 async def test_transient_error_is_retried_then_succeeds(monkeypatch):
-    import forge.agents.loop as loop_mod
+    import elstin.agents.loop as loop_mod
 
     monkeypatch.setattr(loop_mod, "retry_backoff_seconds", lambda attempt: 0)
     provider = FakeProvider(script=[LlmRateLimitError("slow down"), _text_response("ok now")])
@@ -215,8 +215,8 @@ async def test_transient_error_is_retried_then_succeeds(monkeypatch):
 
 
 async def test_non_retryable_error_ends_loop_as_error(monkeypatch):
-    import forge.agents.loop as loop_mod
-    from forge.llm.errors import LlmBadRequestError
+    import elstin.agents.loop as loop_mod
+    from elstin.llm.errors import LlmBadRequestError
 
     monkeypatch.setattr(loop_mod, "retry_backoff_seconds", lambda attempt: 0)
     provider = FakeProvider(script=[LlmBadRequestError("bad schema")])
@@ -229,7 +229,7 @@ async def test_non_retryable_error_ends_loop_as_error(monkeypatch):
 
 
 async def test_retries_exhausted_ends_loop_as_error(monkeypatch):
-    import forge.agents.loop as loop_mod
+    import elstin.agents.loop as loop_mod
 
     monkeypatch.setattr(loop_mod, "retry_backoff_seconds", lambda attempt: 0)
     provider = FakeProvider(script=[LlmRateLimitError("1"), LlmRateLimitError("2"), LlmRateLimitError("3")])
@@ -241,8 +241,8 @@ async def test_retries_exhausted_ends_loop_as_error(monkeypatch):
 
 
 async def test_a_timed_out_call_is_retried_once_and_the_hook_says_so(monkeypatch):
-    import forge.agents.loop as loop_mod
-    from forge.llm.errors import LlmTimeoutError
+    import elstin.agents.loop as loop_mod
+    from elstin.llm.errors import LlmTimeoutError
 
     monkeypatch.setattr(loop_mod, "retry_backoff_seconds", lambda attempt: 0)
     provider = FakeProvider(script=[LlmTimeoutError("no response within 900s"), _text_response("ok now")])
@@ -260,8 +260,8 @@ async def test_a_timed_out_call_is_retried_once_and_the_hook_says_so(monkeypatch
 async def test_a_second_timeout_ends_the_turn_instead_of_waiting_out_a_third(monkeypatch):
     """A provider that stalled once tends to stall again, and each attempt
     costs the whole deadline: two tries, not three."""
-    import forge.agents.loop as loop_mod
-    from forge.llm.errors import LlmTimeoutError
+    import elstin.agents.loop as loop_mod
+    from elstin.llm.errors import LlmTimeoutError
 
     monkeypatch.setattr(loop_mod, "retry_backoff_seconds", lambda attempt: 0)
     provider = FakeProvider(script=[LlmTimeoutError("t1"), LlmTimeoutError("t2"), _text_response("never reached")])
@@ -273,8 +273,8 @@ async def test_a_second_timeout_ends_the_turn_instead_of_waiting_out_a_third(mon
 
 
 async def test_a_timeout_does_not_use_up_the_retries_other_errors_are_owed(monkeypatch):
-    import forge.agents.loop as loop_mod
-    from forge.llm.errors import LlmTimeoutError
+    import elstin.agents.loop as loop_mod
+    from elstin.llm.errors import LlmTimeoutError
 
     monkeypatch.setattr(loop_mod, "retry_backoff_seconds", lambda attempt: 0)
     provider = FakeProvider(script=[LlmTimeoutError("t"), LlmRateLimitError("429"), _text_response("made it")])
@@ -285,7 +285,7 @@ async def test_a_timeout_does_not_use_up_the_retries_other_errors_are_owed(monke
 
 
 async def test_a_failing_retry_hook_never_costs_the_run(monkeypatch):
-    import forge.agents.loop as loop_mod
+    import elstin.agents.loop as loop_mod
 
     monkeypatch.setattr(loop_mod, "retry_backoff_seconds", lambda attempt: 0)
     provider = FakeProvider(script=[LlmRateLimitError("429"), _text_response("fine")])
@@ -414,7 +414,7 @@ async def test_api_duration_is_measured():
 
 def _turn(call_id: str, result: str, *, name: str = "read_file_tool", args: dict | None = None):
     """One assistant tool-call turn plus its answering tool message."""
-    from forge.llm.types import Message
+    from elstin.llm.types import Message
 
     return [
         Message(role="assistant", content=[ToolCallBlock(id=call_id, name=name, arguments=args or {"path": call_id})]),
@@ -426,7 +426,7 @@ def test_compaction_tombstones_old_large_tool_results_and_keeps_recent_turns():
     """No LLM call, no message removed: results older than the last N
     turns are replaced in place with a fixed tombstone; the last N turns
     and the opening plan message are untouched."""
-    from forge.agents.loop import TOMBSTONE, _compact_history
+    from elstin.agents.loop import TOMBSTONE, _compact_history
 
     big = "x" * 5_000
     history = [text_message("user", "the plan")]
@@ -453,7 +453,7 @@ def test_compaction_leaves_small_results_alone_and_is_idempotent():
     """Short confirmations ("wrote file x") are the load-bearing ones and
     cost less than the tombstone; and a second pass must not change a
     byte, or the cached prefix would churn every turn."""
-    from forge.agents.loop import _compact_history
+    from elstin.agents.loop import _compact_history
 
     history = [text_message("user", "plan")]
     history += _turn("c0", "Successfully wrote file to a.py.", name="write_file_tool")
@@ -471,7 +471,7 @@ def test_compaction_leaves_small_results_alone_and_is_idempotent():
 
 
 def test_compaction_with_fewer_turns_than_keep_recent_is_a_noop():
-    from forge.agents.loop import _compact_history
+    from elstin.agents.loop import _compact_history
 
     history = [text_message("user", "plan")] + _turn("c0", "x" * 5_000) + _turn("c1", "x" * 5_000)
 
@@ -494,16 +494,16 @@ async def test_compaction_makes_no_provider_call():
     assert len(provider.calls) == 1
     assert result.is_error is False
     sent = provider.calls[0].messages
-    from forge.agents.loop import TOMBSTONE
+    from elstin.agents.loop import TOMBSTONE
 
     assert sent[2].content[0].content == TOMBSTONE  # old result pruned in what was sent
     assert sent[-1].content[0].content == "x" * 5_000  # recent turn intact
 
 
 async def test_server_side_compaction_suppresses_our_own():
-    """A provider that compacts server-side must not also get forge's
+    """A provider that compacts server-side must not also get elstin's
     tombstoning on top."""
-    from forge.agents.loop import TOMBSTONE
+    from elstin.agents.loop import TOMBSTONE
 
     provider = FakeProvider(
         script=[_text_response("done")],
@@ -526,8 +526,8 @@ async def test_size_estimate_counts_image_payloads():
     """A planner run with a JIRA screenshot attached carries megabytes in
     one ImageBlock. Ignoring that made the compaction trigger report ~0
     for the single largest thing in the request."""
-    from forge.agents.loop import _estimate_message_chars
-    from forge.llm.types import ImageBlock, Message
+    from elstin.agents.loop import _estimate_message_chars
+    from elstin.llm.types import ImageBlock, Message
 
     with_image = [Message(role="user", content=[ImageBlock(media_type="image/png", data="A" * 10_000)])]
 
@@ -621,7 +621,7 @@ async def test_mutating_tools_never_overlap_reads_or_each_other():
 
 
 async def test_identical_call_in_consecutive_turn_is_intercepted_with_nudge():
-    from forge.agents.loop import REPEAT_CALL_NUDGE
+    from elstin.agents.loop import REPEAT_CALL_NUDGE
 
     calls: list[str] = []
 
@@ -645,7 +645,7 @@ async def test_identical_call_in_consecutive_turn_is_intercepted_with_nudge():
 
 
 async def test_repeat_guard_normalizes_argument_order_and_catches_same_turn_duplicates():
-    from forge.agents.loop import REPEAT_CALL_NUDGE
+    from elstin.agents.loop import REPEAT_CALL_NUDGE
 
     calls: list[dict] = []
 
@@ -711,7 +711,7 @@ async def test_repeat_guard_only_catches_consecutive_repeats():
 
 
 async def test_no_progress_for_max_idle_turns_is_a_soft_stop():
-    from forge.agents.loop import TERMINAL_NO_PROGRESS
+    from elstin.agents.loop import TERMINAL_NO_PROGRESS
 
     provider = FakeProvider(script=[
         _tool_call_response("read_file_tool", {"path": "a"}, call_id="c1"),
@@ -1023,7 +1023,7 @@ async def test_a_bookkeeping_tool_does_not_clear_the_repeat_guard():
     """Regression: any non-read-only tool used to reset the guard, so the
     checklist tool the dev prompt tells the model to call constantly
     switched off the very protection weak models need."""
-    from forge.agents.loop import REPEAT_CALL_NUDGE
+    from elstin.agents.loop import REPEAT_CALL_NUDGE
 
     reads: list[str] = []
 

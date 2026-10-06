@@ -1,12 +1,12 @@
-"""forge/tools/safe_shell.py — the run_command_tool allowlist. An allowed
+"""elstin/tools/safe_shell.py — the run_command_tool allowlist. An allowed
 prefix is not enough: git flags that write or read outside the worktree
 must be refused even though `git diff` itself is allowed."""
 from __future__ import annotations
 
 import pytest
 
-from forge.tools import safe_shell
-from forge.tools.dev_tools import make_dev_tools
+from elstin.tools import safe_shell
+from elstin.tools.dev_tools import make_dev_tools
 
 
 @pytest.mark.parametrize(

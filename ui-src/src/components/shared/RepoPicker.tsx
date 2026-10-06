@@ -2,16 +2,16 @@ import type { ScanFolderResult } from "../../types/api";
 import { cn } from "../../lib/utils";
 
 // A folder that is not a git repo but holds several (one checkout per
-// service), like ~/dev/mono: forge works inside one repository at a time — a
+// service), like ~/dev/mono: elstin works inside one repository at a time — a
 // branch and a worktree per story, local merges, the epic's pull request — so
 // each repo picked here is attached as a folder of its own
-// (forge/services/repo_clone.py's scan_folder). Every folder a project has is
+// (elstin/services/repo_clone.py's scan_folder). Every folder a project has is
 // read while planning, so this asks rather than taking them all.
 //
 // Two more choices per pick. A repo can be attached read-only — read by every
 // run, never in a plan (a shared contract repo, say). And the folder itself,
 // minus its repos and data files, can be read for context: its CLAUDE.md about
-// how the repos relate, its docs (forge/tools/reference_folder.py).
+// how the repos relate, its docs (elstin/tools/reference_folder.py).
 
 export interface RepoSelection {
   picked: string[];
@@ -66,7 +66,7 @@ export function RepoPicker({
   return (
     <div className="flex flex-col gap-2">
       <p className="text-muted-foreground text-xs">
-        This folder isn't a git repo itself, but it holds {scan.repos.length}. forge works inside one repo at a time, so
+        This folder isn't a git repo itself, but it holds {scan.repos.length}. Elstin works inside one repo at a time, so
         each one you pick becomes a folder of this project. Pick only what the tickets touch — every folder is read while
         planning. Mark a repo read-only to have it read but never changed.
       </p>

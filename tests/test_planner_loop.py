@@ -1,6 +1,6 @@
-"""forge/agents/roles/planner_loop.py — the planner's structured-output
+"""elstin/agents/roles/planner_loop.py — the planner's structured-output
 schema, its retry policy, and how it feeds attachments/tools into
-forge/agents/loop.py. Faked at the forge/llm/ boundary (get_provider), so
+elstin/agents/loop.py. Faked at the elstin/llm/ boundary (get_provider), so
 the real prompt building, tool wiring and schema all run."""
 from __future__ import annotations
 
@@ -8,13 +8,13 @@ from dataclasses import dataclass, field
 
 import pytest
 
-import forge.agents.roles.planner_loop as planner_module
-from forge.agents.roles.planner_loop import _PLAN_JSON_SCHEMA, PlannerLoopError, run_planner
-from forge.llm.base import Capabilities
-from forge.llm.errors import LlmBadRequestError
-from forge.llm.types import ImageBlock, LlmRequest, LlmResponse, TextBlock, Usage
+import elstin.agents.roles.planner_loop as planner_module
+from elstin.agents.roles.planner_loop import _PLAN_JSON_SCHEMA, PlannerLoopError, run_planner
+from elstin.llm.base import Capabilities
+from elstin.llm.errors import LlmBadRequestError
+from elstin.llm.types import ImageBlock, LlmRequest, LlmResponse, TextBlock, Usage
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
 _MINIMAL_PLAN = {
     "feature_summary": "Add a widget",
@@ -71,7 +71,7 @@ def _no_plan_response() -> LlmResponse:
 
 
 def _configure(monkeypatch, provider, *, explorers: bool = False) -> None:
-    from forge.config.store import set_config
+    from elstin.config.store import set_config
 
     set_config("openai_api_key", "sk-test")
     # Explorers are on by default in production, but they add a scoping
@@ -162,7 +162,7 @@ async def test_returns_plan_questions_and_acceptance_criteria(monkeypatch, git_r
 
 
 async def test_hard_provider_error_is_not_retried(monkeypatch, git_repo):
-    """forge/agents/loop.py already exhausted its own retries for anything
+    """elstin/agents/loop.py already exhausted its own retries for anything
     retryable, so an errored loop result will fail identically on a
     retry — re-running it just pays for the same failure N times."""
     provider = FakeProvider(script=[LlmBadRequestError("schema rejected")])
@@ -177,7 +177,7 @@ async def test_hard_provider_error_is_not_retried(monkeypatch, git_repo):
 async def test_missing_plan_is_retried_then_raises(monkeypatch, git_repo):
     """The one case retrying *is* worth it: the run completed fine, the
     model just didn't emit a valid plan object."""
-    from forge.config.store import set_config
+    from elstin.config.store import set_config
 
     provider = FakeProvider(script=[_no_plan_response(), _no_plan_response()])
     _configure(monkeypatch, provider)
@@ -272,7 +272,7 @@ async def test_a_mangled_answer_is_sent_back_for_that_and_the_feed_records_what_
     and the activity feed — which cuts the plan's text before its file lists
     — records which fields actually arrived, so the next one is diagnosable
     without a second run."""
-    from forge.services.run_activity import list_activity
+    from elstin.services.run_activity import list_activity
 
     provider = FakeProvider(script=[_plan_response(_LEAKED_PLAN), _plan_response()])
     _configure(monkeypatch, provider)
@@ -312,7 +312,7 @@ async def test_stub_answers_fail_the_run_saying_they_were_stubs(monkeypatch, git
     """The retries of one run came back as `"feature_summary": "placeholder"`
     with nothing else in them: a model answering the JSON-only format before
     it had looked at anything."""
-    from forge.config.store import set_config
+    from elstin.config.store import set_config
 
     stub = {**_MINIMAL_PLAN, "feature_summary": "placeholder", "plan_markdown": "# placeholder",
             "files_to_create": [], "files_to_modify": [], "acceptance_criteria": []}
@@ -364,7 +364,7 @@ async def test_a_plan_with_files_but_no_acceptance_criteria_is_rejected(monkeypa
 async def test_an_unusable_plan_that_never_improves_fails_the_run(monkeypatch, git_repo):
     """Better a story a human can see failed than a green PR with nothing
     in it."""
-    from forge.config.store import set_config
+    from elstin.config.store import set_config
 
     empty = {**_MINIMAL_PLAN, "files_to_create": [], "files_to_modify": [], "acceptance_criteria": []}
     provider = FakeProvider(script=[_plan_response(empty), _plan_response(empty)])
@@ -405,7 +405,7 @@ async def test_a_change_in_a_read_only_repo_is_set_aside_not_rejected(monkeypatc
     attempt, no retry — and the fixes are in the activity feed."""
     import os
 
-    from forge.services.run_activity import list_activity
+    from elstin.services.run_activity import list_activity
 
     portal, contracts = tmp_path / "portal", tmp_path / "contracts"
     (portal / "src").mkdir(parents=True)
@@ -523,7 +523,7 @@ async def test_not_configured_raises_planner_error(git_repo):
         await run_planner(user_request="go", project_path=git_repo)
 
 
-# --- explorer fan-out (forge/agents/roles/explorer.py) ------------------
+# --- explorer fan-out (elstin/agents/roles/explorer.py) ------------------
 
 
 def _scope_response(*areas: dict) -> LlmResponse:
@@ -663,7 +663,7 @@ async def test_exploration_and_the_plan_loop_split_one_planner_cap(monkeypatch, 
     """Regression: explorers were funded from half the cap and the plan
     loop was then handed the full cap again, so the phase could spend
     about 1.5x its limit and breach the story ceiling with it."""
-    from forge.config.store import set_config
+    from elstin.config.store import set_config
 
     provider = FakeProvider(script=[
         _scope_response({"name": "ui", "question": "How is it rendered?", "path_hints": []}),
@@ -673,7 +673,7 @@ async def test_exploration_and_the_plan_loop_split_one_planner_cap(monkeypatch, 
     _configure(monkeypatch, provider, explorers=True)
     set_config("planner_sdk_max_budget_usd", "1.00")
 
-    import forge.agents.roles.planner_loop as module
+    import elstin.agents.roles.planner_loop as module
 
     budgets: list[float] = []
     real_loop = module.run_agent_loop
@@ -698,8 +698,8 @@ async def test_exploration_and_the_plan_loop_split_one_planner_cap(monkeypatch, 
 async def test_the_plan_loop_keeps_the_whole_cap_when_nothing_was_explored(monkeypatch, git_repo):
     """No fan-out means no reservation to honour, so halving would be a
     silent, unasked-for tightening of the operator's cap."""
-    import forge.agents.roles.planner_loop as module
-    from forge.config.store import set_config
+    import elstin.agents.roles.planner_loop as module
+    from elstin.config.store import set_config
 
     captured = {}
     real_loop = module.run_agent_loop
@@ -735,7 +735,7 @@ async def _models_used(monkeypatch, git_repo, **kwargs) -> tuple[list[str], list
 
 
 async def test_a_projects_models_split_the_plan_from_the_investigation(monkeypatch, git_repo, project_id):
-    from forge.config.store import set_project_config
+    from elstin.config.store import set_project_config
 
     set_project_config(project_id, "planner_sdk_model", "project-big")
     set_project_config(project_id, "planner_explorer_model", "project-cheap")
@@ -747,7 +747,7 @@ async def test_a_projects_models_split_the_plan_from_the_investigation(monkeypat
 
 
 async def test_investigation_follows_the_projects_planner_model_when_no_explorer_model_is_set(monkeypatch, git_repo, project_id):
-    from forge.config.store import set_project_config
+    from elstin.config.store import set_project_config
 
     set_project_config(project_id, "planner_sdk_model", "project-big")
 
@@ -757,7 +757,7 @@ async def test_investigation_follows_the_projects_planner_model_when_no_explorer
 
 
 async def test_the_global_explorer_model_applies_when_the_project_sets_none(monkeypatch, git_repo, project_id):
-    from forge.config.store import set_config, set_project_config
+    from elstin.config.store import set_config, set_project_config
 
     set_config("planner_explorer_model", "global-cheap")
     set_project_config(project_id, "planner_sdk_model", "project-big")
@@ -768,7 +768,7 @@ async def test_the_global_explorer_model_applies_when_the_project_sets_none(monk
 
 
 async def test_a_run_with_no_project_uses_the_global_models(monkeypatch, git_repo):
-    from forge.config.store import set_config
+    from elstin.config.store import set_config
 
     set_config("planner_sdk_model", "global-big")
     set_config("planner_explorer_model", "global-cheap")

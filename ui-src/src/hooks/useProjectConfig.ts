@@ -4,7 +4,7 @@ import { queryKeys } from "../lib/queryClient";
 
 // Where a model setting's suggestions come from. Changing any of these changes
 // which provider is asked, so the suggestions already fetched are someone
-// else's. (Server side: forge/llm/registry.py.)
+// else's. (Server side: elstin/llm/registry.py.)
 const CONNECTION_KEYS = new Set(["llm_provider", "llm_base_url", "openai_api_key"]);
 
 export function useProjectConfig(projectId: number) {

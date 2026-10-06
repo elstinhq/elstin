@@ -7,13 +7,13 @@ import pytest
 from fastapi.testclient import TestClient
 from jira import JIRAError
 
-import forge.api.epic_routes as epic_routes
+import elstin.api.epic_routes as epic_routes
 
-pytestmark = pytest.mark.usefixtures("forge_db", "fake_agents")
+pytestmark = pytest.mark.usefixtures("elstin_db", "fake_agents")
 
 
 def _client() -> TestClient:
-    from forge.app import create_app
+    from elstin.app import create_app
 
     return TestClient(create_app())
 
@@ -26,7 +26,7 @@ def test_list_epics_empty():
 
 
 def test_list_epics_includes_stories_and_pr_state(project_id):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2"]])
@@ -50,7 +50,7 @@ def test_list_epics_includes_stories_and_pr_state(project_id):
 
 
 def test_get_epic_by_key(project_id):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2"]])
@@ -70,10 +70,10 @@ def test_get_epic_404_for_unknown_key():
 
 
 def test_sync_epic_returns_epic_shape_with_no_repo(project_id, monkeypatch: pytest.MonkeyPatch):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     def fake_sync(jira_key: str, *, project_id: int):
-        from forge.services.external_sync import ReconcileReport
+        from elstin.services.external_sync import ReconcileReport
 
         StateManager().create_epic(jira_key, project_id=project_id, levels=[["ENG-2"]])
         StateManager().create_story("ENG-2", epic_key=jira_key, wave=0, summary="Add a widget")
@@ -132,7 +132,7 @@ def test_sync_epic_404_when_jira_ticket_not_found(project_id, monkeypatch: pytes
 def test_epic_phase_is_read_off_its_stories(project_id):
     """Nothing ever advances the stored phase past its "planning" default, so
     an epic whose only story was waiting to open its PR still said planning."""
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2"]])
@@ -151,7 +151,7 @@ def test_epic_phase_is_read_off_its_stories(project_id):
 
 
 def test_sync_epic_fields_refreshes_prose(project_id, monkeypatch: pytest.MonkeyPatch):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic(
@@ -190,7 +190,7 @@ def test_sync_epic_fields_404_for_unknown_key(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_set_epic_repo(project_id):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2"]])
@@ -203,7 +203,7 @@ def test_set_epic_repo(project_id):
 
 
 def test_set_epic_repo_400_for_repo_from_another_project(project_id):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2"]])
@@ -222,7 +222,7 @@ def test_set_epic_repo_404_for_unknown_epic():
 
 
 def test_set_epic_gate_persists_and_toggles(project_id):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2"]])
@@ -249,7 +249,7 @@ def test_projects_page_serves():
     with _client() as client:
         response = client.get("/projects")
         assert response.status_code == 200
-        assert "code_forge" in response.text
+        assert "elstin" in response.text
 
         root = client.get("/")
         assert root.status_code == 200
@@ -259,4 +259,4 @@ def test_project_detail_page_serves(project_id):
     with _client() as client:
         response = client.get(f"/projects/{project_id}")
         assert response.status_code == 200
-        assert "code_forge" in response.text
+        assert "elstin" in response.text

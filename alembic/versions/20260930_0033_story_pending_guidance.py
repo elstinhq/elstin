@@ -2,7 +2,7 @@
 
 A person can send a message to a story's agent while it works
 (POST /api/stories/{key}/guidance); the agent reads it at the start of its next
-turn (forge/agents/loop.py's `pending_messages`), and it is then removed. Until
+turn (elstin/agents/loop.py's `pending_messages`), and it is then removed. Until
 then it waits here as [{text, at}], oldest first, so a message sent between two
 turns is not lost and nothing needs to be held in the process's memory.
 

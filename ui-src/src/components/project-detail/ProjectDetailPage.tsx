@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react";
-import { Cog, Filter, Plus } from "lucide-react";
+import { Cog, Filter, Plus, Sparkles } from "lucide-react";
 import { AppShell } from "../shared/AppShell";
 import { FoldersPanel } from "./FoldersPanel";
 import { LessonsPanel } from "./LessonsPanel";
+import { PoSessionsPanel } from "./po/PoSessionsPanel";
 import { EpicList } from "./EpicList";
 import { DetailDialog, type DetailTarget } from "./DetailDialog";
 import { SyncTicketDialog } from "./SyncTicketDialog";
@@ -104,6 +105,12 @@ export function ProjectDetailPage({ projectId }: { projectId: number }) {
                 <Plus />
                 Add ticket
               </Button>
+              <Button variant="outline" asChild title="Have the PO agent draft epics, stories and tasks">
+                <a href={`/projects/${projectId}/po/new`}>
+                  <Sparkles />
+                  Plan backlog
+                </a>
+              </Button>
               <Button variant="outline" onClick={() => setFilterDialogOpen(true)}>
                 <Filter />
                 Ticket filter
@@ -123,6 +130,8 @@ export function ProjectDetailPage({ projectId }: { projectId: number }) {
             <FoldersPanel projectId={projectId} />
 
             <LessonsPanel projectId={projectId} />
+
+            <PoSessionsPanel projectId={projectId} />
 
             <Button variant="outline" onClick={() => setSettingsDialogOpen(true)}>
               <Cog />

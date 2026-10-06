@@ -16,6 +16,7 @@ import { useToast } from "../../lib/toast";
 import { displayKey, sourceLabel, ticketUrl } from "../../lib/ticketSource";
 import { cn } from "../../lib/utils";
 import { useSyncEpicFields } from "../../hooks/useEpics";
+import { api } from "../../lib/api";
 import type { Epic, ExternalChangeAction, PriorWork, Story } from "../../types/api";
 import { Button } from "../ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
@@ -72,7 +73,7 @@ function KindDetailValue({ projectId, story }: { projectId: number; story: Story
       </span>
       {/* Showing which rule fired matters: the classification is inferred
           from the ticket's prose, so a human deciding whether to override it
-          needs to see what forge read, not just what it concluded. */}
+          needs to see what Elstin read, not just what it concluded. */}
       {story.kind_reason ? <span className="text-muted-foreground text-xs">({story.kind_reason})</span> : null}
       {canReclassify ? (
         <Button variant="outline" size="sm" loading={setKind.isPending} onClick={() => setKind.mutate({ storyKey: story.jira_key, kind: next })}>
@@ -197,8 +198,8 @@ function ClarificationPanel({ projectId, story }: { projectId: number; story: St
   );
 }
 
-// What already existed for this ticket before forge made its branch
-// (forge/services/prior_work.py), per repo: the branch its work continues
+// What already existed for this ticket before elstin made its branch
+// (elstin/services/prior_work.py), per repo: the branch its work continues
 // from, the other branches found, and work already in the default branch.
 function PriorWorkRow({ prior }: { prior: PriorWork | null }) {
   if (!prior) return null;
@@ -280,7 +281,7 @@ function EpicDetailBody({ epic }: { epic: Epic }) {
       </DetailRow>
       {epic.external_status ? (
         <DetailRow label="Status in source">
-          {epic.external_closed ? `${epic.external_status} — closed, so forge put this epic on hold` : epic.external_status}
+          {epic.external_closed ? `${epic.external_status} — closed, so Elstin put this epic on hold` : epic.external_status}
         </DetailRow>
       ) : null}
       <DetailRow label="Folder">{epic.repo || "No folder attached"}</DetailRow>
@@ -379,7 +380,7 @@ function ReadOnlyChangesRow({ story }: { story: Story }) {
       {changes.length ? (
         <>
           <div className="text-muted-foreground text-xs">
-            Changes this ticket needs that forge won't make — in read-only repos, or files the project says agents must
+            Changes this ticket needs that Elstin won't make — in read-only repos, or files the project says agents must
             not change. The rest of the plan runs without them.
           </div>
           <ul className="mt-1 flex flex-col gap-1">
@@ -429,9 +430,9 @@ function StoryDetailBody({ projectId, story, activityEnabled }: { projectId: num
       {story.external_status ? (
         <DetailRow label="Status in source">
           {story.external_closed
-            ? `${story.external_status} — closed${story.status === "skipped" ? ", so forge skipped this story" : "; this run was already under way and will finish"}`
+            ? `${story.external_status} — closed${story.status === "skipped" ? ", so Elstin skipped this story" : "; this run was already under way and will finish"}`
             : story.parked_reason === "on_hold_in_source"
-              ? `${story.external_status} — forge leaves this ticket alone until it moves out of that status`
+              ? `${story.external_status} — Elstin leaves this ticket alone until it moves out of that status`
               : story.external_status}
         </DetailRow>
       ) : null}
@@ -444,15 +445,15 @@ function StoryDetailBody({ projectId, story, activityEnabled }: { projectId: num
       {story.parked_reason === "usage_limit" ? (
         <DetailRow label="Provider limit">
           {story.retry_at
-            ? `The provider said the limit lifts at ${new Date(story.retry_at).toLocaleString()}; forge retries this story then. The story stays failed until it does.`
+            ? `The provider said the limit lifts at ${new Date(story.retry_at).toLocaleString()}; Elstin retries this story then. The story stays failed until it does.`
             : "The provider did not say when the limit lifts, so nothing is scheduled. Retry once it has (or add credit)."}
         </DetailRow>
       ) : null}
       {story.parked_reason === "provider_unreachable" ? (
         <DetailRow label="Model endpoint">
           {story.retry_at
-            ? `forge could not reach the model endpoint, even after several attempts. It retries this story automatically at ${new Date(story.retry_at).toLocaleString()}, continuing where the run stopped. The story stays failed until then. If it keeps failing, check the endpoint, proxy or VPN.`
-            : "forge could not reach the model endpoint, even after several attempts, and is not retrying on its own. Check the endpoint, proxy or VPN, then Retry."}
+            ? `Elstin could not reach the model endpoint, even after several attempts. It retries this story automatically at ${new Date(story.retry_at).toLocaleString()}, continuing where the run stopped. The story stays failed until then. If it keeps failing, check the endpoint, proxy or VPN.`
+            : "Elstin could not reach the model endpoint, even after several attempts, and is not retrying on its own. Check the endpoint, proxy or VPN, then Retry."}
         </DetailRow>
       ) : null}
       <DetailRow label="Branch">{story.branch}</DetailRow>
@@ -474,7 +475,7 @@ function StoryDetailBody({ projectId, story, activityEnabled }: { projectId: num
       ) : null}
       <StoryUsagePanel storyKey={story.jira_key} />
       {story.status === "dispatched" && story.kind !== "qa" ? <GuidanceForm storyKey={story.jira_key} /> : null}
-      <ActivityFeed storyKey={story.jira_key} enabled={activityEnabled} />
+      <ActivityFeed streamUrl={api.storyActivityStreamUrl(story.jira_key)} enabled={activityEnabled} />
     </>
   );
 }

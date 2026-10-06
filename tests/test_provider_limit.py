@@ -14,18 +14,18 @@ from datetime import datetime, timedelta, timezone
 import openai
 import pytest
 
-import forge.agents.loop as loop_mod
-import forge.agents.roles.dev_loop as dev_loop_module
-import forge.agents.roles.planner_loop as planner_module
-import forge.daemon.main as daemon
-import forge.orchestration.graph as graph_module
-import forge.services.generation as generation
-from forge.agents.loop import LoopConfig, run_agent_loop
-from forge.agents.roles.dev_loop import DevLoopError, run_dev
-from forge.agents.roles.planner_loop import PlannerLoopError, run_planner
-from forge.config.store import set_config, set_project_config
-from forge.llm.base import Capabilities
-from forge.llm.errors import (
+import elstin.agents.loop as loop_mod
+import elstin.agents.roles.dev_loop as dev_loop_module
+import elstin.agents.roles.planner_loop as planner_module
+import elstin.daemon.main as daemon
+import elstin.orchestration.graph as graph_module
+import elstin.services.generation as generation
+from elstin.agents.loop import LoopConfig, run_agent_loop
+from elstin.agents.roles.dev_loop import DevLoopError, run_dev
+from elstin.agents.roles.planner_loop import PlannerLoopError, run_planner
+from elstin.config.store import set_config, set_project_config
+from elstin.llm.base import Capabilities
+from elstin.llm.errors import (
     LIMIT_RESET_MARGIN_SECONDS,
     MAX_LIMIT_WAIT_SECONDS,
     LlmBadRequestError,
@@ -38,13 +38,13 @@ from forge.llm.errors import (
     provider_limit_of,
     retry_after_seconds,
 )
-from forge.llm.openai_compat import OpenAiCompatProvider
-from forge.llm.types import LlmRequest, LlmResponse, TextBlock, Usage, text_message
-from forge.orchestration.graph import checkpointer_from_url, compile_graph
-from forge.orchestration.state import initial_state
-from forge.services.provider_limit import MAX_AUTO_LIMIT_RETRIES, USAGE_LIMIT_REASON, plan_parking
-from forge.services.run_activity import list_activity
-from forge.state.manager import StateManager
+from elstin.llm.openai_compat import OpenAiCompatProvider
+from elstin.llm.types import LlmRequest, LlmResponse, TextBlock, Usage, text_message
+from elstin.orchestration.graph import checkpointer_from_url, compile_graph
+from elstin.orchestration.state import initial_state
+from elstin.services.provider_limit import MAX_AUTO_LIMIT_RETRIES, USAGE_LIMIT_REASON, plan_parking
+from elstin.services.run_activity import list_activity
+from elstin.state.manager import StateManager
 
 
 # --- what the provider says -----------------------------------------------------
@@ -265,7 +265,7 @@ async def test_a_failure_that_is_not_a_limit_carries_none():
 # --- the roles --------------------------------------------------------------------
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_dev_raises_an_error_that_carries_the_limit(git_repo, monkeypatch):
     set_config("openai_api_key", "sk-test")
     provider = FakeProvider(script=[LlmRateLimitError("hourly limit", retry_after_seconds=1800)])
@@ -278,7 +278,7 @@ async def test_dev_raises_an_error_that_carries_the_limit(git_repo, monkeypatch)
     assert len(provider.calls) == 1
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_the_planner_raises_an_error_that_carries_the_limit_and_is_not_retried(git_repo, monkeypatch):
     set_config("openai_api_key", "sk-test")
     set_config("planner_explorers_enabled", "false")
@@ -292,7 +292,7 @@ async def test_the_planner_raises_an_error_that_carries_the_limit_and_is_not_ret
     assert len(provider.calls) == 1
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_a_single_shot_review_failure_carries_the_limit(monkeypatch):
     provider = FakeProvider(script=[LlmRateLimitError("slow down", retry_after_seconds=600)])
     monkeypatch.setattr(generation, "get_provider", lambda *a, **k: provider)
@@ -308,7 +308,7 @@ async def test_a_single_shot_review_failure_carries_the_limit(monkeypatch):
 LIMIT = ProviderLimit(kind="rate", reset_at=time.time() + 3600, message="daily limit")
 
 
-@pytest.mark.usefixtures("forge_db", "fake_agents")
+@pytest.mark.usefixtures("elstin_db", "fake_agents")
 @pytest.mark.parametrize("node", ["planner", "dev", "verifier", "qa"])
 async def test_a_run_that_ends_on_a_limit_says_so_in_its_final_state(node, postgres_url, monkeypatch):
     errors = {
@@ -336,7 +336,7 @@ async def test_a_run_that_ends_on_a_limit_says_so_in_its_final_state(node, postg
     assert final["provider_limit"] == LIMIT.as_state()
 
 
-@pytest.mark.usefixtures("forge_db", "fake_agents")
+@pytest.mark.usefixtures("elstin_db", "fake_agents")
 async def test_a_failure_that_is_not_a_limit_leaves_the_field_empty(postgres_url, monkeypatch):
     async def refused(**kwargs):
         raise DevLoopError("bad schema")
@@ -400,7 +400,7 @@ def _park(sm: StateManager, key: str, when: datetime | None, *, reason: str = US
     sm.set_story_status(key, "failed", parked_reason=reason, failure_stage=stage, retry_at=when)
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 def test_only_a_failed_run_parked_on_a_limit_whose_time_has_come_is_due(board):
     past, future = datetime.now(timezone.utc) - timedelta(minutes=1), datetime.now(timezone.utc) + timedelta(hours=1)
     board.create_story("ENG-4", epic_key="ENG-1", wave=0)
@@ -415,7 +415,7 @@ def test_only_a_failed_run_parked_on_a_limit_whose_time_has_come_is_due(board):
     assert [s["jira_key"] for s in board.list_stories_waiting_on_a_limit()] == ["ENG-2"]
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 def test_a_status_change_clears_the_retry_time(board):
     _park(board, "ENG-2", datetime.now(timezone.utc) + timedelta(hours=1))
     assert board.get_story("ENG-2")["retry_at"] is not None
@@ -423,7 +423,7 @@ def test_a_status_change_clears_the_retry_time(board):
     assert board.get_story("ENG-2")["retry_at"] is None
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 def test_a_persons_retry_clears_the_schedule_too(board):
     _park(board, "ENG-2", datetime.now(timezone.utc) + timedelta(hours=1))
     board.retry_story("ENG-2")
@@ -431,7 +431,7 @@ def test_a_persons_retry_clears_the_schedule_too(board):
     assert (story["status"], story["retry_at"], story["parked_reason"]) == ("pending", None, None)
 
 
-@pytest.mark.usefixtures("forge_db", "fake_agents")
+@pytest.mark.usefixtures("elstin_db", "fake_agents")
 async def test_the_sweep_retries_a_story_whose_limit_has_lifted(board):
     board.set_epic_phase("ENG-1", "failed")
     _park(board, "ENG-2", datetime.now(timezone.utc) - timedelta(seconds=1))
@@ -447,14 +447,14 @@ async def test_the_sweep_retries_a_story_whose_limit_has_lifted(board):
     assert await daemon._resume_stories_past_their_limit(board) == []  # nothing left to do
 
 
-@pytest.mark.usefixtures("forge_db", "fake_agents")
+@pytest.mark.usefixtures("elstin_db", "fake_agents")
 async def test_the_sweep_leaves_a_story_whose_time_has_not_come(board):
     _park(board, "ENG-2", datetime.now(timezone.utc) + timedelta(hours=1))
     assert await daemon._resume_stories_past_their_limit(board) == []
     assert board.get_story("ENG-2")["status"] == "failed"
 
 
-@pytest.mark.usefixtures("forge_db", "fake_agents")
+@pytest.mark.usefixtures("elstin_db", "fake_agents")
 async def test_the_sweep_leaves_a_manual_projects_story_to_its_person(board):
     set_project_config(board.project_id, "auto_run_enabled", "false")
     _park(board, "ENG-2", datetime.now(timezone.utc) - timedelta(seconds=1))
@@ -462,7 +462,7 @@ async def test_the_sweep_leaves_a_manual_projects_story_to_its_person(board):
     assert board.get_story("ENG-2")["status"] == "failed"
 
 
-@pytest.mark.usefixtures("forge_db", "fake_agents")
+@pytest.mark.usefixtures("elstin_db", "fake_agents")
 async def test_the_sweep_leaves_a_story_with_a_run_in_flight(board):
     _park(board, "ENG-2", datetime.now(timezone.utc) - timedelta(seconds=1))
     assert daemon.claim_run("ENG-2")
@@ -472,7 +472,7 @@ async def test_the_sweep_leaves_a_story_with_a_run_in_flight(board):
         daemon.release_run("ENG-2")
 
 
-@pytest.mark.usefixtures("forge_db", "fake_agents")
+@pytest.mark.usefixtures("elstin_db", "fake_agents")
 async def test_a_checkpoint_that_cannot_be_read_still_retries_with_a_fresh_plan(board, monkeypatch):
     async def broken(sm, epic, story):
         raise RuntimeError("the checkpoint store is unreachable")
@@ -483,7 +483,7 @@ async def test_a_checkpoint_that_cannot_be_read_still_retries_with_a_fresh_plan(
     assert board.get_story("ENG-2")["status"] == "pending"
 
 
-@pytest.mark.usefixtures("forge_db", "fake_agents")
+@pytest.mark.usefixtures("elstin_db", "fake_agents")
 async def test_poll_once_runs_the_sweep_before_the_epics(board, monkeypatch):
     calls: list[str] = []
 
@@ -508,7 +508,7 @@ def _configure(worktrees_base_dir: str) -> None:
     set_config("require_plan_approval", "false")
 
 
-@pytest.mark.usefixtures("forge_db", "fake_agents")
+@pytest.mark.usefixtures("elstin_db", "fake_agents")
 async def test_a_limit_parks_the_story_and_the_daemon_resumes_it_at_dev_once_it_lifts(
     git_repo, tmp_path, project_id, monkeypatch,
 ):
@@ -565,7 +565,7 @@ async def test_a_limit_parks_the_story_and_the_daemon_resumes_it_at_dev_once_it_
     assert "Provider limit has lifted — retrying automatically: continuing at development with the earlier plan" in titles
 
 
-@pytest.mark.usefixtures("forge_db", "fake_agents")
+@pytest.mark.usefixtures("elstin_db", "fake_agents")
 async def test_a_quota_with_no_reset_time_parks_the_story_with_no_retry_scheduled(git_repo, tmp_path, project_id, monkeypatch):
     _configure(str(tmp_path / "worktrees"))
     sm = StateManager()

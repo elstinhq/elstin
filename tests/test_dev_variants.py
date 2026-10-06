@@ -1,4 +1,4 @@
-"""Competing dev attempts (forge/agents/roles/dev_variants.py): when the
+"""Competing dev attempts (elstin/agents/roles/dev_variants.py): when the
 deterministic gate has failed repeatedly, several fresh attempts run side by side
 in scratch worktrees and the gate picks the best.
 
@@ -14,9 +14,9 @@ import uuid
 
 import pytest
 
-import forge.agents.roles.dev_variants as variants
-import forge.orchestration.graph as graph_module
-from forge.agents.roles.dev_variants import (
+import elstin.agents.roles.dev_variants as variants
+import elstin.orchestration.graph as graph_module
+from elstin.agents.roles.dev_variants import (
     APPROACH_HINTS,
     Attempt,
     adopt_changes,
@@ -28,12 +28,12 @@ from forge.agents.roles.dev_variants import (
     scoreboard,
     variant_count,
 )
-from forge.config.store import set_config, set_project_config
-from forge.orchestration.graph import checkpointer_from_url, compile_graph
-from forge.orchestration.state import initial_state
-from forge.services.run_activity import list_activity
-from forge.state.manager import StateManager
-from forge.tools.worktree import create_scratch_worktree, create_worktree, discard_worktree, run_git, variant_worktree_path
+from elstin.config.store import set_config, set_project_config
+from elstin.orchestration.graph import checkpointer_from_url, compile_graph
+from elstin.orchestration.state import initial_state
+from elstin.services.run_activity import list_activity
+from elstin.state.manager import StateManager
+from elstin.tools.worktree import create_scratch_worktree, create_worktree, discard_worktree, run_git, variant_worktree_path
 
 KEY = "ENG-2"
 
@@ -60,7 +60,7 @@ def _read(root: str, relative: str) -> str | None:
 # --- settings ---------------------------------------------------------------------
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 def test_competing_attempts_are_off_by_default_and_clamped():
     assert variant_count(None) == 1
     assert failures_before_variants(None) == 2
@@ -78,7 +78,7 @@ def test_competing_attempts_are_off_by_default_and_clamped():
     assert failures_before_variants(None) == 2
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 def test_a_project_can_opt_in_for_itself(project_id):
     assert variant_count(project_id) == 1
     set_project_config(project_id, "dev_variants", "2")
@@ -254,9 +254,9 @@ def test_a_path_that_would_escape_the_worktree_is_refused(story, monkeypatch):
     discard_worktree(story.repo, winner, None)
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 def test_a_label_prefixes_what_one_attempt_writes_and_nothing_else(project_id):
-    from forge.services.run_activity import activity_label, append_activity
+    from elstin.services.run_activity import activity_label, append_activity
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id)
@@ -291,7 +291,7 @@ class Script:
         self.max_in_flight = max(self.max_in_flight, self.in_flight)
         try:
             await asyncio.sleep(0.05)  # long enough for the others to start: they run side by side
-            from forge.services.run_activity import append_activity
+            from elstin.services.run_activity import append_activity
 
             append_activity(kwargs["run_id"], type="status", phase="dev", title="Development started")
             outcome = self.outcomes[index]
@@ -344,7 +344,7 @@ async def _compete(story, *, count=3, **overrides):
     )
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_the_attempt_that_passes_the_gate_is_adopted_and_everything_else_is_cleaned_up(arena):
     script = arena.build({1: "bad", 2: "good", 3: "bad"})
 
@@ -365,7 +365,7 @@ async def test_the_attempt_that_passes_the_gate_is_adopted_and_everything_else_i
     assert not [d for d in os.listdir(os.path.dirname(arena.story.base)) if "~v" in d]
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_each_attempt_is_isolated_and_gets_a_share_of_the_budget(arena):
     script = arena.build({1: "good", 2: "good"})
 
@@ -381,7 +381,7 @@ async def test_each_attempt_is_isolated_and_gets_a_share_of_the_budget(arena):
         assert c["story_worktrees"]["api"]["worktree_path"] == c["worktree_path"]
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_attempts_take_different_approaches(arena):
     script = arena.build({1: "good", 2: "good", 3: "good"})
 
@@ -393,7 +393,7 @@ async def test_attempts_take_different_approaches(arena):
     assert len(set(contexts)) == 3
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_every_attempt_writes_to_the_feed_under_its_own_label(arena):
     arena.build({1: "good", 2: "good"})
 
@@ -406,7 +406,7 @@ async def test_every_attempt_writes_to_the_feed_under_its_own_label(arena):
     assert "variant 1 (chosen)" in adopted["detail"]
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_when_every_attempt_passes_the_smaller_change_is_adopted(arena):
     arena.build({1: "bigger-good", 2: "good"})
     result = await _compete(arena.story, count=2)
@@ -414,7 +414,7 @@ async def test_when_every_attempt_passes_the_smaller_change_is_adopted(arena):
     assert _read(arena.story.path, "extra.py") is None
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_an_attempt_that_errors_is_a_result_not_a_failure_of_the_others(arena):
     arena.build({1: "boom", 2: "good", 3: "boom"})
     result = await _compete(arena.story)
@@ -422,7 +422,7 @@ async def test_an_attempt_that_errors_is_a_result_not_a_failure_of_the_others(ar
     assert _read(arena.story.path, "feature.py") == "# attempt 2: good\n"
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_with_nothing_to_adopt_the_story_worktree_is_untouched(arena):
     arena.build({1: "boom", 2: "boom"})
 
@@ -433,7 +433,7 @@ async def test_with_nothing_to_adopt_the_story_worktree_is_untouched(arena):
     assert any("none produced a result" in e["title"] for e in list_activity(KEY))
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_fewer_than_two_usable_scratch_worktrees_is_not_a_comparison(arena, monkeypatch):
     arena.build({1: "good", 2: "good", 3: "good"})
     real = variants.create_scratch_worktree
@@ -451,7 +451,7 @@ async def test_fewer_than_two_usable_scratch_worktrees_is_not_a_comparison(arena
     assert any("too few scratch worktrees" in e["title"] for e in list_activity(KEY))
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_a_gate_that_cannot_judge_one_attempt_does_not_sink_the_others(arena, monkeypatch):
     script = arena.build({1: "good", 2: "good"})
     real_gate = script.gate
@@ -467,7 +467,7 @@ async def test_a_gate_that_cannot_judge_one_attempt_does_not_sink_the_others(are
     assert result["variants"][0]["error"].startswith("the gate could not judge it")
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_a_cancelled_run_still_removes_its_scratch_worktrees(arena, monkeypatch):
     started = asyncio.Event()
 
@@ -538,7 +538,7 @@ def run(postgres_url, project_id, fake_agents, monkeypatch):
     return r
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_two_gate_failures_in_a_row_send_the_run_to_competing_attempts_then_back_through_the_gate(run):
     final = await run.go()
 
@@ -550,7 +550,7 @@ async def test_two_gate_failures_in_a_row_send_the_run_to_competing_attempts_the
     assert final["variants_done"] is True and final["variants_pending"] is False
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_an_adopted_winner_that_fails_the_gate_gets_one_repair_round_not_a_fresh_budget(run):
     run.gate_fails = 4  # the two that bring in the competition, the winner, and its first repair
 
@@ -561,7 +561,7 @@ async def test_an_adopted_winner_that_fails_the_gate_gets_one_repair_round_not_a
     assert run.dev_calls == 3  # attempt, repair, and the winner's one repair
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_nothing_adopted_carries_on_exactly_as_before(run):
     run.variants_result = None
     run.gate_fails = 3  # never passes
@@ -573,7 +573,7 @@ async def test_nothing_adopted_carries_on_exactly_as_before(run):
     assert run.dev_calls == 3 and run.gate_calls == 3  # the competition cost the run nothing
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_competing_attempts_that_raise_never_fail_the_run(run, monkeypatch):
     async def explode(**kwargs):
         raise RuntimeError("scratch disk full")
@@ -587,7 +587,7 @@ async def test_competing_attempts_that_raise_never_fail_the_run(run, monkeypatch
     assert any("Competing attempts failed" in e["title"] for e in list_activity(KEY))
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_off_by_default_the_graph_never_competes(run):
     set_config("dev_variants", "1")
     run.gate_fails = 3
@@ -597,14 +597,14 @@ async def test_off_by_default_the_graph_never_competes(run):
 
 
 @pytest.mark.parametrize("override", [{"started_clean": False}, {"integration_paths": ["src/a.py"]}])
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_a_worktree_holding_other_work_never_competes(run, override):
     run.gate_fails = 3
     final = await run.go(**override)
     assert run.variant_calls == 0 and final["status"] == "failed"
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_the_trigger_can_be_moved_earlier(run):
     set_config("dev_variants_after_gate_failures", "1")
     run.gate_fails = 1

@@ -6,8 +6,8 @@ implementation failure.
 Existing rows default to false, which is the correct backfill: no story
 synced before this migration was ever classified this way (the detection
 this flag records didn't exist yet), so labelling old rows otherwise would
-assert something never actually checked. See forge/tools/vue_tools.py's
-coverage-only-failure detection and forge/orchestration/reconciler.py's
+assert something never actually checked. See elstin/tools/vue_tools.py's
+coverage-only-failure detection and elstin/orchestration/reconciler.py's
 pr_open_gate, which is forced on for a coverage-gap story even when a
 project has require_pr_open_approval turned off — a story that didn't fully
 verify shouldn't ride along on a gate configured for the fully-verified

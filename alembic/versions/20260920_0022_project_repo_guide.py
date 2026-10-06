@@ -3,11 +3,11 @@
 A repo with no AGENTS.md (or CLAUDE.md) of its own leaves the planner and dev
 agents to rediscover its layout, commands and existing tooling every run, and
 they sometimes get it wrong — one run planned a new codegen script for a repo
-that already had one. forge can now write such a guide itself, once, from the
-repo's manifests, README and CI files (forge/services/project_guide.py).
+that already had one. elstin can now write such a guide itself, once, from the
+repo's manifests, README and CI files (elstin/services/project_guide.py).
 
 - `project_repos.generated_guide`: the guide's markdown. It is kept here, not
-  committed to the repo: forge does not edit checkouts it does not own, and a
+  committed to the repo: elstin does not edit checkouts it does not own, and a
   guide the repo ships itself always takes precedence over this one.
 - `project_repos.generated_guide_at`: when it was written, for display.
 

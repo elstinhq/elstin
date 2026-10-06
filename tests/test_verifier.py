@@ -9,8 +9,8 @@ import subprocess
 
 import pytest
 
-from forge.agents.roles import verifier
-from forge.tools import language_hooks
+from elstin.agents.roles import verifier
+from elstin.tools import language_hooks
 
 
 def _write(root: str, rel: str, content: str = "x\n") -> None:
@@ -160,7 +160,7 @@ def test_compare_to_plan_flags_planned_file_dev_never_touched(git_repo, register
     when dev's own file_changes claimed it — an empty (or inaccurate)
     file_changes list made this whole loop skip every planned file instead
     of flagging them as untouched, so a dev run that changed nothing at all
-    (e.g. forge/agents/roles/dev_loop.py's agent loop silently producing no
+    (e.g. elstin/agents/roles/dev_loop.py's agent loop silently producing no
     messages) vacuously passed verification. `foo.alpha` here
     is committed and unmodified, and file_changes is empty — the real git
     diff is what must catch this, not dev's self-report."""
@@ -338,7 +338,7 @@ def test_compare_to_plan_tags_each_plan_coverage_blocker_with_what_it_is(git_rep
 
 
 def test_the_kind_survives_the_per_repo_merge_with_the_repo_prefix_dev_needs():
-    from forge.tools.workspace import Workspace
+    from elstin.tools.workspace import Workspace
 
     workspace = Workspace(default_label="ui", roots={"ui": "/w/ui", "api": "/w/api"})
     reports = {
@@ -429,7 +429,7 @@ def test_changes_left_to_a_person_are_not_the_reviewers_to_demand():
     """A plan's read_only_changes (a contract repo's YAML, for one story) are
     made by a person outside the story: the reviewer is shown them apart
     from the plan and told not to fail the run over them."""
-    from forge.agents.roles.verifier import _VERIFIER_REVIEW_CORE, _build_llm_payload
+    from elstin.agents.roles.verifier import _VERIFIER_REVIEW_CORE, _build_llm_payload
 
     plan = {
         "files_to_modify": [{"path": "src/Search.java", "purpose": "export"}],

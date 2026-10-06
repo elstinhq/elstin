@@ -19,23 +19,23 @@ from types import SimpleNamespace
 
 import pytest
 
-import forge.orchestration.graph as graph_module
-from forge.agents.roles.dev_loop import DevLoopError
-from forge.agents.roles.planner_loop import PlannerLoopError
-from forge.daemon.main import (
+import elstin.orchestration.graph as graph_module
+from elstin.agents.roles.dev_loop import DevLoopError
+from elstin.agents.roles.planner_loop import PlannerLoopError
+from elstin.daemon.main import (
     _apply_resume_patch, _ended_failed_in_dev, arm_resume_after_failure, arm_resume_at_dev,
 )
-from forge.db.engine import session_scope
-from forge.db.models import Story
-from forge.llm.errors import ProviderLimit
-from forge.orchestration.graph import checkpointer_from_url, compile_graph
-from forge.orchestration.state import initial_state
-from forge.services.generation import GenerationError
-from forge.services.run_activity import append_activity
-from forge.state.manager import StateManager
-from forge.tools.worktree import create_worktree
+from elstin.db.engine import session_scope
+from elstin.db.models import Story
+from elstin.llm.errors import ProviderLimit
+from elstin.orchestration.graph import checkpointer_from_url, compile_graph
+from elstin.orchestration.state import initial_state
+from elstin.services.generation import GenerationError
+from elstin.services.run_activity import append_activity
+from elstin.state.manager import StateManager
+from elstin.tools.worktree import create_worktree
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("fake_agents", "forge_db")]
+pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("fake_agents", "elstin_db")]
 
 STORY = "ENG-2"
 

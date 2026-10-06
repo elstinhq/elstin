@@ -1,0 +1,432 @@
+"""OpenAI (and OpenAI-compatible) provider adapter — the only module in
+elstin that imports the `openai` package. Talks the Chat Completions API
+(`client.chat.completions.create`) rather than the newer Responses API:
+Chat Completions is the shape every OpenAI-compatible endpoint (Azure,
+OpenRouter, vLLM, Ollama, Together, Groq, Fireworks, ...) actually
+implements, so this one adapter — pointed at a different `base_url` — is
+what reaches all of them. A second, Responses-API-specific adapter is not
+planned; if a provider ever requires it, it is a new module beside this
+one, not a change to it.
+
+Model ids and the `reasoning_effort`/`response_format` request shapes
+below were read directly off the installed `openai` package
+(openai.types.chat.completion_create_params, openai.types.shared.
+reasoning_effort, openai.types.shared_params.response_format_json_schema)
+rather than recalled — the OpenAI API surface moves fast and training
+priors go stale quickly; re-check against the installed package if these
+drift.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from typing import Any
+
+from openai import (
+    DEFAULT_TIMEOUT,
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncOpenAI,
+    AuthenticationError,
+    BadRequestError,
+    RateLimitError,
+)
+from langsmith.wrappers import wrap_openai
+
+from elstin.llm.base import Capabilities
+from elstin.llm.errors import (
+    LlmAuthError,
+    LlmBadRequestError,
+    LlmConnectionError,
+    LlmContextOverflowError,
+    LlmError,
+    LlmQuotaError,
+    LlmRateLimitError,
+    LlmServerError,
+    LlmTimeoutError,
+    LlmUnreachableError,
+    is_context_overflow_message,
+    is_quota_message,
+    retry_after_seconds,
+)
+from elstin.llm.types import (
+    ContentBlock,
+    ImageBlock,
+    LlmRequest,
+    LlmResponse,
+    Message,
+    StopReason,
+    TextBlock,
+    ToolCallBlock,
+    ToolResultBlock,
+    Usage,
+)
+
+logger = logging.getLogger("elstin.llm.openai")
+
+# Which models accept `reasoning_effort`, and which levels each one takes.
+#
+# Both halves matter, because both mistakes fail the same way: sending the
+# field to a model that doesn't accept it is a 400, and sending a LEVEL a
+# model doesn't accept is also a 400 — and a 400 maps to
+# LlmBadRequestError, which elstin/agents/loop.py deliberately never
+# retries, so it kills the whole run rather than one turn. A model
+# matching nothing here simply never gets the field, which costs only the
+# configured effort's effect, so erring narrow stays the safe direction.
+#
+# An empty level set means "accepts whatever elstin is configured with" —
+# used for OpenAI's own families, whose behavior is unchanged from this
+# adapter's original prefix check.
+#
+# The namespaced entries are OpenRouter model ids. Their level sets were
+# read off each model's OpenRouter page on 2026-09-18, NOT recalled:
+#   z-ai/glm-5.3        reasoning always on, levels low/high/max (max is
+#                       the provider default, so omitting the field bills
+#                       every call at max reasoning)
+#   moonshotai/kimi-k3  levels low/max
+# Re-check a model's own page before adding or changing a row here.
+_ANY_LEVEL: frozenset[str] = frozenset()
+
+_EFFORT_SUPPORT: tuple[tuple[tuple[str, ...], frozenset[str]], ...] = (
+    (("gpt-5", "gpt-6", "o1", "o3", "o4"), _ANY_LEVEL),
+    (("z-ai/glm-5.3",), frozenset({"low", "high", "max"})),
+    (("moonshotai/kimi-k3",), frozenset({"low", "max"})),
+)
+
+
+def _model_variants(model: str) -> tuple[str, ...]:
+    """The model id, plus its bare name when the id is namespaced
+    ("openai/gpt-5.1" -> also "gpt-5.1"). A gateway that prefixes the
+    vendor onto an otherwise-identical model should match the same rules
+    as that vendor's own API."""
+    bare = model.rsplit("/", 1)[-1]
+    return (model,) if bare == model else (model, bare)
+
+
+def resolve_reasoning_effort(model: str, effort: str | None) -> str | None:
+    """The `reasoning_effort` value to send for this (model, effort) pair,
+    or None to omit the field entirely. Dropping an unsupported level
+    rather than forwarding it is deliberate: a request that runs at the
+    model's default effort is worse than one that runs at the configured
+    effort, but far better than a 400 that fails the story."""
+    if not effort:
+        return None
+    variants = _model_variants(model)
+    for prefixes, allowed_levels in _EFFORT_SUPPORT:
+        if not any(variant.startswith(prefixes) for variant in variants):
+            continue
+        if not allowed_levels or effort in allowed_levels:
+            return effort
+        logger.warning(
+            "Model %s does not accept reasoning effort %r (accepts: %s) — sending this request without the field",
+            model, effort, ", ".join(sorted(allowed_levels)),
+        )
+        return None
+    return None
+
+
+def _limit_error(exc: APIStatusError, *, quota: bool = False) -> LlmQuotaError | LlmRateLimitError:
+    """A 429 (or 402) as the limit it is. OpenAI answers an account with no
+    credit left with a 429 too, coded `insufficient_quota`: waiting seconds
+    cannot fix that, so it is told apart from a rate limit, which can. The
+    reset time, when the provider gives one, comes from its headers or message."""
+    message = str(exc)
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    wait = retry_after_seconds(headers, message)
+    if quota or getattr(exc, "code", None) == "insufficient_quota" or is_quota_message(message):
+        return LlmQuotaError(message, retry_after_seconds=wait)
+    return LlmRateLimitError(message, retry_after_seconds=wait)
+
+
+# Names of the transport exceptions that mean the connection was never made. The
+# SDK chains one as the cause of its APITimeoutError / APIConnectionError, and
+# which HTTP library supplies it has changed between SDK versions (httpx, then
+# httpx2), so they are recognised by name rather than imported.
+_NEVER_CONNECTED = frozenset({"ConnectTimeout", "ConnectError", "ProxyError"})
+
+
+def _never_connected(exc: BaseException) -> bool:
+    """True when `exc` (an SDK timeout or connection error) failed before any
+    connection to the endpoint existed — as opposed to one that dropped, or
+    stalled, mid-request. Nothing was sent, so retrying it is free."""
+    cause = exc.__cause__
+    return cause is not None and any(cls.__name__ in _NEVER_CONNECTED for cls in type(cause).__mro__)
+
+
+class OpenAiCompatProvider:
+    """Adapter for OpenAI's own API and any OpenAI-compatible endpoint
+    (pass `base_url` to reach one). One instance per (api_key, base_url)
+    pair — see elstin/llm/registry.py."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str | None = None,
+        name: str = "openai",
+        request_timeout_seconds: float | None = None,
+        connect_timeout_seconds: float | None = None,
+    ) -> None:
+        self.name = name
+        # How long to wait for the connection itself. The SDK allows 5s, which a
+        # corporate proxy reached over a VPN can miss for no reason that lasts;
+        # None keeps the SDK's figure. Only the connect phase changes:
+        # read/write/pool stay what the SDK sets, and the overall deadline above
+        # is still the call's real bound.
+        self._connect_timeout = connect_timeout_seconds if connect_timeout_seconds and connect_timeout_seconds > 0 else None
+        client_timeout = (
+            type(DEFAULT_TIMEOUT)(DEFAULT_TIMEOUT.read, connect=self._connect_timeout)
+            if self._connect_timeout else DEFAULT_TIMEOUT
+        )
+        # An overall wall-clock deadline for one call (0/None = none). The SDK's
+        # own timeout is per read, and a gateway that answers a slow request
+        # with keep-alive bytes never trips it — one run's single model call
+        # sat for 2h39m. This bounds the whole call, whatever arrives on the wire.
+        self._request_timeout = request_timeout_seconds if request_timeout_seconds and request_timeout_seconds > 0 else None
+        self.capabilities = Capabilities(
+            supports_structured_output=True,
+            # No server-side compaction on Chat Completions, so
+            # elstin/agents/loop.py owns it for this provider.
+            supports_server_compaction=False,
+        )
+        # Prompt caching is deliberately left implicit. OpenAI inserts one
+        # cache breakpoint itself — on gpt-5.6+ at the end of the latest
+        # user or tool message — and `prompt_cache_options` (explicit
+        # breakpoints, gpt-5.6+ only) would buy little here: elstin's
+        # request prefix is stable by construction — a frozen system
+        # prompt, a deterministically ordered tool list, and append-only
+        # history in which each request begins with everything the last
+        # one sent (elstin/agents/loop.py, point 5: breaking that last
+        # property is what cut one dev run's cache reads to 4%). Verify
+        # with the per-turn cache_read_tokens in each "token" activity
+        # event before adding placement logic.
+        # Patched in place, so it is still the same client and every call still
+        # returns and raises what it did. A call is only recorded — messages,
+        # reply, token usage — inside a traced run (elstin/services/tracing.py),
+        # nested under the graph node that made it; anywhere else it is a no-op.
+        self._client = wrap_openai(AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=0, timeout=client_timeout))
+
+    def _unreachable_message(self, exc: BaseException) -> str:
+        waited = f" within {self._connect_timeout:g}s" if self._connect_timeout and isinstance(exc, APITimeoutError) else ""
+        reason = str(exc.__cause__ or "") or str(exc)
+        return f"Could not connect to the model endpoint{waited}: {reason}"
+
+    async def complete(self, request: LlmRequest) -> LlmResponse:
+        kwargs = self._build_kwargs(request)
+        call = self._client.chat.completions.create(**kwargs)
+        try:
+            completion = await (asyncio.wait_for(call, timeout=self._request_timeout) if self._request_timeout else call)
+        except asyncio.TimeoutError as exc:  # the deadline above; the SDK's own timeout is APITimeoutError
+            raise LlmTimeoutError(
+                f"no response from the model within {self._request_timeout:g}s — the request was abandoned"
+            ) from exc
+        except AuthenticationError as exc:
+            raise LlmAuthError(str(exc)) from exc
+        except RateLimitError as exc:
+            raise _limit_error(exc) from exc
+        except APITimeoutError as exc:
+            if _never_connected(exc):
+                raise LlmUnreachableError(self._unreachable_message(exc)) from exc
+            raise LlmTimeoutError(str(exc)) from exc
+        except APIConnectionError as exc:
+            if _never_connected(exc):
+                raise LlmUnreachableError(self._unreachable_message(exc)) from exc
+            raise LlmConnectionError(str(exc)) from exc
+        except BadRequestError as exc:
+            if getattr(exc, "code", None) == "context_length_exceeded" or is_context_overflow_message(str(exc)):
+                raise LlmContextOverflowError(str(exc)) from exc
+            raise LlmBadRequestError(str(exc)) from exc
+        except APIStatusError as exc:
+            if exc.status_code >= 500:
+                raise LlmServerError(str(exc)) from exc
+            # 402: a gateway out of credit for this key (OpenRouter's answer).
+            if exc.status_code == 402:
+                raise _limit_error(exc, quota=True) from exc
+            # 413: the request body itself is too big for the gateway —
+            # the same remedy (a smaller history) applies.
+            if exc.status_code == 413 or is_context_overflow_message(str(exc)):
+                raise LlmContextOverflowError(str(exc)) from exc
+            raise LlmError(str(exc)) from exc
+
+        return self._parse_response(completion, request)
+
+    async def list_models(self) -> list[str]:
+        """GET {base_url}/models. OpenAI-compatible gateways all answer it; the
+        ids are whatever that endpoint serves, embeddings and the rest
+        included — a picker offers them as suggestions, not as a whitelist."""
+        try:
+            listing = self._client.models.list()
+            ids = {model.id async for model in listing}
+        except AuthenticationError as exc:
+            raise LlmAuthError(str(exc)) from exc
+        except APIConnectionError as exc:  # APITimeoutError is one
+            raise LlmConnectionError(str(exc)) from exc
+        except APIStatusError as exc:
+            raise LlmError(str(exc)) from exc
+        return sorted(ids)
+
+    def _build_kwargs(self, request: LlmRequest) -> dict[str, Any]:
+        messages = self._to_openai_messages(request)
+        kwargs: dict[str, Any] = {
+            "model": request.model,
+            "messages": messages,
+            "parallel_tool_calls": request.parallel_tool_calls if request.tools else None,
+        }
+        if request.tools:
+            kwargs["tools"] = [
+                {
+                    "type": "function",
+                    "function": {"name": t.name, "description": t.description, "parameters": t.parameters},
+                }
+                for t in request.tools
+            ]
+            kwargs["tool_choice"] = request.tool_choice
+        # No max_completion_tokens: elstin deliberately never caps a single
+        # response — see elstin/llm/types.py's LlmRequest.
+        reasoning_effort = resolve_reasoning_effort(request.model, request.effort)
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
+        if request.response_format:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": request.response_format.name,
+                    "schema": request.response_format.schema,
+                    "strict": request.response_format.strict,
+                },
+            }
+        return {k: v for k, v in kwargs.items() if v is not None}
+
+    def _to_openai_messages(self, request: LlmRequest) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        if request.system:
+            out.append({"role": "system", "content": request.system})
+        for message in request.messages:
+            out.extend(self._to_openai_message(message))
+        return out
+
+    def _to_openai_message(self, message: Message) -> list[dict[str, Any]]:
+        if message.role == "tool":
+            # elstin's normalized Message groups all of one turn's
+            # ToolResultBlocks together; OpenAI wants one {"role": "tool"}
+            # message per tool_call_id.
+            return [
+                {"role": "tool", "tool_call_id": b.tool_call_id, "content": _tool_result_text(b)}
+                for b in message.content
+                if isinstance(b, ToolResultBlock)
+            ]
+        if message.role == "assistant":
+            text_parts = [b.text for b in message.content if isinstance(b, TextBlock)]
+            tool_calls = [b for b in message.content if isinstance(b, ToolCallBlock)]
+            out: dict[str, Any] = {"role": "assistant", "content": "".join(text_parts) or None}
+            if tool_calls:
+                out["tool_calls"] = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)},
+                    }
+                    for tc in tool_calls
+                ]
+            return [out]
+        # user/system messages: text and/or images.
+        parts: list[dict[str, Any]] = []
+        for block in message.content:
+            if isinstance(block, TextBlock):
+                parts.append({"type": "text", "text": block.text})
+            elif isinstance(block, ImageBlock):
+                parts.append({"type": "image_url", "image_url": {"url": f"data:{block.media_type};base64,{block.data}"}})
+        if len(parts) == 1 and parts[0]["type"] == "text":
+            return [{"role": message.role, "content": parts[0]["text"]}]
+        return [{"role": message.role, "content": parts}]
+
+    def _parse_response(self, completion: Any, request: LlmRequest) -> LlmResponse:
+        choice = completion.choices[0]
+        msg = choice.message
+        content: list[ContentBlock] = []
+        if msg.content:
+            content.append(TextBlock(text=msg.content))
+        structured_output: dict[str, Any] | None = None
+        if request.response_format and msg.content:
+            try:
+                structured_output = json.loads(msg.content)
+            except json.JSONDecodeError:
+                logger.warning("OpenAI response_format requested but content wasn't valid JSON")
+        for tc in msg.tool_calls or []:
+            args: Any = {}
+            args_error: str | None = None
+            raw = tc.function.arguments or ""
+            try:
+                args = json.loads(raw) if raw.strip() else {}
+            except json.JSONDecodeError as exc:
+                logger.warning("Tool call %s arguments weren't valid JSON: %r", tc.function.name, raw[:200])
+                args_error = f"the arguments were not valid JSON ({exc.msg} at character {exc.pos}): {raw[:200]!r}"
+            if not isinstance(args, dict):
+                args_error = args_error or f"the arguments must be a JSON object, got {type(args).__name__}: {raw[:200]!r}"
+                args = {}
+            content.append(ToolCallBlock(id=tc.id, name=tc.function.name, arguments=args, arguments_error=args_error))
+
+        usage = _parse_usage(completion.usage)
+
+        return LlmResponse(
+            content=content,
+            stop_reason=_map_stop_reason(choice.finish_reason),
+            usage=usage,
+            model=completion.model,
+            structured_output=structured_output,
+        )
+
+
+def _int_field(obj: Any, name: str) -> int:
+    value = getattr(obj, name, None) if obj is not None else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _parse_usage(usage_obj: Any) -> Usage:
+    """elstin's Usage from a Chat Completions `usage` object.
+
+    OpenAI-compatible endpoints disagree on where some of it lives, and the
+    SDK keeps any field it does not model as an extra attribute, so each is
+    read with getattr:
+    - cache hits: `prompt_tokens_details.cached_tokens` (OpenAI, OpenRouter),
+      top-level `prompt_cache_hit_tokens` (DeepSeek's own API), or top-level
+      `cached_tokens` (Z.AI);
+    - cache writes: `prompt_tokens_details.cache_write_tokens` (OpenRouter),
+      which some models bill above the normal input rate;
+    - `cost`: what OpenRouter actually billed for the call, reported on
+      every response. It is authoritative: pricing.py's table can only
+      guess which upstream served the call, and upstreams differ — the
+      table overstated one DeepSeek run's spend 2.3x."""
+    if not usage_obj:
+        return Usage()
+    prompt_details = getattr(usage_obj, "prompt_tokens_details", None)
+    completion_details = getattr(usage_obj, "completion_tokens_details", None)
+    cache_read = (
+        _int_field(prompt_details, "cached_tokens")
+        or _int_field(usage_obj, "prompt_cache_hit_tokens")
+        or _int_field(usage_obj, "cached_tokens")
+    )
+    cost = getattr(usage_obj, "cost", None)
+    return Usage(
+        input_tokens=_int_field(usage_obj, "prompt_tokens"),
+        output_tokens=_int_field(usage_obj, "completion_tokens"),
+        cache_read_tokens=cache_read,
+        cache_creation_tokens=_int_field(prompt_details, "cache_write_tokens"),
+        reasoning_tokens=_int_field(completion_details, "reasoning_tokens"),
+        cost_usd=float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None,
+    )
+
+
+def _tool_result_text(block: ToolResultBlock) -> str:
+    return f"ERROR: {block.content}" if block.is_error else block.content
+
+
+def _map_stop_reason(finish_reason: str | None) -> StopReason:
+    return {
+        "stop": "end_turn",
+        "tool_calls": "tool_calls",
+        "length": "max_tokens",
+        "content_filter": "content_filter",
+    }.get(finish_reason or "", "error")

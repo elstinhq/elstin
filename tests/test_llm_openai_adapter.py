@@ -1,6 +1,6 @@
-"""forge/llm/openai_compat.py — translation between forge's normalized
-forge/llm/types.py vocabulary and the OpenAI Chat Completions wire shape,
-plus the exception-mapping boundary (forge/llm/errors.py). No network: the
+"""elstin/llm/openai_compat.py — translation between elstin's normalized
+elstin/llm/types.py vocabulary and the OpenAI Chat Completions wire shape,
+plus the exception-mapping boundary (elstin/llm/errors.py). No network: the
 underlying AsyncOpenAI client's `chat.completions.create` is replaced with
 a fake returning SimpleNamespace stand-ins shaped like the real SDK's
 response objects.
@@ -13,15 +13,15 @@ from types import SimpleNamespace
 import openai
 import pytest
 
-from forge.llm.errors import (
+from elstin.llm.errors import (
     LlmAuthError,
     LlmBadRequestError,
     LlmContextOverflowError,
     LlmRateLimitError,
     is_context_overflow_message,
 )
-from forge.llm.openai_compat import OpenAiCompatProvider
-from forge.llm.types import (
+from elstin.llm.openai_compat import OpenAiCompatProvider
+from elstin.llm.types import (
     ImageBlock,
     LlmRequest,
     Message,
@@ -225,7 +225,7 @@ def _fake_http_response(status_code: int):
 # Sending the field to a model that rejects it, or sending a LEVEL a model
 # rejects, is a 400 -> LlmBadRequestError, which the agent loop never
 # retries. So the adapter decides per model, and drops the field rather
-# than gamble. See forge/llm/openai_compat.py's _EFFORT_SUPPORT.
+# than gamble. See elstin/llm/openai_compat.py's _EFFORT_SUPPORT.
 
 
 @pytest.mark.parametrize(
@@ -242,7 +242,7 @@ def _fake_http_response(status_code: int):
         ("z-ai/glm-5.3", "high", "high"),
         ("moonshotai/kimi-k3", "low", "low"),
         # GLM accepts low/high/max but NOT medium — which happens to be
-        # forge's default dev_sdk_effort, so forwarding it would 400 every
+        # elstin's default dev_sdk_effort, so forwarding it would 400 every
         # single call. Dropped instead.
         ("z-ai/glm-5.3", "medium", None),
         ("moonshotai/kimi-k3", "high", None),
@@ -255,7 +255,7 @@ def _fake_http_response(status_code: int):
     ],
 )
 def test_resolve_reasoning_effort(model, effort, expected):
-    from forge.llm.openai_compat import resolve_reasoning_effort
+    from elstin.llm.openai_compat import resolve_reasoning_effort
 
     assert resolve_reasoning_effort(model, effort) == expected
 
@@ -302,7 +302,7 @@ def _request() -> LlmRequest:
 async def test_a_call_that_never_answers_is_abandoned_at_the_deadline(monkeypatch):
     """One run's single model call sat for 2h39m. The SDK's own timeout is per
     read and a keep-alive gateway never trips it, so the deadline is ours."""
-    from forge.llm.errors import LlmTimeoutError
+    from elstin.llm.errors import LlmTimeoutError
 
     provider = OpenAiCompatProvider(api_key="sk-test", request_timeout_seconds=0.05)
     cancelled = asyncio.Event()
@@ -346,10 +346,10 @@ async def test_no_deadline_when_it_is_off(monkeypatch, off):
     assert (await provider.complete(_request())).text() == "late but fine"
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 def test_the_configured_deadline_reaches_the_provider():
-    from forge.config.store import set_config
-    from forge.llm.registry import get_provider
+    from elstin.config.store import set_config
+    from elstin.llm.registry import get_provider
 
     set_config("openai_api_key", "sk-test")
     assert get_provider()._request_timeout == 900  # the default: a legitimate dev step tops out near 7.5 minutes

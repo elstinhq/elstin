@@ -1,4 +1,4 @@
-"""PUT /api/stories/{key}/kind — the human override for forge's sync-time
+"""PUT /api/stories/{key}/kind — the human override for elstin's sync-time
 guess at whether a ticket is implementation or validation work.
 
 The endpoint's real job is not just flipping a column: reclassifying a
@@ -12,13 +12,13 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from forge.state.manager import StateManager
+from elstin.state.manager import StateManager
 
-pytestmark = pytest.mark.usefixtures("forge_db", "fake_agents")
+pytestmark = pytest.mark.usefixtures("elstin_db", "fake_agents")
 
 
 def _client() -> TestClient:
-    from forge.app import create_app
+    from elstin.app import create_app
 
     return TestClient(create_app())
 
@@ -85,7 +85,7 @@ def test_get_story_exposes_kind_and_its_reason(epic):
 
 
 def test_get_story_exposes_run_outcome_once_dispatched(epic):
-    from forge.services.usage import record_run_outcome
+    from elstin.services.usage import record_run_outcome
 
     with _client() as client:
         # Never dispatched: no thread_id yet, nothing to report.
@@ -124,14 +124,14 @@ def _stub_arm(monkeypatch, result: bool) -> list[str]:
         asked.append(story["jira_key"])
         return "dev" if result else None
 
-    monkeypatch.setattr("forge.api.run_routes.arm_resume_after_failure", fake_arm)
+    monkeypatch.setattr("elstin.api.run_routes.arm_resume_after_failure", fake_arm)
     return asked
 
 
 def test_retry_resumes_at_dev_when_the_run_failed_there(epic, monkeypatch):
     """The story is not sent back to planning: it is dispatched for a resume,
     and the run's activity feed says why no plan was made."""
-    from forge.services.run_activity import list_activity
+    from elstin.services.run_activity import list_activity
 
     asked = _stub_arm(monkeypatch, True)
     epic.set_epic_phase("ENG-1", "failed")
@@ -165,7 +165,7 @@ def test_retry_still_works_when_the_resume_check_itself_fails(epic, monkeypatch)
     async def broken(sm, epic_row, story):
         raise RuntimeError("the checkpoint store is unreachable")
 
-    monkeypatch.setattr("forge.api.run_routes.arm_resume_after_failure", broken)
+    monkeypatch.setattr("elstin.api.run_routes.arm_resume_after_failure", broken)
     epic.set_story_status("ENG-2", "failed", failure_stage="run")
 
     with _client() as client:
@@ -315,7 +315,7 @@ def test_answer_unknown_story_is_a_404():
 
 
 def test_sync_story_refreshes_prose_and_preserves_progress(epic, monkeypatch: pytest.MonkeyPatch):
-    import forge.api.run_routes as run_routes
+    import elstin.api.run_routes as run_routes
 
     epic.set_story_status("ENG-2", "dispatched")
     epic.update_story_jira_fields("ENG-2", summary="Stale", description="Stale body")
@@ -339,7 +339,7 @@ def test_sync_story_refreshes_prose_and_preserves_progress(epic, monkeypatch: py
 
 
 def test_sync_story_404_for_unknown_key(monkeypatch: pytest.MonkeyPatch):
-    import forge.api.run_routes as run_routes
+    import elstin.api.run_routes as run_routes
 
     def fake_sync(story_key: str) -> dict:
         raise ValueError(f"No such story: {story_key}")
@@ -352,7 +352,7 @@ def test_sync_story_404_for_unknown_key(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_sync_story_404_when_jira_ticket_missing(epic, monkeypatch: pytest.MonkeyPatch):
-    import forge.api.run_routes as run_routes
+    import elstin.api.run_routes as run_routes
     from jira import JIRAError
 
     def fake_sync(story_key: str) -> dict:
@@ -367,7 +367,7 @@ def test_sync_story_404_when_jira_ticket_missing(epic, monkeypatch: pytest.Monke
 
 # --- POST /api/stories/{key}/start — the manual-run-mode Start button, and
 # the immediate approve/retry follow-through it needs once a project turns
-# auto_run_enabled off (forge/config/store.py). ----------------------------
+# auto_run_enabled off (elstin/config/store.py). ----------------------------
 
 
 @pytest.fixture()
@@ -375,7 +375,7 @@ def manual_run_epic(project_id, git_repo, tmp_path) -> StateManager:
     """A one-story, one-level epic under a project with auto_run_enabled
     off and plan approval off too, wired to a real repo — nothing
     dispatches it except an explicit POST .../start."""
-    from forge.config.store import set_config, set_project_config
+    from elstin.config.store import set_config, set_project_config
 
     set_config("worktrees_base_dir", str(tmp_path / "worktrees"))
     set_project_config(project_id, "auto_run_enabled", "false")
@@ -432,7 +432,7 @@ def test_approve_drives_a_manual_run_story_to_the_next_gate(manual_run_epic, mon
     (see test_start_story_dispatches_a_pending_story), so this exercises the
     approve-triggers-immediately path by turning the plan-approval gate back
     on for just this scenario."""
-    from forge.config.store import set_project_config
+    from elstin.config.store import set_project_config
 
     project_id = manual_run_epic.get_epic("ENG-1")["project_id"]
     set_project_config(project_id, "require_plan_approval", "true")

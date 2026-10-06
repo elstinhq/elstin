@@ -9,10 +9,10 @@ import { Button } from "../ui/button";
 import { Card } from "../ui/card";
 import { Textarea } from "../ui/textarea";
 
-// Mirrors forge/services/lessons.py's MAX_LESSON_CHARS; the API enforces it.
+// Mirrors elstin/services/lessons.py's MAX_LESSON_CHARS; the API enforces it.
 const MAX_LESSON_CHARS = 300;
 
-// Lessons forge distilled from stories that needed retries. Each is a
+// Lessons elstin distilled from stories that needed retries. Each is a
 // candidate until a person accepts it: the planner and dev read an accepted
 // lesson as authoritative, so this panel is where a wrong one gets caught —
 // the evidence quote is shown so it can be checked against what happened,
@@ -195,7 +195,7 @@ export function LessonsPanel({ projectId }: { projectId: number }) {
           {proposed.length ? <Tag label={`${proposed.length} to review`} appearance="warning" /> : null}
         </div>
         <p className="text-muted-foreground text-xs">
-          What forge learned from stories that needed retries. Accept a lesson and the planner and dev read it as
+          What Elstin learned from stories that needed retries. Accept a lesson and the planner and dev read it as
           authoritative on later stories — fix anything wrong first. The repo itself is never changed.
         </p>
 
@@ -205,7 +205,7 @@ export function LessonsPanel({ projectId }: { projectId: number }) {
           <p className="text-muted-foreground text-sm">
             {captureOn
               ? "None yet — a lesson appears after a story that needed retries merges."
-              : "None yet, and capturing is off. Turn on “capture lessons” in this project's settings to have forge propose them."}
+              : "None yet, and capturing is off. Turn on “capture lessons” in this project's settings to have Elstin propose them."}
           </p>
         ) : (
           <div className="flex flex-col gap-4">

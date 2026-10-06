@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-import forge.mcp.github_server as github_server
+import elstin.mcp.github_server as github_server
 
 pytestmark = pytest.mark.asyncio
 

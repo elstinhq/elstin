@@ -1,8 +1,8 @@
 """stories.pr_open_error — surfaces a failed PR-open attempt in the UI.
 
-_maybe_open_pull_request (forge/daemon/main.py) is intentionally
+_maybe_open_pull_request (elstin/daemon/main.py) is intentionally
 best-effort: a push or GitHub-API failure never blocks the story's own
-progress through forge's approval gates. Before this column existed, that
+progress through elstin's approval gates. Before this column existed, that
 failure only ever reached a logger.warning() call, invisible outside the
 daemon's own stdout — a story could sit at "awaiting PR review" with no PR
 ever opened and no way to tell why short of reading server logs. This

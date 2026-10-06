@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import os
 
-from forge.tools import java_tools
+from elstin.tools import java_tools
 
 
 def _write(path: str, content: str) -> None:

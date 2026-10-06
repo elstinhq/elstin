@@ -10,22 +10,22 @@ from dataclasses import dataclass, field
 import pytest
 from fastapi.testclient import TestClient
 
-import forge.agents.roles.dev_loop as dev_loop_module
-import forge.agents.roles.planner_loop as planner_module
-import forge.daemon.main as daemon
-import forge.orchestration.graph as graph_module
-from forge.agents.loop import LoopConfig, run_agent_loop
-from forge.agents.roles.dev_loop import run_dev
-from forge.agents.roles.planner_loop import run_planner
-from forge.config.store import set_config
-from forge.llm.base import Capabilities
-from forge.llm.types import LlmRequest, LlmResponse, TextBlock, ToolCallBlock, Usage, text_message
-from forge.services.guidance import MAX_GUIDANCE_CHARS, render_guidance, take_guidance
-from forge.services.run_activity import list_activity
-from forge.state.manager import StateManager
-from forge.state.manager_story import MAX_PENDING_GUIDANCE, GuidanceQueueFull
+import elstin.agents.roles.dev_loop as dev_loop_module
+import elstin.agents.roles.planner_loop as planner_module
+import elstin.daemon.main as daemon
+import elstin.orchestration.graph as graph_module
+from elstin.agents.loop import LoopConfig, run_agent_loop
+from elstin.agents.roles.dev_loop import run_dev
+from elstin.agents.roles.planner_loop import run_planner
+from elstin.config.store import set_config
+from elstin.llm.base import Capabilities
+from elstin.llm.types import LlmRequest, LlmResponse, TextBlock, ToolCallBlock, Usage, text_message
+from elstin.services.guidance import MAX_GUIDANCE_CHARS, render_guidance, take_guidance
+from elstin.services.run_activity import list_activity
+from elstin.state.manager import StateManager
+from elstin.state.manager_story import MAX_PENDING_GUIDANCE, GuidanceQueueFull
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
 
 @pytest.fixture()
@@ -212,7 +212,7 @@ async def test_a_run_with_no_id_has_no_queue_to_read(git_repo, monkeypatch):
 
 
 def _client() -> TestClient:
-    from forge.app import create_app
+    from elstin.app import create_app
 
     return TestClient(create_app())
 

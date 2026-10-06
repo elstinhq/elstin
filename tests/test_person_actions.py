@@ -8,15 +8,15 @@ import pytest
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("forge_db", "fake_agents")
+@pytest.mark.usefixtures("elstin_db", "fake_agents")
 async def test_actions_a_plan_leaves_to_a_person_are_kept_and_named_in_the_epic_pull_request(git_repo, tmp_path, project_id, monkeypatch):
     """Reconciling against an extract the agent cannot reach is a
     person's to run. The plan goes ahead without it; the board shows it, and the
     epic's pull request says it is not done until someone does it."""
-    import forge.daemon.main as daemon
-    import forge.orchestration.graph as graph
-    from forge.config.store import set_config
-    from forge.state.manager import StateManager
+    import elstin.daemon.main as daemon
+    import elstin.orchestration.graph as graph
+    from elstin.config.store import set_config
+    from elstin.state.manager import StateManager
     from tests.conftest import fake_run_planner
 
     set_config("openai_api_key", "sk-openai-dummy")
@@ -55,9 +55,9 @@ async def test_actions_a_plan_leaves_to_a_person_are_kept_and_named_in_the_epic_
     assert "Left to a person" not in daemon._epic_pr_body(sm, sm.get_epic("ENG-1"))
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 def test_a_story_with_no_person_actions_reads_back_an_empty_list(project_id):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2"]], manual_gate=True, summary="x")

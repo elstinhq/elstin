@@ -1,10 +1,10 @@
-"""forge/agents/tool_arguments.py — repairing a model's tool-call
+"""elstin/agents/tool_arguments.py — repairing a model's tool-call
 arguments where the tool's schema makes the intent unambiguous, then
 reporting whatever is still wrong. Pure functions, no loop."""
 from __future__ import annotations
 
-from forge.agents.tool_arguments import argument_errors, repair_arguments
-from forge.tools.dev_tools import TOOL_SCHEMAS
+from elstin.agents.tool_arguments import argument_errors, repair_arguments
+from elstin.tools.dev_tools import TOOL_SCHEMAS
 
 
 def _schema(tool: str) -> dict:

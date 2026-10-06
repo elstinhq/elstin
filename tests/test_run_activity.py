@@ -1,4 +1,4 @@
-"""Round-trips forge/services/run_activity.py's append_activity/list_activity
+"""Round-trips elstin/services/run_activity.py's append_activity/list_activity
 against Postgres — confirms the DB-backed rewrite behaves exactly like the
 in-memory ring buffer it replaced: per-run isolation, insertion order, an
 empty list for a run with no events, and a working `limit`."""
@@ -6,11 +6,11 @@ from __future__ import annotations
 
 import pytest
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
 
 def _seed_story(project_id: int) -> str:
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id)
@@ -19,7 +19,7 @@ def _seed_story(project_id: int) -> str:
 
 
 def test_append_then_list_round_trips_in_order(project_id):
-    from forge.services.run_activity import append_activity, list_activity
+    from elstin.services.run_activity import append_activity, list_activity
 
     run_id = _seed_story(project_id)
     append_activity(run_id, type="status", phase="planner", title="Planning started")
@@ -38,13 +38,13 @@ def test_append_then_list_round_trips_in_order(project_id):
 
 
 def test_unknown_run_id_returns_empty_list(project_id):
-    from forge.services.run_activity import list_activity
+    from elstin.services.run_activity import list_activity
 
     assert list_activity("no-such-run") == []
 
 
 def test_events_are_isolated_per_run(project_id):
-    from forge.services.run_activity import append_activity, list_activity
+    from elstin.services.run_activity import append_activity, list_activity
 
     run_id = _seed_story(project_id)
     append_activity(run_id, type="status", phase="dev", title="For ENG-2")
@@ -57,7 +57,7 @@ def test_events_are_isolated_per_run(project_id):
 
 
 def test_limit_keeps_the_most_recent_events_in_chronological_order(project_id):
-    from forge.services.run_activity import append_activity, list_activity
+    from elstin.services.run_activity import append_activity, list_activity
 
     run_id = _seed_story(project_id)
     for i in range(5):
@@ -69,6 +69,6 @@ def test_limit_keeps_the_most_recent_events_in_chronological_order(project_id):
 
 
 def test_empty_run_id_is_a_noop():
-    from forge.services.run_activity import append_activity
+    from elstin.services.run_activity import append_activity
 
     assert append_activity("", type="status", phase="dev", title="ignored") == {}

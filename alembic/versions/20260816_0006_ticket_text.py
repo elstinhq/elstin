@@ -1,5 +1,5 @@
 """epics.summary/description, stories.description — text already fetched
-from JIRA during sync (see forge/services/jira_service.py's JiraTicket) but
+from JIRA during sync (see elstin/services/jira_service.py's JiraTicket) but
 previously discarded. Populated once at sync time, same "set at creation,
 never overwritten by a re-sync" convention as everything else create_epic/
 create_story already own.

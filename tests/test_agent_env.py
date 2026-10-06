@@ -1,7 +1,7 @@
-"""forge/tools/agent_env.py — the environment a command run for an agent sees.
+"""elstin/tools/agent_env.py — the environment a command run for an agent sees.
 
 Code the agent wrote runs inside these commands, so the daemon's credentials
-(DATABASE_URL, tokens in the shell forge was started from) must not be in it.
+(DATABASE_URL, tokens in the shell elstin was started from) must not be in it.
 """
 from __future__ import annotations
 
@@ -10,20 +10,20 @@ import subprocess
 
 import pytest
 
-from forge.tools import agent_env, language_hooks, safe_shell
-from forge.tools.agent_env import agent_environment
+from elstin.tools import agent_env, language_hooks, safe_shell
+from elstin.tools.agent_env import agent_environment
 
 
 def _env(**extra):
     return {
         "PATH": "/usr/bin:/bin",
-        "HOME": "/home/forge",
+        "HOME": "/home/elstin",
         "LANG": "en_US.UTF-8",
         "LC_ALL": "C",
         "JAVA_HOME": "/jvm/21",
         "GRADLE_OPTS": "-Xmx2g",
         "HTTPS_PROXY": "http://proxy.internal:3128",
-        "DATABASE_URL": "postgresql://forge:hunter2@db/forge",
+        "DATABASE_URL": "postgresql://elstin:hunter2@db/elstin",
         "OPENAI_API_KEY": "sk-live",
         "GITHUB_TOKEN": "ghp_live",
         "AWS_SECRET_ACCESS_KEY": "aws",
@@ -37,7 +37,7 @@ def test_a_toolchain_gets_what_it_needs_and_nothing_else():
     env = agent_environment(_env(), passthrough=())
     assert env == {
         "PATH": "/usr/bin:/bin",
-        "HOME": "/home/forge",
+        "HOME": "/home/elstin",
         "LANG": "en_US.UTF-8",
         "LC_ALL": "C",
         "JAVA_HOME": "/jvm/21",
@@ -109,7 +109,7 @@ def test_the_name_pattern_and_its_exceptions():
 def test_a_command_in_a_worktree_does_not_see_the_daemons_credentials(tmp_path, monkeypatch):
     """End to end through both runners the agent's code goes through: the
     developer step's allowlisted shell and the gate's shared runner."""
-    monkeypatch.setenv("DATABASE_URL", "postgresql://forge:hunter2@db/forge")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://elstin:hunter2@db/elstin")
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_live")
     script = tmp_path / "show-env.sh"
     script.write_text('#!/bin/sh\necho "db=${DATABASE_URL:-unset} gh=${GITHUB_TOKEN:-unset} path=${PATH:+set}"\n')

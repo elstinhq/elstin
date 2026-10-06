@@ -6,8 +6,8 @@ from __future__ import annotations
 
 import pytest
 
-import forge.mcp.jira_server as jira_server
-from forge.services.jira_service import JiraTicket
+import elstin.mcp.jira_server as jira_server
+from elstin.services.jira_service import JiraTicket
 
 pytestmark = pytest.mark.asyncio
 

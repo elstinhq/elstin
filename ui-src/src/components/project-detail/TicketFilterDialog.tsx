@@ -54,7 +54,7 @@ const EMPTY: Draft = {
 };
 
 // Comma-separated text rather than pickers: valid statuses/labels/types are
-// per-JIRA-instance and forge has no schema endpoint to populate a dropdown
+// per-JIRA-instance and elstin has no schema endpoint to populate a dropdown
 // from, so a picker would either be wrong or need a round-trip per field
 // just to open the dialog.
 const splitList = (raw: string): string[] =>
@@ -250,7 +250,7 @@ export function TicketFilterDialog({ projectId, ticketSource, open, onClose }: T
               <Label htmlFor="filter-labels">Labels</Label>
               <Input
                 id="filter-labels"
-                placeholder="forge"
+                placeholder="elstin"
                 value={draft.labels}
                 onChange={(e) => patch({ labels: e.target.value })}
               />

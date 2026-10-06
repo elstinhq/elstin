@@ -1,5 +1,5 @@
 [project]
-name = "code_forge"
+name = "elstin"
 version = "0.1.0"
 description = "Local, single-tenant JIRA-epic-to-PR agent platform with a deterministic reconciler, Postgres-backed state, and per-story worktree isolation"
 requires-python = ">=3.11"
@@ -35,16 +35,16 @@ dev = [
 ]
 
 [project.scripts]
-forge-daemon = "forge.daemon.main:main"
-forge-mcp-jira = "forge.mcp.jira_server:main"
-forge-mcp-github = "forge.mcp.github_server:main"
+elstin-daemon = "elstin.daemon.main:main"
+elstin-mcp-jira = "elstin.mcp.jira_server:main"
+elstin-mcp-github = "elstin.mcp.github_server:main"
 
 [build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["forge*"]
+include = ["elstin*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

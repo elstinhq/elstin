@@ -1,6 +1,6 @@
-"""forge/services/generation.py:chat_completion_json — the single-shot,
+"""elstin/services/generation.py:chat_completion_json — the single-shot,
 no-tools JSON completion verifier/QA share. Exercised against a fake
-LlmProvider via forge.services.generation.get_provider, never the real
+LlmProvider via elstin.services.generation.get_provider, never the real
 OpenAI adapter."""
 from __future__ import annotations
 
@@ -8,12 +8,12 @@ from dataclasses import dataclass, field
 
 import pytest
 
-import forge.services.generation as generation
-from forge.llm.base import Capabilities
-from forge.llm.errors import LlmBadRequestError
-from forge.llm.types import LlmRequest, LlmResponse, TextBlock, Usage
+import elstin.services.generation as generation
+from elstin.llm.base import Capabilities
+from elstin.llm.errors import LlmBadRequestError
+from elstin.llm.types import LlmRequest, LlmResponse, TextBlock, Usage
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
 
 @dataclass
@@ -47,7 +47,7 @@ async def test_parses_plain_json_content(monkeypatch):
 
 
 async def test_tolerates_prose_around_json():
-    from forge.services.generation import _parse_json_content
+    from elstin.services.generation import _parse_json_content
 
     assert _parse_json_content('Sure, here you go:\n{"a": 1}\nHope that helps!') == {"a": 1}
 
@@ -107,7 +107,7 @@ async def test_provider_error_is_wrapped_as_runtime_error(monkeypatch):
 def test_parses_a_fenced_json_block():
     """The most common chatty-model wrapper. The old greedy brace regex
     happened to survive this one, but only by accident."""
-    from forge.services.generation import _parse_json_content
+    from elstin.services.generation import _parse_json_content
 
     assert _parse_json_content('```json\n{"passed": true, "issues": []}\n```') == {"passed": True, "issues": []}
 
@@ -115,7 +115,7 @@ def test_parses_a_fenced_json_block():
 def test_prefers_the_real_object_over_a_worked_example():
     """Two objects in one reply broke the greedy brace span outright: it
     spanned from the first { to the last }, which parses as nothing."""
-    from forge.services.generation import _parse_json_content
+    from elstin.services.generation import _parse_json_content
 
     reply = 'For example a passing report looks like {"passed": true}.\n\nHere is mine:\n{"passed": false, "required_fixes": ["fix the thing"], "detail": {"file": "a.py"}}'
 
@@ -125,7 +125,7 @@ def test_prefers_the_real_object_over_a_worked_example():
 
 
 def test_nested_braces_and_strings_containing_braces_survive():
-    from forge.services.generation import _parse_json_content
+    from elstin.services.generation import _parse_json_content
 
     assert _parse_json_content('{"note": "use {} for an empty dict", "a": {"b": {"c": 1}}}') == {
         "note": "use {} for an empty dict", "a": {"b": {"c": 1}},
@@ -135,17 +135,17 @@ def test_nested_braces_and_strings_containing_braces_survive():
 def test_a_bare_list_is_not_accepted_as_a_report():
     """Every caller immediately does .get() on the result, so handing back
     a list just moves the failure somewhere less obvious."""
-    from forge.services.generation import GenerationError, _parse_json_content
+    from elstin.services.generation import GenerationError, _parse_json_content
 
     with pytest.raises(GenerationError):
         _parse_json_content('["a", "b"]')
 
 
 def test_prose_with_no_json_raises_generation_error_not_json_decode_error():
-    """This is the type forge/orchestration/graph.py catches. A bare
+    """This is the type elstin/orchestration/graph.py catches. A bare
     JSONDecodeError escaping into the daemon's poll loop is what used to
     abandon the rest of the cycle."""
-    from forge.services.generation import GenerationError, _parse_json_content
+    from elstin.services.generation import GenerationError, _parse_json_content
 
     with pytest.raises(GenerationError, match="no JSON object"):
         _parse_json_content("I was unable to review this change.")
@@ -155,7 +155,7 @@ async def test_unparseable_reply_surfaces_as_generation_error(monkeypatch):
     provider = FakeProvider(response=_response("Sorry, I can't help with that."))
     monkeypatch.setattr(generation, "get_provider", lambda *_args, **_kwargs: provider)
 
-    from forge.services.generation import GenerationError
+    from elstin.services.generation import GenerationError
 
     with pytest.raises(GenerationError):
         await generation.chat_completion_json(messages=[{"role": "user", "content": "review"}])
@@ -167,7 +167,7 @@ async def test_provider_error_is_a_generation_error_and_still_a_runtime_error(mo
     provider = FakeProvider(response=LlmBadRequestError("nope"))
     monkeypatch.setattr(generation, "get_provider", lambda *_args, **_kwargs: provider)
 
-    from forge.services.generation import GenerationError
+    from elstin.services.generation import GenerationError
 
     with pytest.raises(GenerationError):
         await generation.chat_completion_json(messages=[{"role": "user", "content": "go"}])
@@ -190,9 +190,9 @@ def test_role_schemas_satisfy_strict_structured_output_rules(schema_name):
     is rejected at request time — on a real run, and in no test that fakes
     the provider."""
     if schema_name == "verifier":
-        from forge.agents.roles.verifier import _VERIFIER_JSON_SCHEMA as schema
+        from elstin.agents.roles.verifier import _VERIFIER_JSON_SCHEMA as schema
     else:
-        from forge.agents.roles.qa import QA_JSON_SCHEMA as schema
+        from elstin.agents.roles.qa import QA_JSON_SCHEMA as schema
 
     def check(node, path="root"):
         if not isinstance(node, dict):
@@ -212,7 +212,7 @@ def test_qa_schema_does_not_ask_the_model_for_the_test_suite_result():
     """The deterministic suite result is stamped on after parsing, because
     evidence outranks the model's opinion. Asking for it would invite an
     invented one."""
-    from forge.agents.roles.qa import QA_JSON_SCHEMA
+    from elstin.agents.roles.qa import QA_JSON_SCHEMA
 
     assert "full_test_suite" not in QA_JSON_SCHEMA["properties"]
 
@@ -220,7 +220,7 @@ def test_qa_schema_does_not_ask_the_model_for_the_test_suite_result():
 def test_verifier_schema_allows_a_finding_with_no_single_file():
     """A review finding can be about the change as a whole. Under strict
     mode that has to be a nullable type, not an omitted key."""
-    from forge.agents.roles.verifier import _VERIFIER_JSON_SCHEMA
+    from elstin.agents.roles.verifier import _VERIFIER_JSON_SCHEMA
 
     file_type = _VERIFIER_JSON_SCHEMA["properties"]["issues"]["items"]["properties"]["file"]["type"]
     assert "null" in file_type
@@ -230,7 +230,7 @@ async def test_schema_is_forwarded_to_the_provider_when_supported(monkeypatch):
     provider = FakeProvider(response=_response('{"passed": true}', structured={"passed": True}))
     monkeypatch.setattr(generation, "get_provider", lambda *_args, **_kwargs: provider)
 
-    from forge.agents.roles.verifier import _VERIFIER_JSON_SCHEMA
+    from elstin.agents.roles.verifier import _VERIFIER_JSON_SCHEMA
 
     await generation.chat_completion_json(
         messages=[{"role": "user", "content": "review"}],
@@ -244,7 +244,7 @@ async def test_schema_is_forwarded_to_the_provider_when_supported(monkeypatch):
 
 
 async def test_a_caller_can_pick_the_model_and_the_default_is_the_verifier_qa_one(monkeypatch):
-    from forge.config.store import set_config
+    from elstin.config.store import set_config
 
     set_config("verifier_qa_model", "small-review-model")
     provider = FakeProvider(response=_response('{"a": 1}'))

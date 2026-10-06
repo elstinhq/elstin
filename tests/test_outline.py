@@ -1,4 +1,4 @@
-"""forge/tools/outline.py — a file's declarations with line numbers, so a
+"""elstin/tools/outline.py — a file's declarations with line numbers, so a
 model can read one method's range instead of paging through the file.
 
 Language-neutral by design (tests/test_architecture.py forbids a tool
@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import os
 
-from forge.tools.dev_tools import READ_ONLY_TOOLS as DEV_READ_ONLY, TOOL_SCHEMAS, make_dev_tools
-from forge.tools.outline import outline_file, outline_source
-from forge.tools.planner_tools import READ_ONLY_TOOLS as PLANNER_READ_ONLY, make_planner_tools
+from elstin.tools.dev_tools import READ_ONLY_TOOLS as DEV_READ_ONLY, TOOL_SCHEMAS, make_dev_tools
+from elstin.tools.outline import outline_file, outline_source
+from elstin.tools.planner_tools import READ_ONLY_TOOLS as PLANNER_READ_ONLY, make_planner_tools
 
 JAVA = '''package com.example.search;
 

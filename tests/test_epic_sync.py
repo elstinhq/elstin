@@ -7,11 +7,11 @@ from __future__ import annotations
 import pytest
 from jira import JIRAError
 
-import forge.services.epic_sync as epic_sync
-from forge.services.jira_service import JiraTicket
-from forge.state.manager import StateManager
+import elstin.services.epic_sync as epic_sync
+from elstin.services.jira_service import JiraTicket
+from elstin.state.manager import StateManager
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
 
 def _ticket(

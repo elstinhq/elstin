@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from forge.services.story_kind import KIND_DEV, KIND_QA, classify_story_kind
+from elstin.services.story_kind import KIND_DEV, KIND_QA, classify_story_kind
 
 # Verbatim summaries from PROJ-3480's children.
 _PROJ_3480_DEV_SUMMARIES = [

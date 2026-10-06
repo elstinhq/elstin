@@ -9,7 +9,7 @@ import { useConfigCategories, useGlobalConfig, useSetGlobalConfig } from "../../
 import { buildSections } from "../../lib/settingsSections";
 import { useToast } from "../../lib/toast";
 
-const STORAGE_KEY = "forge.settings.open";
+const STORAGE_KEY = "Elstin.settings.open";
 
 // Which sections were open last time, plus the one a `#planner`-style link
 // names. Storage can be unavailable (a private window, blocked site data) or

@@ -1,4 +1,4 @@
-"""Filter-based ticket ingestion (forge/services/jira_filter.py).
+"""Filter-based ticket ingestion (elstin/services/jira_filter.py).
 
 JQL compilation is pure and needs no DB. The sweep tests use a fake
 JiraService — same pattern as tests/test_epic_sync.py — patched on *both*
@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import pytest
 
-import forge.services.epic_sync as epic_sync
-import forge.services.jira_filter as jira_filter
-from forge.services.jira_service import JiraTicket
-from forge.state.manager import StateManager
+import elstin.services.epic_sync as epic_sync
+import elstin.services.jira_filter as jira_filter
+from elstin.services.jira_service import JiraTicket
+from elstin.state.manager import StateManager
 
 
 def _ticket(
@@ -45,14 +45,14 @@ def test_build_jql_combines_structured_fields():
             "jira_project_key": "MMA",
             "assignee": "leo@example.com",
             "statuses": ["To Do", "In Progress"],
-            "labels": ["forge"],
+            "labels": ["elstin"],
             "issue_types": ["Story", "Bug"],
         }
     )
     assert jql == (
         'project = "MMA" AND assignee = "leo@example.com" '
         'AND status IN ("To Do", "In Progress") '
-        'AND labels IN ("forge") '
+        'AND labels IN ("elstin") '
         'AND issuetype IN ("Story", "Bug") '
         "ORDER BY created DESC"
     )
@@ -228,7 +228,7 @@ def test_re_walk_that_changes_nothing_is_not_reported_as_a_change(project_id, fa
     assert steady_state["skipped"] == []  # re-checked, not skipped
 
 
-def test_sync_skips_a_ticket_owned_by_another_project(fake_jira, forge_db):
+def test_sync_skips_a_ticket_owned_by_another_project(fake_jira, elstin_db):
     sm = StateManager()
     owner = sm.create_project("Owner")
     other = sm.create_project("Other")

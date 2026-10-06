@@ -1,4 +1,4 @@
-"""The background ticket-filter sweep (forge/daemon/ticket_sync.py). The
+"""The background ticket-filter sweep (elstin/daemon/ticket_sync.py). The
 sweep's actual behavior lives in tests/test_jira_filter.py — what matters
 here is that the loop picks the right projects, survives one project's
 failure, and clamps a bad interval."""
@@ -6,11 +6,11 @@ from __future__ import annotations
 
 import pytest
 
-import forge.daemon.ticket_sync as ticket_sync
-from forge.config.store import set_config
-from forge.state.manager import StateManager
+import elstin.daemon.ticket_sync as ticket_sync
+from elstin.config.store import set_config
+from elstin.state.manager import StateManager
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
 
 def test_poll_interval_defaults_and_clamps():

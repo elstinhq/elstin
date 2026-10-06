@@ -10,7 +10,7 @@ import subprocess
 
 import pytest
 
-from forge.tools.worktree import (
+from elstin.tools.worktree import (
     DEFAULT_TYPE_PREFIX,
     branch_name_for,
     branch_type_for,
@@ -31,7 +31,7 @@ def test_slugify_and_branch_naming():
 
 def test_branch_type_comes_from_labels_first_then_issue_type():
     """A label is the signal a human set on purpose, so it outranks the
-    issue type — the same precedence forge/services/story_kind.py uses. It
+    issue type — the same precedence elstin/services/story_kind.py uses. It
     is also the only signal GitHub gives: every GitHub issue's issue_type
     is the literal "Issue", and enhancement/bug live in the labels."""
     assert branch_type_for("Issue", ["enhancement"]) == "feat"
@@ -46,7 +46,7 @@ def test_branch_type_comes_from_labels_first_then_issue_type():
 
 
 def test_a_github_story_is_named_by_its_issue_number_not_the_internal_key():
-    """`gh.leo-elstin.tg_case_study.3` is an identifier forge synthesises;
+    """`gh.leo-elstin.tg_case_study.3` is an identifier elstin synthesises;
     it means nothing to a person reading `git branch`. The issue number
     does, and it is what the PR links back to."""
     assert branch_name_for(
@@ -57,7 +57,7 @@ def test_a_github_story_is_named_by_its_issue_number_not_the_internal_key():
 
 
 def test_a_jira_key_survives_whole_so_jira_still_auto_links_the_branch():
-    """forge/tools/worktree.py's module docstring: the key is in the branch
+    """elstin/tools/worktree.py's module docstring: the key is in the branch
     on purpose. Shortening or lower-casing it silently breaks the link from
     the issue's development panel back to the work."""
     name = branch_name_for("ENG-123", "Prices page crashes on empty", issue_type="Bug")
@@ -108,7 +108,7 @@ def test_create_worktree_reuses_existing_local_branch(git_repo, tmp_path):
 
 
 def test_create_worktree_rejects_non_git_directory(tmp_path):
-    from forge.tools.worktree import WorktreeError
+    from elstin.tools.worktree import WorktreeError
 
     with pytest.raises(WorktreeError):
         create_worktree(
@@ -125,7 +125,7 @@ def _local_branches(repo: str) -> set[str]:
 
 
 def test_discard_removes_the_worktree_and_its_local_branch_and_nothing_else(git_repo, tmp_path):
-    from forge.tools.worktree import create_worktree, discard_worktree
+    from elstin.tools.worktree import create_worktree, discard_worktree
 
     wt = create_worktree(git_repo, story_key="ENG-1", summary="Add a widget", worktrees_base_dir=str(tmp_path / "wt"))
     keep = create_worktree(git_repo, story_key="ENG-2", summary="Other work", worktrees_base_dir=str(tmp_path / "wt"))
@@ -141,7 +141,7 @@ def test_discard_removes_the_worktree_and_its_local_branch_and_nothing_else(git_
 
 def test_discard_never_touches_a_pushed_copy_of_the_branch(git_repo, tmp_path):
     """Removing a ticket is local only: what was pushed stays pushed."""
-    from forge.tools.worktree import create_worktree, discard_worktree
+    from elstin.tools.worktree import create_worktree, discard_worktree
 
     wt = create_worktree(git_repo, story_key="ENG-1", summary="Add a widget", worktrees_base_dir=str(tmp_path / "wt"))
     subprocess.run(["git", "-C", wt["worktree_path"], "push", "-q", "origin", wt["branch"]], check=True, capture_output=True)
@@ -153,7 +153,7 @@ def test_discard_never_touches_a_pushed_copy_of_the_branch(git_repo, tmp_path):
 
 
 def test_discard_is_idempotent_and_quiet_about_what_is_already_gone(git_repo, tmp_path):
-    from forge.tools.worktree import create_worktree, discard_worktree
+    from elstin.tools.worktree import create_worktree, discard_worktree
 
     wt = create_worktree(git_repo, story_key="ENG-1", summary="Add a widget", worktrees_base_dir=str(tmp_path / "wt"))
     discard_worktree(git_repo, wt["worktree_path"], wt["branch"])
@@ -164,7 +164,7 @@ def test_discard_is_idempotent_and_quiet_about_what_is_already_gone(git_repo, tm
 
 
 def test_discard_removes_a_leftover_directory_git_no_longer_knows_about(git_repo, tmp_path):
-    from forge.tools.worktree import discard_worktree
+    from elstin.tools.worktree import discard_worktree
 
     stray = tmp_path / "wt" / "eng-1"
     stray.mkdir(parents=True)
@@ -176,7 +176,7 @@ def test_discard_removes_a_leftover_directory_git_no_longer_knows_about(git_repo
 
 
 def test_discard_refuses_to_delete_the_default_branch(git_repo):
-    from forge.tools.worktree import discard_worktree
+    from elstin.tools.worktree import discard_worktree
 
     result = discard_worktree(git_repo, None, "main")
 
@@ -185,7 +185,7 @@ def test_discard_refuses_to_delete_the_default_branch(git_repo):
 
 
 def test_discard_still_clears_the_directory_when_the_repo_is_gone(tmp_path):
-    from forge.tools.worktree import discard_worktree
+    from elstin.tools.worktree import discard_worktree
 
     stray = tmp_path / "wt" / "eng-1"
     stray.mkdir(parents=True)
@@ -243,19 +243,19 @@ def test_fetch_can_never_prompt_or_wait_forever(git_repo, monkeypatch):
 
 def test_fetch_uses_the_github_token_for_a_github_origin_and_cleans_up(git_repo, monkeypatch):
     _set_origin(git_repo, "https://x-access-token@github.com/leo-elstin/fitpal")
-    monkeypatch.setattr("forge.services.github_service.get_config", lambda key, *a, **k: "ghp_secret")
+    monkeypatch.setattr("elstin.services.github_service.get_config", lambda key, *a, **k: "ghp_secret")
     seen = _spy_on_fetch(monkeypatch)
 
     _fetch_origin(git_repo)
 
     assert seen[0]["askpass_existed"]
-    assert seen[0]["env"]["FORGE_PUSH_GIT_TOKEN"] == "ghp_secret"
+    assert seen[0]["env"]["ELSTIN_PUSH_GIT_TOKEN"] == "ghp_secret"
     assert not os.path.exists(seen[0]["askpass"]), "the askpass script must not outlive the fetch"
 
 
 def test_fetch_never_hands_the_github_token_to_another_host(git_repo, monkeypatch):
     _set_origin(git_repo, "https://gitlab.example.com/team/widgets.git")
-    monkeypatch.setattr("forge.services.github_service.get_config", lambda key, *a, **k: "ghp_secret")
+    monkeypatch.setattr("elstin.services.github_service.get_config", lambda key, *a, **k: "ghp_secret")
     seen = _spy_on_fetch(monkeypatch)
 
     _fetch_origin(git_repo)
@@ -268,7 +268,7 @@ def test_fetch_never_hands_the_github_token_to_another_host(git_repo, monkeypatc
 def test_a_failed_fetch_is_logged_but_does_not_stop_the_worktree(git_repo, tmp_path, monkeypatch, caplog):
     _spy_on_fetch(monkeypatch, returncode=128, stderr="fatal: could not read Username for 'https://github.com'")
 
-    with caplog.at_level(logging.WARNING, logger="forge.worktree"):
+    with caplog.at_level(logging.WARNING, logger="elstin.worktree"):
         result = create_worktree(git_repo, story_key="ENG-9", summary="Private repo", worktrees_base_dir=str(tmp_path / "wt"))
 
     assert os.path.isdir(result["worktree_path"])
@@ -278,7 +278,7 @@ def test_a_failed_fetch_is_logged_but_does_not_stop_the_worktree(git_repo, tmp_p
 def test_a_timed_out_fetch_does_not_stop_the_worktree(git_repo, tmp_path, monkeypatch, caplog):
     _spy_on_fetch(monkeypatch, raises=subprocess.TimeoutExpired(cmd="git fetch origin", timeout=120))
 
-    with caplog.at_level(logging.WARNING, logger="forge.worktree"):
+    with caplog.at_level(logging.WARNING, logger="elstin.worktree"):
         result = create_worktree(git_repo, story_key="ENG-10", summary="Stalled remote", worktrees_base_dir=str(tmp_path / "wt"))
 
     assert os.path.isdir(result["worktree_path"])

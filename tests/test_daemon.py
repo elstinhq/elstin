@@ -4,7 +4,7 @@ epic branch locally by the merge queue — no per-story pull request, no PR
 gates. Only then does the story that depends on one of them start, from the
 epic branch. Run for real against Postgres and a real git repo — worktree
 creation and the epic-branch merges are genuine git operations. Only the LLM
-calls inside forge/agents/roles/*_loop.py are replaced by the `fake_agents`
+calls inside elstin/agents/roles/*_loop.py are replaced by the `fake_agents`
 fixture (conftest.py), so this needs no network access or API key.
 """
 from __future__ import annotations
@@ -14,19 +14,19 @@ import subprocess
 
 import pytest
 
-from forge.config.store import set_config, set_project_config
-from forge.orchestration.integration import integration_branch_name
-from forge.daemon.main import check_story_action, execute_story_action, poll_once
-from forge.orchestration.reconciler import Blocked, DispatchStory
-from forge.state.manager import StateManager
+from elstin.config.store import set_config, set_project_config
+from elstin.orchestration.integration import integration_branch_name
+from elstin.daemon.main import check_story_action, execute_story_action, poll_once
+from elstin.orchestration.reconciler import Blocked, DispatchStory
+from elstin.state.manager import StateManager
 
-pytestmark = [pytest.mark.usefixtures("forge_db", "fake_agents"), pytest.mark.asyncio]
+pytestmark = [pytest.mark.usefixtures("elstin_db", "fake_agents"), pytest.mark.asyncio]
 
 
 def _configure(worktrees_base_dir: str) -> None:
     # Dummy JIRA values: poll_once's daemon-wide gate only checks
     # openai_api_key now (JIRA-configuredness is per-project — see
-    # forge/config/store.py's PROJECT_OVERRIDABLE_KEYS), but Phase 1's
+    # elstin/config/store.py's PROJECT_OVERRIDABLE_KEYS), but Phase 1's
     # daemon never actually calls JiraService anyway (no JIRA-driven epic
     # discovery yet — epics/stories are seeded directly into StateManager
     # here, same as a future JIRA-polling importer would).
@@ -44,7 +44,7 @@ def _create_epic_with_repo(sm: StateManager, jira_key: str, *, project_id: int, 
 
 
 async def test_epic_flows_by_dependencies_and_merges_locally(git_repo: str, tmp_path, project_id, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("DATABASE_URL", os.environ["DATABASE_URL"])  # already set by forge_db; explicit for clarity
+    monkeypatch.setenv("DATABASE_URL", os.environ["DATABASE_URL"])  # already set by elstin_db; explicit for clarity
     _configure(str(tmp_path / "worktrees"))
 
     sm = StateManager()
@@ -92,7 +92,7 @@ async def test_epic_flows_by_dependencies_and_merges_locally(git_repo: str, tmp_
 async def test_poll_once_dispatches_without_an_openai_api_key(git_repo: str, tmp_path, project_id):
     """Dispatch (creating the worktree, moving a story to
     awaiting_plan_approval) is a reconciler/daemon decision that never
-    touches forge/llm/registry.py — only the planner/dev/verifier/qa role
+    touches elstin/llm/registry.py — only the planner/dev/verifier/qa role
     functions do, and those are replaced by the `fake_agents` fixture here
     (conftest.py), so a missing key would only ever surface once a real
     LLM call actually happened. poll_once must not gate dispatch on one
@@ -114,7 +114,7 @@ async def test_poll_once_dispatches_without_an_openai_api_key(git_repo: str, tmp
 
 
 async def test_poll_once_skips_epic_with_no_repo_assigned(tmp_path, project_id):
-    """An epic synced from JIRA before a folder is chosen (forge/services/
+    """An epic synced from JIRA before a folder is chosen (elstin/services/
     epic_sync.py) must sit idle rather than crash trying to create a
     worktree for a None repo."""
     _configure(str(tmp_path / "worktrees"))
@@ -132,10 +132,10 @@ async def test_retry_after_a_run_failure_redispatches_and_succeeds(
     git_repo: str, tmp_path, project_id, monkeypatch: pytest.MonkeyPatch
 ):
     """A verifier that never passes exhausts its iterations and fails the
-    run — which halts the whole epic (forge/orchestration/reconciler.py)
+    run — which halts the whole epic (elstin/orchestration/reconciler.py)
     and, critically, stops the daemon from even polling it (Epic.phase
     becomes "failed", excluded by list_active_epic_keys — see
-    forge/state/manager_epic.py). retry_story has to move both the story
+    elstin/state/manager_epic.py). retry_story has to move both the story
     and the epic phase, or the redispatch below would never happen."""
     _configure(str(tmp_path / "worktrees"))
 
@@ -146,7 +146,7 @@ async def test_retry_after_a_run_failure_redispatches_and_succeeds(
     await poll_once(sm, wait=True)
     assert sm.get_story("ENG-2")["status"] == "awaiting_plan_approval"
 
-    import forge.orchestration.graph as graph_module
+    import elstin.orchestration.graph as graph_module
 
     async def failing_verifier(**kwargs) -> dict:
         return {"verifier_report": {"passed": False, "required_fixes": ["nope"]}, "diffs": [], "messages": []}
@@ -204,7 +204,7 @@ async def test_a_finished_story_is_committed_and_its_commit_lands_on_the_epic_br
     _create_epic_with_repo(sm, "ENG-1", project_id=project_id, repo_path=git_repo, levels=[["ENG-2"]])
     sm.create_story("ENG-2", epic_key="ENG-1", wave=0, summary="Add a widget")
 
-    import forge.orchestration.graph as graph_module
+    import elstin.orchestration.graph as graph_module
 
     async def dev_writes_a_file(**kwargs) -> dict:
         with open(os.path.join(kwargs["worktree_path"], "widget.py"), "w") as f:
@@ -248,7 +248,7 @@ async def test_poll_once_uses_project_scoped_gate_override(git_repo: str, tmp_pa
     resolves gates per-epic's project, not from the flat global config."""
     _configure(str(tmp_path / "worktrees"))
 
-    from forge.config.store import set_project_config
+    from elstin.config.store import set_project_config
 
     sm = StateManager()
     project_id = sm.create_project("Fast-track")
@@ -271,7 +271,7 @@ async def test_a_coverage_gap_is_recorded_and_the_story_still_merges(
     story so the epic's pull request can name it."""
     _configure(str(tmp_path / "worktrees"))
 
-    import forge.orchestration.graph as graph_module
+    import elstin.orchestration.graph as graph_module
 
     async def fake_verifier_coverage_gap_only(**kwargs):
         return {
@@ -383,8 +383,8 @@ async def test_a_bad_verifier_reply_fails_one_story_without_abandoning_the_poll_
 
     monkeypatch.setattr(sm, "list_active_epic_keys", lambda: ["ENG-1", "ENG-10"])
 
-    import forge.orchestration.graph as graph_module
-    from forge.services.generation import GenerationError
+    import elstin.orchestration.graph as graph_module
+    from elstin.services.generation import GenerationError
 
     async def verifier_answers_with_prose(**kwargs) -> dict:
         # Only the first epic's story gets the bad reply; run_id is the
@@ -417,7 +417,7 @@ async def test_a_retried_story_plans_with_the_answers_already_given(git_repo: st
     """One story: a person answered the planner's question, the run then
     failed, and Retry — a fresh run, not a resume — planned without the
     answer, exporting the column it had said to leave out."""
-    import forge.orchestration.graph as graph
+    import elstin.orchestration.graph as graph
     from tests.conftest import fake_run_planner
 
     _configure(str(tmp_path / "worktrees"))
@@ -446,8 +446,8 @@ async def test_a_retried_story_plans_with_the_answers_already_given(git_repo: st
 async def test_retry_keeps_the_work_the_failed_run_left_and_the_planner_is_told(git_repo: str, tmp_path, project_id, monkeypatch: pytest.MonkeyPatch):
     """One story: Retry recreated the story's main worktree — throwing away a
     backend that compiled and passed its tests — while keeping its portal."""
-    import forge.orchestration.graph as graph
-    from forge.services.run_activity import list_activity
+    import elstin.orchestration.graph as graph
+    from elstin.services.run_activity import list_activity
     from tests.conftest import fake_run_planner
 
     _configure(str(tmp_path / "worktrees"))

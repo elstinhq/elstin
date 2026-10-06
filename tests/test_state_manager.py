@@ -1,16 +1,16 @@
 """Round-trips epic/story/PR bookkeeping through StateManager. Confirms
-forge-internal fields persist and that JIRA-sourced fields (jira_key,
+elstin-internal fields persist and that JIRA-sourced fields (jira_key,
 assignment) are never mutated by any StateManager write method — only
-forge-internal tracking columns are."""
+elstin-internal tracking columns are."""
 from __future__ import annotations
 
 import pytest
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
 
 def test_epic_round_trip(project_id):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2", "ENG-3"], ["ENG-4"]])
@@ -39,7 +39,7 @@ def test_epic_round_trip(project_id):
 
 
 def test_create_epic_is_idempotent(project_id):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id)
@@ -50,7 +50,7 @@ def test_create_epic_is_idempotent(project_id):
 
 
 def test_story_lifecycle_and_listing(project_id):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id)
@@ -82,11 +82,11 @@ def test_story_lifecycle_and_listing(project_id):
 def test_clarification_answer_resolves_the_gate_and_clears_the_question(project_id):
     """set_story_clarification_answers is what POST /api/stories/{key}/answer
     calls after resolving a human's picks against the pending questions —
-    see forge/api/run_routes.py. It must clear the pending question (no
+    see elstin/api/run_routes.py. It must clear the pending question (no
     stale form on the next read) and clear the same gate /approve does,
     since the reconciler cannot tell this state apart from an ordinary
     plan-approval one."""
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id)
@@ -111,7 +111,7 @@ def test_clarification_answer_resolves_the_gate_and_clears_the_question(project_
 
 
 def test_clarification_questions_defaults_to_empty_and_clears_on_none(project_id):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id)
@@ -127,7 +127,7 @@ def test_clarification_questions_defaults_to_empty_and_clears_on_none(project_id
 
 
 def test_setting_clarification_answers_on_an_unknown_story_returns_false(project_id):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     assert StateManager().set_story_clarification_answers("ENG-999", []) is False
 
@@ -135,7 +135,7 @@ def test_setting_clarification_answers_on_an_unknown_story_returns_false(project
 def test_retry_story_run_failure_redispatches(project_id):
     """failure_stage="run" (or unset) goes back to "pending" — a full
     redispatch, since a run failure never reaches a PR to preserve."""
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id)
@@ -158,7 +158,7 @@ def test_retry_story_resume_at_dev_goes_back_to_dispatched(project_id):
     "pending" — DispatchStory would start the graph over and plan again.
     "dispatched" with nothing executing it is what the reconciler answers with
     a ResumeStory, so the run continues from the checkpoint it was left at."""
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id)
@@ -177,7 +177,7 @@ def test_retry_story_resume_at_dev_goes_back_to_dispatched(project_id):
 
 def test_retry_story_resume_at_dev_does_not_change_a_merge_retry(project_id):
     """A merge failure never re-plans, so there is nothing to resume."""
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id)
@@ -193,7 +193,7 @@ def test_retry_story_merge_failure_reattempts_merge(project_id):
     """failure_stage="merge" goes back to "ready_to_merge" with a fresh merge
     budget — the run itself already succeeded, so its committed work is kept
     and only the landing on the epic branch is tried again."""
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id)
@@ -212,7 +212,7 @@ def test_retry_story_merge_failure_reattempts_merge(project_id):
 
 
 def test_retry_story_increments_across_repeated_retries(project_id):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id)
@@ -227,7 +227,7 @@ def test_retry_story_increments_across_repeated_retries(project_id):
 
 
 def test_pull_request_upsert(project_id):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id)
@@ -250,7 +250,7 @@ def test_pull_request_upsert(project_id):
 
 
 def test_comment_watermark_round_trip():
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     assert sm.get_comment_watermark("ENG-1") is None
@@ -263,7 +263,7 @@ def test_comment_watermark_round_trip():
 
 
 def test_project_and_project_repo_round_trip():
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     project_id = sm.create_project("Widgets", description="The widgets project")
@@ -310,7 +310,7 @@ def test_project_and_project_repo_round_trip():
 
 
 def test_list_projects_orders_newest_first_and_counts():
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     first = sm.create_project("First")

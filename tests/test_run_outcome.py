@@ -1,6 +1,6 @@
-"""forge/services/usage.py's run-outcome counters and their Alembic
+"""elstin/services/usage.py's run-outcome counters and their Alembic
 migration. The counters are the per-run *shape* telemetry
-(forge/db/models/run_outcome.py) that any future tuning or eval work has to
+(elstin/db/models/run_outcome.py) that any future tuning or eval work has to
 read, so what matters here is that they accumulate correctly, that a
 missing row stays distinguishable from a row of zeros, and that the table
 a deployed database actually gets matches the model.
@@ -11,9 +11,9 @@ import os
 
 import pytest
 
-from forge.services.usage import get_run_outcome, get_story_usage, record_run_outcome
+from elstin.services.usage import get_run_outcome, get_story_usage, record_run_outcome
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
 
 def test_counters_accumulate_across_calls():
@@ -68,7 +68,7 @@ def test_unknown_counter_is_rejected_loudly():
 
 def test_a_write_failure_does_not_propagate(monkeypatch):
     """Telemetry for tuning must never fail a run that is otherwise fine."""
-    import forge.services.usage as usage_module
+    import elstin.services.usage as usage_module
 
     def boom():
         raise RuntimeError("database gone")
@@ -79,7 +79,7 @@ def test_a_write_failure_does_not_propagate(monkeypatch):
 
 
 def test_story_usage_carries_the_outcome_and_distinguishes_unmeasured():
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     project_id = sm.create_project("p")
@@ -107,11 +107,11 @@ def test_migration_produces_the_table_the_model_expects():
     from alembic.config import Config
     from sqlalchemy import create_engine, inspect, text
 
-    from forge.db.models import StoryRunOutcome
+    from elstin.db.models import StoryRunOutcome
 
     url = os.environ["DATABASE_URL"]
     engine = create_engine(url)
-    # forge_db already created every table via create_all; drop them so
+    # elstin_db already created every table via create_all; drop them so
     # alembic runs against a clean database, then leave it migrated (the
     # fixture drops everything again on teardown).
     with engine.begin() as conn:

@@ -3,9 +3,9 @@
 The gate and the dev step run builds and tests (a JVM, a Node process and whatever
 they spawn), and up to `max_parallel_stories` stories do so at once. Nothing said how
 much memory those commands needed, so nothing could say whether three at once fit on
-the machine. forge/tools/process_monitor.py samples each command's process tree while
+the machine. elstin/tools/process_monitor.py samples each command's process tree while
 it runs, and the highest figure a run reached is kept here with the command that
-reached it (forge/services/memory_usage.py).
+reached it (elstin/services/memory_usage.py).
 
 Backfill: none — NULL for every existing row, and NULL means "not measured", which is
 the truth for every run before this existed. It is deliberately not zero: "measured as

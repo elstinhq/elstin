@@ -1,4 +1,4 @@
-"""Reconciling the board with its source (forge/services/external_sync.py):
+"""Reconciling the board with its source (elstin/services/external_sync.py):
 what a re-walk does to a ticket's content and to a closed or deleted one.
 
 A fake source stands in for JIRA — no credentials, no network."""
@@ -7,13 +7,13 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-import forge.services.epic_sync as epic_sync
-import forge.services.jira_filter as jira_filter
-from forge.services.external_sync import CLOSED_EXTERNALLY, ON_HOLD_IN_SOURCE
-from forge.services.jira_service import JiraTicket
-from forge.state.manager import StateManager
+import elstin.services.epic_sync as epic_sync
+import elstin.services.jira_filter as jira_filter
+from elstin.services.external_sync import CLOSED_EXTERNALLY, ON_HOLD_IN_SOURCE
+from elstin.services.jira_service import JiraTicket
+from elstin.state.manager import StateManager
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
 
 def _t(key, *, summary=None, description="", parent=None, issue_type="Story", closed=False, status="To Do") -> JiraTicket:
@@ -184,8 +184,8 @@ def test_an_existing_row_with_no_baseline_is_confirmed_not_flagged_when_it_match
     _epic(project_id, _t("ENG-2", parent="ENG-1"))
     sm = StateManager()
     _start(sm, "ENG-2", "dispatched")
-    from forge.db.engine import session_scope
-    from forge.db.models import Story
+    from elstin.db.engine import session_scope
+    from elstin.db.models import Story
 
     with session_scope() as session:
         session.get(Story, "ENG-2").external_hash = None  # as every pre-existing row is
@@ -311,7 +311,7 @@ def test_reopening_restores_only_a_skip_that_sync_made(project_id):
 
 def test_a_ticket_on_hold_when_added_is_set_aside_and_does_not_block_the_epic(project_id):
     """One story: On Hold in JIRA (filed under To Do, so not closed), and
-    forge planned it anyway."""
+    elstin planned it anyway."""
     _epic(project_id, _t("ENG-2", parent="ENG-1", status="On Hold"), _t("ENG-3", parent="ENG-1"))
 
     sm = StateManager()
@@ -359,7 +359,7 @@ def test_off_hold_it_comes_back_and_closed_it_stays_closed(project_id):
 
 
 def test_which_statuses_mean_on_hold_is_a_project_setting(project_id):
-    from forge.config.store import set_project_config
+    from elstin.config.store import set_project_config
 
     set_project_config(project_id, "ticket_hold_statuses", "Waiting for PO")
     _epic(project_id, _t("ENG-2", parent="ENG-1", status="Waiting for PO"), _t("ENG-3", parent="ENG-1", status="On Hold"))
@@ -370,7 +370,7 @@ def test_which_statuses_mean_on_hold_is_a_project_setting(project_id):
 
 
 def test_the_epic_pull_request_says_which_ticket_is_on_hold(project_id):
-    import forge.daemon.main as daemon
+    import elstin.daemon.main as daemon
 
     _epic(project_id, _t("ENG-2", parent="ENG-1", status="On Hold"))
     sm = StateManager()
@@ -459,7 +459,7 @@ def test_the_sweep_re_reads_an_epic_the_filter_no_longer_matches(project_id):
 
 
 def _client() -> TestClient:
-    from forge.app import create_app
+    from elstin.app import create_app
 
     return TestClient(create_app())
 

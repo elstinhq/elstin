@@ -79,23 +79,23 @@ async def fake_run_epic_qa(**kwargs) -> dict:
 
 @pytest.fixture()
 def fake_agents(monkeypatch: pytest.MonkeyPatch):
-    """Monkeypatches forge.orchestration.graph's five entry points
+    """Monkeypatches elstin.orchestration.graph's five entry points
     (run_planner/run_dev/run_deterministic_gate/run_verifier/run_epic_qa)
     with deterministic, no-network fakes — four are real LLM-provider
-    callers in production (see forge/agents/roles/*_loop.py, which route
-    through forge/agents/loop.py and forge/llm/registry.py), and the
+    callers in production (see elstin/agents/roles/*_loop.py, which route
+    through elstin/agents/loop.py and elstin/llm/registry.py), and the
     Tier 1 gate runs the repo's real toolchain against a worktree these
     tests don't have, so tests must never invoke any of them for real.
     graph.py imported these names at module load time, so the patch
     target is the graph module's own attribute, not the origin module's."""
-    import forge.orchestration.graph as graph_module
+    import elstin.orchestration.graph as graph_module
 
     monkeypatch.setattr(graph_module, "run_planner", fake_run_planner)
     monkeypatch.setattr(graph_module, "run_dev", fake_run_dev)
     monkeypatch.setattr(graph_module, "run_deterministic_gate", fake_run_deterministic_gate)
     # The merge queue re-runs the gate on a story brought up to date with the
-    # epic branch (forge/daemon/main.py) — the same fake, imported there.
-    import forge.daemon.main as daemon_module
+    # epic branch (elstin/daemon/main.py) — the same fake, imported there.
+    import elstin.daemon.main as daemon_module
 
     monkeypatch.setattr(daemon_module, "run_deterministic_gate", fake_run_deterministic_gate)
     monkeypatch.setattr(graph_module, "run_verifier", fake_run_verifier)
@@ -103,19 +103,19 @@ def fake_agents(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture()
-def forge_db(postgres_url: str, monkeypatch: pytest.MonkeyPatch):
-    """Points forge.db.engine at the throwaway testcontainers Postgres,
+def elstin_db(postgres_url: str, monkeypatch: pytest.MonkeyPatch):
+    """Points elstin.db.engine at the throwaway testcontainers Postgres,
     creates all tables, and tears down cleanly. Also resets the config
     cache so each test starts from a known-empty app_config table."""
     monkeypatch.setenv("DATABASE_URL", postgres_url)
 
-    import forge.db.engine as engine_mod
+    import elstin.db.engine as engine_mod
 
     engine_mod._engine = None
     engine_mod._SessionLocal = None
 
-    from forge.db.base import Base
-    from forge.db.models import (  # noqa: F401
+    from elstin.db.base import Base
+    from elstin.db.models import (  # noqa: F401
         ActivityEvent,
         AppConfig,
         Epic,
@@ -132,7 +132,7 @@ def forge_db(postgres_url: str, monkeypatch: pytest.MonkeyPatch):
     engine = engine_mod.get_engine()
     Base.metadata.create_all(engine)
 
-    import forge.config.store as store_mod
+    import elstin.config.store as store_mod
 
     store_mod.invalidate_cache()
 
@@ -145,10 +145,10 @@ def forge_db(postgres_url: str, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture()
-def project_id(forge_db) -> int:
+def project_id(elstin_db) -> int:
     """A bare project for tests that only need *a* project_id to satisfy
     Epic's now-required FK — tests exercising project behavior itself use
     StateManager().create_project(...) directly instead."""
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     return StateManager().create_project("Test project")

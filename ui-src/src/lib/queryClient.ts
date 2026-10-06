@@ -17,4 +17,7 @@ export const queryKeys = {
   epicUsage: (epicKey: string) => ["epics", epicKey, "usage"] as const,
   storyUsage: (storyKey: string) => ["stories", storyKey, "usage"] as const,
   storyPlan: (storyKey: string) => ["stories", storyKey, "plan"] as const,
+  poSessions: (projectId: number) => ["projects", projectId, "po-sessions"] as const,
+  poSession: (sessionId: number) => ["po-sessions", sessionId] as const,
+  poMode: (projectId: number, epicKey: string) => ["projects", projectId, "po-mode", epicKey] as const,
 };

@@ -1,0 +1,143 @@
+"""Durable per-run activity log for the daemon's agent roles.
+
+Persists to Postgres (elstin/db/models/activity.py's ActivityEvent) instead
+of the process-local in-memory ring this module used to keep — activity now
+survives an app restart and is queryable after a run finishes, which is what
+the UI's story detail dialog reads via GET /api/stories/{key}/activity and
+streams live over GET /api/stories/{key}/stream (elstin/api/run_routes.py).
+
+Every append also hands the event to elstin/services/activity_stream.py,
+which pushes it straight to whoever is watching that run right now. The
+write to Postgres stays the durable record and the source of truth for a
+fresh page load; the fan-out is only a shortcut that removes the poll
+interval between an agent doing something and a human seeing it.
+
+Text is passed through elstin/services/redaction.py before it is written, so a
+credential an agent's tool output happened to print never reaches the feed.
+
+append_activity()/list_activity() keep their original signatures and return
+shape on purpose: every call site across elstin/agents/roles/*.py,
+elstin/orchestration/graph.py, and elstin/tools/dart_tools.py, plus the API
+route and the UI's rendering code, needed zero changes for this swap.
+"""
+from __future__ import annotations
+
+import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Literal
+
+from sqlalchemy import select
+
+from elstin.db.engine import session_scope
+from elstin.db.models import ActivityEvent
+from elstin.services.activity_stream import publish
+from elstin.services.redaction import redact, redact_value
+
+ActivityType = Literal["status", "thinking", "tool", "llm", "token"]
+# "po" is a PO session's own (elstin/agents/roles/po_loop.py), filed under run id `po-<id>`.
+ActivityPhase = Literal["planner", "dev", "verifier", "qa", "system", "po"]
+
+logger = logging.getLogger("elstin.activity")
+
+# Several attempts at one story can run at once (elstin/agents/roles/dev_variants.py)
+# and write to the same feed. A label set around one attempt prefixes every title
+# it writes, so a reader can tell whose step is whose. A ContextVar, so it follows
+# the attempt's own task (and the threads it starts) and no other.
+_label: ContextVar[str] = ContextVar("activity_label", default="")
+
+
+@contextmanager
+def activity_label(label: str) -> Iterator[None]:
+    token = _label.set(label)
+    try:
+        yield
+    finally:
+        _label.reset(token)
+
+
+def _row_to_dict(row: ActivityEvent) -> dict[str, Any]:
+    return {
+        # Monotonic per-insert, so it doubles as the stream cursor: the SSE
+        # route sends it as the event id and a reconnecting EventSource
+        # replays from there via Last-Event-ID (elstin/api/run_routes.py).
+        "id": row.id,
+        "run_id": row.run_id,
+        "type": row.type,
+        "phase": row.phase,
+        "title": row.title,
+        "detail": row.detail,
+        "files": row.files or [],
+        "meta": row.meta or {},
+        "ts": row.created_at.isoformat(),
+    }
+
+
+def append_activity(
+    run_id: str,
+    *,
+    type: ActivityType,
+    phase: ActivityPhase,
+    title: str,
+    detail: str | None = None,
+    files: list[str] | None = None,
+    meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not run_id:
+        return {}
+
+    # Tool output is stored and streamed as the agent produced it, so a command
+    # that printed a credential would otherwise keep it in the feed for good.
+    label = _label.get()
+    title = redact(f"[{label}] {title}" if label else title)
+    detail = redact(detail) if detail else detail
+    meta = redact_value(meta) if meta else meta
+
+    with session_scope() as session:
+        row = ActivityEvent(
+            run_id=run_id, type=type, phase=phase, title=title,
+            detail=detail, files=files or [], meta=meta or {},
+        )
+        session.add(row)
+        session.flush()
+        event = _row_to_dict(row)
+
+    logger.info("activity run_id=%s phase=%s title=%s", run_id, phase, title)
+    # After the session closes, so a live viewer never sees an event that a
+    # rollback then un-writes. publish() swallows its own failures — an
+    # agent turn must not break because nobody could be notified.
+    publish(event)
+    return event
+
+
+def last_event_at(run_id: str, *, phase: str, title: str):
+    """When the most recent event with this phase and title was written for
+    `run_id` (a timezone-aware datetime), or None. E.g. when a story's
+    planning last started ("planner", "Planning started")."""
+    with session_scope() as session:
+        return session.execute(
+            select(ActivityEvent.created_at)
+            .where(ActivityEvent.run_id == run_id, ActivityEvent.phase == phase, ActivityEvent.title == title)
+            .order_by(ActivityEvent.id.desc())
+            .limit(1)
+        ).scalars().first()
+
+
+def list_activity(run_id: str, *, limit: int | None = None, since_id: int = 0) -> list[dict[str, Any]]:
+    """Chronological (oldest first) — matches the shape the ring buffer used
+    to return. `limit` (when given) keeps the most recent N events, so a
+    long-running story's feed stays a bounded, fast fetch. `since_id`
+    returns only what was written after that event id — the incremental
+    read behind stream reconnects and slow-subscriber catch-up
+    (elstin/services/activity_stream.py)."""
+    with session_scope() as session:
+        query = select(ActivityEvent).where(ActivityEvent.run_id == run_id)
+        if since_id:
+            query = query.where(ActivityEvent.id > since_id)
+        if limit is not None:
+            rows = list(session.execute(query.order_by(ActivityEvent.id.desc()).limit(limit)).scalars().all())
+            rows.reverse()
+        else:
+            rows = list(session.execute(query.order_by(ActivityEvent.id)).scalars().all())
+        return [_row_to_dict(row) for row in rows]

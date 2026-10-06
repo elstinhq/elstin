@@ -20,8 +20,8 @@ export function AppShell({ rightLinkHref, rightLinkLabel, children }: AppShellPr
       <div className="flex min-h-screen flex-col">
         <header className="bg-background flex items-center justify-between gap-4 border-b px-6 py-3">
           <a href="/projects" className="text-base font-semibold">
-            <span className="hidden sm:inline">code_forge</span>
-            <span className="sm:hidden">cf</span>
+            <span className="hidden sm:inline">Elstin</span>
+            <span className="sm:hidden">E</span>
           </a>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" asChild>

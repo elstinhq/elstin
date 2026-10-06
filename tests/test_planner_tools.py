@@ -1,11 +1,11 @@
-"""forge/tools/planner_tools.py — the planner's own read-only Read/Grep/
-Glob equivalents (no provider offers built-in tools, so forge supplies
+"""elstin/tools/planner_tools.py — the planner's own read-only Read/Grep/
+Glob equivalents (no provider offers built-in tools, so elstin supplies
 these itself)."""
 from __future__ import annotations
 
 import os
 
-from forge.tools.planner_tools import make_planner_tools
+from elstin.tools.planner_tools import make_planner_tools
 
 
 def _write(root: str, rel_path: str, content: str) -> None:
@@ -50,7 +50,7 @@ def test_read_file_tool_windowed_read_keeps_lines_header_unnumbered(tmp_path):
 
 
 def test_read_file_tool_caps_an_unwindowed_read_and_numbers_from_the_real_line(tmp_path):
-    from forge.tools.grep import MAX_READ_LINES
+    from elstin.tools.grep import MAX_READ_LINES
 
     _write(str(tmp_path), "a.py", "\n".join(f"line{i}" for i in range(1, 601)) + "\n")
     functions, _ = make_planner_tools(project_path=str(tmp_path))
@@ -73,7 +73,7 @@ def test_read_file_tool_rejects_a_limit_over_the_cap(tmp_path):
 
 
 def test_read_only_tools_set_matches_the_schemas():
-    from forge.tools.planner_tools import READ_ONLY_TOOLS
+    from elstin.tools.planner_tools import READ_ONLY_TOOLS
 
     _functions, schemas = make_planner_tools(project_path="/tmp")
     assert READ_ONLY_TOOLS == {s["function"]["name"] for s in schemas}

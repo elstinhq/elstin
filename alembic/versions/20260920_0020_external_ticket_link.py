@@ -1,6 +1,6 @@
 """Where each ticket on the local board came from.
 
-forge's Postgres board is the source of truth for the agents; JIRA (and,
+elstin's Postgres board is the source of truth for the agents; JIRA (and,
 next, GitHub Issues) is the source of truth for what a ticket *says*. Until
 now the only trace of that was that the local key happened to be a JIRA
 key. These columns record the link explicitly, so a ticket can come from a
@@ -20,7 +20,7 @@ key *is* the JIRA key, so they become `external_source = 'jira'` with
 NULL — nothing recorded when they were last read or what they said — and a
 NULL hash simply means "baseline unknown" to the sync. Every existing
 project becomes `ticket_source = 'jira'` via the column default, so an
-installed forge behaves exactly as before until a project is switched.
+installed elstin behaves exactly as before until a project is switched.
 
 Revision ID: 20260920_0020
 Revises: 20260919_0019

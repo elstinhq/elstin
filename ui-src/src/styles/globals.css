@@ -1,8 +1,8 @@
-/* code_forge UI — shadcn/ui over Tailwind v4.
+/* Elstin UI — shadcn/ui over Tailwind v4.
  *
  * Compiled by the Tailwind CLI (see ../../build.mjs) into
  * settings-ui/vendor/app.css and linked once from each settings-ui/*.html
- * shell, the same way forge-ui.css used to be: not imported from a TS
+ * shell, the same way elstin-ui.css used to be: not imported from a TS
  * entry, so the three per-page JS bundles don't each ship their own copy.
  *
  * Dark mode keys off `[data-theme="dark"]` on <html>, not the `.dark`
@@ -13,6 +13,7 @@
  */
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "@xyflow/react/dist/style.css";
 
 @source "../**/*.{ts,tsx}";
 
@@ -140,3 +141,18 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* React Flow (story graph) — its own variables pointed at our theme tokens,
+ * so light/dark follow [data-theme] and the OS preference like everything else. */
+.react-flow {
+  --xy-background-color: transparent;
+  --xy-background-pattern-dots-color: var(--border);
+  --xy-edge-stroke: var(--muted-foreground);
+  --xy-controls-button-background-color: var(--background);
+  --xy-controls-button-background-color-hover: var(--muted);
+  --xy-controls-button-color: var(--foreground);
+  --xy-controls-button-border-color: var(--border);
+  --xy-attribution-background-color: transparent;
+  --xy-node-boxshadow-selected: none;
+}
+.react-flow__attribution a { color: var(--muted-foreground); }

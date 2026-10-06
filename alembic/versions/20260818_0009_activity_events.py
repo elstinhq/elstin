@@ -1,10 +1,10 @@
 """activity_events — durable per-run planner/dev/verifier/qa activity log.
 
-Replaces forge/services/run_activity.py's in-memory ring buffer, which lost
+Replaces elstin/services/run_activity.py's in-memory ring buffer, which lost
 every run's history on process restart and couldn't be queried across
 restarts. run_id is a story's own JIRA key in production (== LangGraph
 thread_id by construction), but deliberately not a foreign key to
-stories.jira_key — forge/orchestration/graph.py logs activity keyed on
+stories.jira_key — elstin/orchestration/graph.py logs activity keyed on
 whatever thread_id it's given, an opaque identifier as far as the graph is
 concerned (tests/test_graph.py runs it against synthetic uuid4() thread_ids
 with no backing story row).

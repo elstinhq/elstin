@@ -1,9 +1,9 @@
 """Wipe every row from the app's own tables — for local/dev use.
 
 Truncates everything registered on `Base.metadata` (see
-forge/db/models/__init__.py), plus the LangGraph checkpointer's own
+elstin/db/models/__init__.py), plus the LangGraph checkpointer's own
 tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes` — created by
-`AsyncPostgresSaver.setup()`, see forge/orchestration/graph.py; they carry
+`AsyncPostgresSaver.setup()`, see elstin/orchestration/graph.py; they carry
 every story's durable planner/dev/verifier state, so leaving them out
 means a "cleared" story still resumes mid-run instead of starting fresh).
 Uses CASCADE, so foreign-key ordering never matters, and RESTART IDENTITY
@@ -15,7 +15,7 @@ truncated, since the checkpointer's tables aren't created until the first
 story runs.
 
 Usage:
-    export DATABASE_URL=postgresql+psycopg://forge:forge@localhost:5433/forge
+    export DATABASE_URL=postgresql+psycopg://elstin:elstin@localhost:5433/elstin
     python scripts/clear_db.py            # prompts for confirmation
     python scripts/clear_db.py --yes      # skips the prompt
 """
@@ -27,9 +27,9 @@ import sys
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import make_url
 
-from forge.db.base import Base
-from forge.db.engine import get_engine
-from forge.db.models import *  # noqa: F401,F403 — registers every model on Base.metadata
+from elstin.db.base import Base
+from elstin.db.engine import get_engine
+from elstin.db.models import *  # noqa: F401,F403 — registers every model on Base.metadata
 
 CHECKPOINT_TABLES = ["checkpoints", "checkpoint_blobs", "checkpoint_writes"]
 

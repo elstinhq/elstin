@@ -1,7 +1,7 @@
 """GET /api/stories/{key}/plan — the only way to read a story's planner
 output back once the plan-approval gate has cleared, since the plan itself
 is never duplicated out of the LangGraph checkpoint into Postgres (see
-forge/db/models/gameplan.py's docstring). Runs the real checkpointer
+elstin/db/models/gameplan.py's docstring). Runs the real checkpointer
 against testcontainers Postgres, same as tests/test_graph.py, so this
 proves the route reads the same state a resume would.
 """
@@ -10,15 +10,15 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from forge.orchestration.graph import checkpointer_from_url, compile_graph
-from forge.orchestration.state import initial_state
-from forge.state.manager import StateManager
+from elstin.orchestration.graph import checkpointer_from_url, compile_graph
+from elstin.orchestration.state import initial_state
+from elstin.state.manager import StateManager
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("forge_db", "fake_agents")]
+pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("elstin_db", "fake_agents")]
 
 
 def _client() -> TestClient:
-    from forge.app import create_app
+    from elstin.app import create_app
 
     return TestClient(create_app())
 

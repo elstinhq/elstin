@@ -4,11 +4,11 @@ import { useBrowseFolder } from "../../hooks/useFolders";
 import { Button } from "../ui/button";
 import { cn } from "../../lib/utils";
 
-// A folder picker that browses the machine FORGE runs on. A browser cannot
+// A folder picker that browses the machine ELSTIN runs on. A browser cannot
 // hand a page the real path of a folder chosen in the system dialog, and the
-// path that matters is the one forge sees — inside Docker, a mount point, not
-// the host's path — so the listing comes from forge
-// (forge/services/repo_clone.py's browse_folder). Click a folder to open it;
+// path that matters is the one elstin sees — inside Docker, a mount point, not
+// the host's path — so the listing comes from elstin
+// (elstin/services/repo_clone.py's browse_folder). Click a folder to open it;
 // a git repo can be taken as is with its Use button.
 export function FolderBrowser({
   startPath,

@@ -1,9 +1,9 @@
-"""forge/agents/roles/dev_loop.py — the dev role's use of
-forge/agents/loop.py's run_agent_loop. classify_loop_result is pure
+"""elstin/agents/roles/dev_loop.py — the dev role's use of
+elstin/agents/loop.py's run_agent_loop. classify_loop_result is pure
 (tested standalone, no provider needed); run_dev itself is exercised
 end-to-end against a real git repo worktree and real dev tools, with only
-forge.llm.registry.get_provider replaced by a scripted fake — matching
-this repo's convention of faking at the service boundary (forge/llm/)
+elstin.llm.registry.get_provider replaced by a scripted fake — matching
+this repo's convention of faking at the service boundary (elstin/llm/)
 rather than mocking run_dev itself."""
 from __future__ import annotations
 
@@ -12,16 +12,16 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from forge.agents.roles.dev_loop import (
+from elstin.agents.roles.dev_loop import (
     DevLoopError,
     classify_loop_result,
     run_dev,
 )
-from forge.llm.base import Capabilities
-from forge.llm.errors import LlmBadRequestError
-from forge.llm.types import LlmRequest, LlmResponse, TextBlock, ToolCallBlock, Usage
+from elstin.llm.base import Capabilities
+from elstin.llm.errors import LlmBadRequestError
+from elstin.llm.types import LlmRequest, LlmResponse, TextBlock, ToolCallBlock, Usage
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
 
 @dataclass
@@ -60,7 +60,7 @@ def test_classify_loop_result(terminal_reason, is_error, expected):
 
 
 async def test_run_dev_raises_when_provider_not_configured(git_repo: str, monkeypatch: pytest.MonkeyPatch):
-    """No OpenAI key configured — forge/llm/registry.py raises
+    """No OpenAI key configured — elstin/llm/registry.py raises
     LlmNotConfiguredError, which run_dev must translate into its own
     DevLoopError rather than letting a registry-internal exception
     type leak to the graph node."""
@@ -69,8 +69,8 @@ async def test_run_dev_raises_when_provider_not_configured(git_repo: str, monkey
 
 
 async def test_run_dev_raises_on_hard_provider_error(git_repo: str, monkeypatch: pytest.MonkeyPatch):
-    import forge.agents.roles.dev_loop as dev_loop_module
-    from forge.config.store import set_config
+    import elstin.agents.roles.dev_loop as dev_loop_module
+    from elstin.config.store import set_config
 
     set_config("openai_api_key", "sk-test")
     monkeypatch.setattr(dev_loop_module, "get_provider", lambda *_args, **_kwargs: FakeProvider(script=[LlmBadRequestError("bad schema")]))
@@ -80,8 +80,8 @@ async def test_run_dev_raises_on_hard_provider_error(git_repo: str, monkeypatch:
 
 
 async def test_run_dev_completes_with_no_tool_calls(git_repo: str, monkeypatch: pytest.MonkeyPatch):
-    import forge.agents.roles.dev_loop as dev_loop_module
-    from forge.config.store import set_config
+    import elstin.agents.roles.dev_loop as dev_loop_module
+    from elstin.config.store import set_config
 
     set_config("openai_api_key", "sk-test")
     monkeypatch.setattr(dev_loop_module, "get_provider", lambda *_args, **_kwargs: FakeProvider(script=[_text_response("nothing to change")]))
@@ -98,8 +98,8 @@ async def test_run_dev_dispatches_a_real_dev_tool(git_repo: str, monkeypatch: py
     """End-to-end through the real make_dev_tools() wiring — the model
     calls write_file_tool for a file inside the plan's allowed paths, and
     that file actually lands in the worktree."""
-    import forge.agents.roles.dev_loop as dev_loop_module
-    from forge.config.store import set_config
+    import elstin.agents.roles.dev_loop as dev_loop_module
+    from elstin.config.store import set_config
 
     set_config("openai_api_key", "sk-test")
     monkeypatch.setattr(
@@ -125,9 +125,9 @@ async def test_run_dev_raises_when_the_turn_was_truncated(git_repo: str, monkeyp
     changing" and would sail through to verification and a PR-open
     attempt. This is the post-migration counterpart of the old
     "no result message" guard."""
-    import forge.agents.roles.dev_loop as dev_loop_module
-    from forge.config.store import set_config
-    from forge.llm.types import LlmResponse, Usage
+    import elstin.agents.roles.dev_loop as dev_loop_module
+    from elstin.config.store import set_config
+    from elstin.llm.types import LlmResponse, Usage
 
     set_config("openai_api_key", "sk-test")
     truncated = LlmResponse(
@@ -141,8 +141,8 @@ async def test_run_dev_raises_when_the_turn_was_truncated(git_repo: str, monkeyp
 
 
 async def test_run_dev_soft_stop_on_max_turns(git_repo: str, monkeypatch: pytest.MonkeyPatch):
-    import forge.agents.roles.dev_loop as dev_loop_module
-    from forge.config.store import set_config
+    import elstin.agents.roles.dev_loop as dev_loop_module
+    from elstin.config.store import set_config
 
     set_config("openai_api_key", "sk-test")
     set_config("dev_sdk_max_turns", "1")
@@ -161,9 +161,9 @@ async def test_run_dev_resumes_from_prior_history(git_repo: str, monkeypatch: py
     """A retry passes back the dev_history a prior soft-stopped run
     returned — run_dev must feed it straight back into the loop as
     prior conversation, not discard it."""
-    import forge.agents.roles.dev_loop as dev_loop_module
-    from forge.config.store import set_config
-    from forge.llm.types import history_to_json, text_message
+    import elstin.agents.roles.dev_loop as dev_loop_module
+    from elstin.config.store import set_config
+    from elstin.llm.types import history_to_json, text_message
 
     set_config("openai_api_key", "sk-test")
     prior_history = history_to_json([text_message("user", "earlier turn"), text_message("assistant", "earlier reply")])
@@ -192,9 +192,9 @@ async def test_run_dev_uses_gate_feedback_as_the_brief_on_top_of_prior_history(g
     as the next user turn — no fresh FIX MODE brief, no re-injected file
     contents — so the model keeps its context and the prompt prefix
     stays cacheable."""
-    import forge.agents.roles.dev_loop as dev_loop_module
-    from forge.config.store import set_config
-    from forge.llm.types import history_to_json, text_message
+    import elstin.agents.roles.dev_loop as dev_loop_module
+    from elstin.config.store import set_config
+    from elstin.llm.types import history_to_json, text_message
 
     set_config("openai_api_key", "sk-test")
     prior_history = history_to_json([text_message("user", "the plan"), text_message("assistant", "wrote a.py")])
@@ -225,8 +225,8 @@ async def test_run_dev_uses_gate_feedback_as_the_brief_on_top_of_prior_history(g
 async def test_run_dev_no_progress_stop_is_a_soft_stop(git_repo: str, monkeypatch: pytest.MonkeyPatch):
     """The idle-turn budget ends the loop like a turn cap does: truncated,
     history kept for the next round, no DevLoopError."""
-    import forge.agents.roles.dev_loop as dev_loop_module
-    from forge.config.store import set_config
+    import elstin.agents.roles.dev_loop as dev_loop_module
+    from elstin.config.store import set_config
 
     set_config("openai_api_key", "sk-test")
     set_config("dev_sdk_max_idle_turns", "2")
@@ -256,7 +256,7 @@ async def test_run_dev_no_progress_stop_is_a_soft_stop(git_repo: str, monkeypatc
     ],
 )
 def test_idle_budget_grows_with_the_plan_and_is_bounded(base, files, expected):
-    from forge.agents.roles.dev_loop import idle_budget_for_plan
+    from elstin.agents.roles.dev_loop import idle_budget_for_plan
 
     assert idle_budget_for_plan(base, files) == expected
 
@@ -264,8 +264,8 @@ def test_idle_budget_grows_with_the_plan_and_is_bounded(base, files, expected):
 async def _run_with_read_only_turns(git_repo: str, monkeypatch: pytest.MonkeyPatch, *, planned_files: int, read_turns: int):
     """A dev run that explores for `read_turns` turns and then finishes
     without ever writing — the shape of the run that failed three fix rounds."""
-    import forge.agents.roles.dev_loop as dev_loop_module
-    from forge.config.store import set_config
+    import elstin.agents.roles.dev_loop as dev_loop_module
+    from elstin.config.store import set_config
 
     set_config("openai_api_key", "sk-test")
     set_config("dev_sdk_max_idle_turns", "2")
@@ -302,8 +302,8 @@ async def test_a_multi_file_plan_that_only_loops_is_still_stopped(git_repo: str,
 async def test_dev_run_seeds_the_checklist_from_the_plan_and_reshows_it_each_turn(
     git_repo: str, monkeypatch: pytest.MonkeyPatch
 ):
-    import forge.agents.roles.dev_loop as dev_loop_module
-    from forge.config.store import set_config
+    import elstin.agents.roles.dev_loop as dev_loop_module
+    from elstin.config.store import set_config
 
     set_config("openai_api_key", "sk-test")
     captured = []
@@ -337,8 +337,8 @@ async def test_dev_run_seeds_the_checklist_from_the_plan_and_reshows_it_each_tur
 
 async def test_dev_run_resumes_a_prior_checklist_instead_of_reseeding(git_repo: str, monkeypatch: pytest.MonkeyPatch):
     """A fix round must not report already-written files as pending."""
-    import forge.agents.roles.dev_loop as dev_loop_module
-    from forge.config.store import set_config
+    import elstin.agents.roles.dev_loop as dev_loop_module
+    from elstin.config.store import set_config
 
     set_config("openai_api_key", "sk-test")
     captured = []
@@ -368,7 +368,7 @@ async def test_dev_run_resumes_a_prior_checklist_instead_of_reseeding(git_repo: 
 def test_changes_left_to_a_person_are_named_but_not_in_dev_s_plan():
     """A read-only repo's changes (plan_gate.normalize_plan) are a person's:
     dev codes against them but neither makes them nor copies them elsewhere."""
-    from forge.agents.roles.dev_loop import _build_prompt
+    from elstin.agents.roles.dev_loop import _build_prompt
 
     plan = {
         "files_to_modify": [{"path": "src/Search.java", "purpose": "columns"}],
@@ -388,7 +388,7 @@ def test_actions_left_to_a_person_are_named_to_dev_and_never_to_be_faked():
     """A developer dated an "audit" it had no way to run, because a
     reviewer kept asking for one. Told up front that it is a person's, and not
     to make anything that looks like it is done."""
-    from forge.agents.roles.dev_loop import _build_prompt
+    from elstin.agents.roles.dev_loop import _build_prompt
 
     plan = {
         "files_to_modify": [{"path": "docs/report.md", "purpose": "the report"}],
@@ -413,7 +413,7 @@ def test_a_fix_brief_sends_dev_to_run_the_plans_tests_not_just_the_analyzer():
     """A story was sent back three times for coverage and finished each round on
     "analyzer passed" — the brief ended "then run analyze_changed_files_tool",
     which never runs a test."""
-    from forge.agents.roles.dev import _build_iteration_brief
+    from elstin.agents.roles.dev import _build_iteration_brief
 
     fixes = ["Add focused coverage so the planned portal test command meets the 80% thresholds."]
     for continuing in (False, True):
@@ -428,7 +428,7 @@ def test_a_fix_brief_sends_dev_to_run_the_plans_tests_not_just_the_analyzer():
 
 
 def test_a_fix_brief_for_a_plan_with_no_tests_is_as_it_was():
-    from forge.agents.roles.dev import _build_iteration_brief
+    from elstin.agents.roles.dev import _build_iteration_brief
 
     brief = _build_iteration_brief("/nonexistent", set(), ["fix it"], [], test_commands=[])
 
@@ -442,9 +442,9 @@ def test_the_test_command_to_run_is_worked_out_per_repo_and_names_only_a_non_def
     repo — run_command_tool runs there already."""
     from types import SimpleNamespace
 
-    from forge.agents.roles.dev_loop import planned_test_commands
-    from forge.tools import language_hooks
-    from forge.tools.workspace import Workspace
+    from elstin.agents.roles.dev_loop import planned_test_commands
+    from elstin.tools import language_hooks
+    from elstin.tools.workspace import Workspace
 
     roots = {"api": "/w/api", "web": "/w/web"}
     workspace = Workspace(default_label="api", roots=roots)
@@ -466,8 +466,8 @@ async def test_files_the_story_already_changed_stay_writable_off_the_plan(git_re
     in the default repo and in another repo the plan does not even name."""
     import subprocess
 
-    import forge.agents.roles.dev_loop as dev_loop_module
-    from forge.config.store import set_config
+    import elstin.agents.roles.dev_loop as dev_loop_module
+    from elstin.config.store import set_config
 
     portal = tmp_path / "portal"
     subprocess.run(["git", "-C", git_repo, "worktree", "add", "-q", "-b", "feat/p", str(portal)], check=True)
@@ -497,8 +497,8 @@ async def test_files_the_story_already_changed_stay_writable_off_the_plan(git_re
 
 
 async def test_dev_runs_on_its_projects_model_and_asks_for_its_projects_provider(git_repo: str, monkeypatch: pytest.MonkeyPatch, project_id):
-    import forge.agents.roles.dev_loop as dev_loop_module
-    from forge.config.store import set_config, set_project_config
+    import elstin.agents.roles.dev_loop as dev_loop_module
+    from elstin.config.store import set_config, set_project_config
 
     set_config("openai_api_key", "sk-test")
     set_config("dev_sdk_model", "global-dev")
@@ -525,8 +525,8 @@ async def test_dev_runs_on_its_projects_model_and_asks_for_its_projects_provider
 
 
 async def test_an_explicit_model_beats_the_projects_choice(git_repo: str, monkeypatch: pytest.MonkeyPatch, project_id):
-    import forge.agents.roles.dev_loop as dev_loop_module
-    from forge.config.store import set_config, set_project_config
+    import elstin.agents.roles.dev_loop as dev_loop_module
+    from elstin.config.store import set_config, set_project_config
 
     set_config("openai_api_key", "sk-test")
     set_project_config(project_id, "dev_sdk_model", "project-dev")

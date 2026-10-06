@@ -1,4 +1,4 @@
-"""The ticket-source seam (forge/services/ticket_source.py): which source a
+"""The ticket-source seam (elstin/services/ticket_source.py): which source a
 project uses, that unknown ones fail loudly, and that a synced ticket
 records where it came from."""
 from __future__ import annotations
@@ -8,11 +8,11 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
-from forge.services import epic_sync, ticket_source
-from forge.services.jira_service import JiraTicket
-from forge.state.manager import StateManager
+from elstin.services import epic_sync, ticket_source
+from elstin.services.jira_service import JiraTicket
+from elstin.state.manager import StateManager
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
 
 class _FakeSource:
@@ -91,7 +91,7 @@ def test_a_ticket_created_natively_has_no_external_source():
 
 
 def test_the_project_route_only_accepts_a_registered_source(fake_source_registered):
-    from forge.app import create_app
+    from elstin.app import create_app
 
     project_id = StateManager().create_project("Widgets")
     with TestClient(create_app()) as client:
@@ -141,7 +141,7 @@ def test_migrations_produce_every_column_the_models_have_on_the_synced_tables():
     from alembic.config import Config
     from sqlalchemy import create_engine, inspect, text
 
-    from forge.db.models import Epic, Project, Story
+    from elstin.db.models import Epic, Project, Story
 
     engine = create_engine(os.environ["DATABASE_URL"])
     with engine.begin() as conn:

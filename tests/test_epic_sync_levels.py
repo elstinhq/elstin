@@ -7,8 +7,8 @@ ordering still comes out the way it did before QA tickets existed.
 """
 from __future__ import annotations
 
-from forge.services.epic_sync import _compute_levels, compute_dependencies, levels_from_dependencies
-from forge.services.jira_service import JiraTicket
+from elstin.services.epic_sync import _compute_levels, compute_dependencies, levels_from_dependencies
+from elstin.services.jira_service import JiraTicket
 
 
 def _ticket(key: str, *, blocked_by: list[str] | None = None) -> JiraTicket:
@@ -75,7 +75,7 @@ def test_level_order_is_by_issue_key_not_jira_return_order():
 
 
 def test_level_order_is_natural_not_lexicographic():
-    from forge.services.jira_service import issue_key_sort_key
+    from elstin.services.jira_service import issue_key_sort_key
 
     assert sorted(["ENG-1000", "ENG-999", "ENG-99"], key=issue_key_sort_key) == ["ENG-99", "ENG-999", "ENG-1000"]
     # A key with no trailing number still sorts deterministically.

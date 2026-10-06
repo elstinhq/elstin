@@ -4,7 +4,7 @@
 things its acceptance criteria lean on that no agent here can do: run a script
 against data the agent cannot reach and record the result, check open pull
 requests or other branches, publish, review or sign off
-(forge/agents/roles/plan_gate.py's person_actions_of). The non-file
+(elstin/agents/roles/plan_gate.py's person_actions_of). The non-file
 counterpart of `read_only_changes`, kept outside the checkpoint for the same
 reason: the board and the epic's pull request can show them without opening
 one.

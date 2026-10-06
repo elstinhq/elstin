@@ -1,10 +1,10 @@
-"""project_lessons — candidate lessons forge distilled from its own runs.
+"""project_lessons — candidate lessons elstin distilled from its own runs.
 
-forge/services/lessons.py reads a finished story's evidence (gate failures,
+elstin/services/lessons.py reads a finished story's evidence (gate failures,
 verifier rejections, merge send-backs, a person's answers) and proposes a
 few short lessons for the project guide. A person accepts or rejects each;
 only accepted ones are ever handed to an agent. See
-forge/db/models/lesson.py.
+elstin/db/models/lesson.py.
 
 Backfill: none, and none is meaningful — the table starts empty. Stories
 that merged before it existed are never mined (their evidence is not

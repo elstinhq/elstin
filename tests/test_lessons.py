@@ -9,12 +9,12 @@ import os
 
 import pytest
 
-import forge.services.lessons as lessons
-from forge.services.generation import GenerationError
-from forge.services.usage import record_run_outcome
-from forge.state.manager import StateManager
+import elstin.services.lessons as lessons
+from elstin.services.generation import GenerationError
+from elstin.services.usage import record_run_outcome
+from elstin.state.manager import StateManager
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
 QUOTE = "javac crashed: unsupported release 26"
 
@@ -42,14 +42,14 @@ def _lesson(text="Build with JDK 21; the default JDK 26 crashes javac.", quote=Q
 
 
 def _enable(project_id):
-    from forge.config.store import set_project_config
+    from elstin.config.store import set_project_config
 
     set_project_config(project_id, "capture_lessons", "true")
 
 
 def _trouble(story_key="ENG-2"):
     record_run_outcome(story_key, gate_runs=2, gate_failures=1)
-    from forge.services.run_activity import append_activity
+    from elstin.services.run_activity import append_activity
 
     append_activity(story_key, type="status", phase="verifier", title="Gate failed", detail=QUOTE)
 
@@ -245,7 +245,7 @@ def test_migration_produces_the_table_the_model_expects():
     from alembic.config import Config
     from sqlalchemy import create_engine, inspect, text
 
-    from forge.db.models import ProjectLesson
+    from elstin.db.models import ProjectLesson
 
     engine = create_engine(os.environ["DATABASE_URL"])
     with engine.begin() as conn:
@@ -307,8 +307,8 @@ def test_plan_paths_reads_both_file_lists_and_both_entry_shapes():
 
 
 def test_both_prompts_carry_lessons_even_without_a_guide():
-    from forge.agents.roles.dev_loop import _build_prompt
-    from forge.agents.roles.planner_loop import _build_prompt_text
+    from elstin.agents.roles.dev_loop import _build_prompt
+    from elstin.agents.roles.planner_loop import _build_prompt_text
 
     guide = {"found": False, "lessons": [_row(1, "Build with JDK 21.")]}
 
@@ -325,7 +325,7 @@ def test_both_prompts_carry_lessons_even_without_a_guide():
 
 
 def test_a_prompt_without_lessons_is_unchanged():
-    from forge.agents.roles.planner_loop import _build_prompt_text
+    from elstin.agents.roles.planner_loop import _build_prompt_text
 
     def prompt(guide):
         return _build_prompt_text(
@@ -341,7 +341,7 @@ def test_a_prompt_without_lessons_is_unchanged():
 
 
 async def test_a_run_gets_accepted_lessons_and_nothing_else(world):
-    from forge.services.project_guide import project_guide_for_run
+    from elstin.services.project_guide import project_guide_for_run
 
     sm, _, project_id = world
     accepted = sm.add_lesson_candidate(project_id, "Build with JDK 21 always.")
@@ -357,7 +357,7 @@ async def test_a_run_gets_accepted_lessons_and_nothing_else(world):
 
 
 async def test_no_accepted_lessons_leaves_the_guide_exactly_as_it_was(world):
-    from forge.services.project_guide import project_guide_for_run
+    from elstin.services.project_guide import project_guide_for_run
 
     sm, _, project_id = world
     sm.add_lesson_candidate(project_id, "A merely proposed lesson text here.")
@@ -372,7 +372,7 @@ async def test_no_accepted_lessons_leaves_the_guide_exactly_as_it_was(world):
 def api(world):
     from fastapi.testclient import TestClient
 
-    from forge.app import create_app
+    from elstin.app import create_app
 
     sm, _, project_id = world
     with TestClient(create_app()) as client:
@@ -456,7 +456,7 @@ def test_the_pr_section_is_a_paste_ready_block_of_this_epics_accepted_lessons():
     text = "\n".join(lessons.pr_lessons_section(rows, {"ENG-2", "ENG-3"}))
 
     assert "## Lessons from building this" in text
-    assert "```markdown\n## Learned by code_forge\n- Build with JDK 21; 26 crashes javac.\n" in text
+    assert "```markdown\n## Learned by elstin\n- Build with JDK 21; 26 crashes javac.\n" in text
     assert "- Run eslint --fix on Vue files. (applies to `src/**/*.vue`)" in text
     assert text.index("JDK 21") < text.index("eslint")  # most-confirmed first
 
@@ -477,7 +477,7 @@ def test_the_pr_section_counts_lessons_still_waiting_for_review_without_showing_
 
     text = "\n".join(lessons.pr_lessons_section(rows, {"ENG-2"}))
 
-    assert "1 more from this epic is still waiting for review in forge." in text
+    assert "1 more from this epic is still waiting for review in elstin." in text
     assert "A guess nobody has reviewed." not in text
 
 
@@ -549,7 +549,7 @@ def test_ordinary_status_details_stay_short():
 
 
 def test_the_fix_round_event_carries_the_fixes(monkeypatch):
-    from forge.agents.roles.dev_loop import _fix_mode_detail
+    from elstin.agents.roles.dev_loop import _fix_mode_detail
 
     text = _fix_mode_detail(["Add a cap test.", "Revert the lockfile."], ["error: undefined getter"])
 
@@ -559,7 +559,7 @@ def test_the_fix_round_event_carries_the_fixes(monkeypatch):
 
 
 async def test_the_model_is_shown_the_reviewers_reasoning_and_not_the_planners_retries(world, monkeypatch):
-    from forge.services.run_activity import append_activity
+    from elstin.services.run_activity import append_activity
 
     sm, epic, project_id = world
     _enable(project_id)

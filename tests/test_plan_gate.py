@@ -1,4 +1,4 @@
-"""forge/agents/roles/plan_gate.py — the deterministic checks a plan must
+"""elstin/agents/roles/plan_gate.py — the deterministic checks a plan must
 clear before it can be approved or handed to dev. Real filesystem via the
 `git_repo` fixture, no DB and no provider: every check here is an
 os.path question, which is the whole point of the module."""
@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 
-from forge.agents.roles.plan_gate import (
+from elstin.agents.roles.plan_gate import (
     KIND_CREATE_TARGET_EXISTS,
     KIND_EVIDENCE_MISSING,
     KIND_MALFORMED_OUTPUT,
@@ -26,7 +26,7 @@ from forge.agents.roles.plan_gate import (
     person_actions_of,
     plan_shape,
 )
-from forge.tools.workspace import Workspace
+from elstin.tools.workspace import Workspace
 
 
 def _write(root: str, rel: str, content: str = "x\n") -> None:
@@ -434,7 +434,7 @@ def test_a_plan_that_changes_a_read_only_repo_is_rejected(tmp_path):
     """A read-only repo or reference folder is context, never a target. The
     planner loop moves such entries to read_only_changes first
     (normalize_plan, below); this is the backstop if one gets through."""
-    from forge.agents.roles.plan_gate import KIND_READ_ONLY_REPO
+    from elstin.agents.roles.plan_gate import KIND_READ_ONLY_REPO
 
     app = tmp_path / "app"
     (app / "src").mkdir(parents=True)
@@ -554,7 +554,7 @@ def test_a_file_in_a_writable_repo_left_to_a_person_stays_left_to_a_person(tmp_p
     assert fixed["read_only_changes"] == [oas]
     assert fixed["files_to_create"] == [] and fixed["files_to_modify"] == [{"path": "src/Search.java", "purpose": "export"}]
     assert notes == [
-        "@mono-adminportal/bundled-oas.yaml is in a repo forge can change, but the plan leaves it to a "
+        "@mono-adminportal/bundled-oas.yaml is in a repo elstin can change, but the plan leaves it to a "
         "person — check that at approval"
     ]
     assert blocking(check_plan(fixed, workspace)) == []

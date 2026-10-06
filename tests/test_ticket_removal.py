@@ -1,4 +1,4 @@
-"""Removing a ticket from forge: everything it left behind goes, nothing
+"""Removing a ticket from elstin: everything it left behind goes, nothing
 else does, and it refuses while a run is in flight.
 
 Driven against real Postgres and real git. Two tickets are taken through the
@@ -17,21 +17,21 @@ from pathlib import Path
 import pytest
 from sqlalchemy import func, select, text
 
-from forge.config.store import set_config, set_project_config
-from forge.daemon import ticket_removal
-from forge.daemon.main import claim_run, handle_intent, live_run_keys, poll_once, release_run
-from forge.daemon.ticket_removal import TicketBusy, TicketNotFound, TicketRemovalError, remove_epic
-from forge.db.engine import session_scope
-from forge.db.models import (
+from elstin.config.store import set_config, set_project_config
+from elstin.daemon import ticket_removal
+from elstin.daemon.main import claim_run, handle_intent, live_run_keys, poll_once, release_run
+from elstin.daemon.ticket_removal import TicketBusy, TicketNotFound, TicketRemovalError, remove_epic
+from elstin.db.engine import session_scope
+from elstin.db.models import (
     ActivityEvent, Epic, JiraWatermark, PullRequest, Story, StoryRunOutcome, StoryUsage, StoryWorktree,
 )
-from forge.orchestration.reconciler import DispatchStory
-from forge.services.usage import record_phase_usage, record_run_outcome
-from forge.state.manager import StateManager
-from forge.orchestration.integration import integration_branch_name
-from forge.tools.worktree import branch_name_for
+from elstin.orchestration.reconciler import DispatchStory
+from elstin.services.usage import record_phase_usage, record_run_outcome
+from elstin.state.manager import StateManager
+from elstin.orchestration.integration import integration_branch_name
+from elstin.tools.worktree import branch_name_for
 
-pytestmark = [pytest.mark.usefixtures("forge_db", "fake_agents"), pytest.mark.asyncio]
+pytestmark = [pytest.mark.usefixtures("elstin_db", "fake_agents"), pytest.mark.asyncio]
 
 GONE = ("ENG-1", "ENG-2", "ENG-2A")   # the epic, its story, and the story's sub-task
 KEPT = ("ENG-9", "ENG-10")
@@ -250,7 +250,7 @@ async def test_a_checkpoint_failure_stops_before_any_row_is_deleted_and_can_be_r
     }
     assert live_run_keys() == frozenset()
 
-    # not monkeypatch.undo(): that would also revert the DATABASE_URL forge_db set
+    # not monkeypatch.undo(): that would also revert the DATABASE_URL elstin_db set
     monkeypatch.setattr(ticket_removal, "_delete_checkpoints", real)
     await remove_epic(sm, "ENG-1")  # the filesystem was already clean; the retry still finishes the job
     assert _rows(GONE) == {k: 0 for k in before}
@@ -293,7 +293,7 @@ async def test_the_poller_skips_an_intent_for_a_story_that_was_just_removed(tick
 def _client():
     from fastapi.testclient import TestClient
 
-    from forge.app import create_app
+    from elstin.app import create_app
 
     return TestClient(create_app())
 

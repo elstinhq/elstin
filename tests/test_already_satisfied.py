@@ -17,9 +17,9 @@ from pathlib import Path
 
 import pytest
 
-from forge.agents.roles import verifier
-from forge.tools.dev_tools import BOOKKEEPING_TOOLS, MIN_DECLARATION_REASON_CHARS, PROGRESS_TOOLS, TOOL_SCHEMAS, make_dev_tools
-from forge.tools.progress import seed_progress_items
+from elstin.agents.roles import verifier
+from elstin.tools.dev_tools import BOOKKEEPING_TOOLS, MIN_DECLARATION_REASON_CHARS, PROGRESS_TOOLS, TOOL_SCHEMAS, make_dev_tools
+from elstin.tools.progress import seed_progress_items
 
 REASON = "PriceRecord already carries a `currency` component and PriceResponse maps it, so the response exposes it."
 
@@ -117,7 +117,7 @@ def test_the_tool_finds_a_file_in_another_repo_by_its_prefix(tmp_path):
 
 
 def test_the_dev_prompt_offers_the_honest_option_and_forbids_padding():
-    from forge.agents.roles.dev import DEV_SYSTEM_LOOP_CORE
+    from elstin.agents.roles.dev import DEV_SYSTEM_LOOP_CORE
 
     assert "declare_already_satisfied" in DEV_SYSTEM_LOOP_CORE
     assert "NEVER add a comment, rename or reformat just to make a planned file count as changed" in DEV_SYSTEM_LOOP_CORE
@@ -213,11 +213,11 @@ def test_the_review_prompt_tells_the_reviewer_to_check_declarations_and_not_to_f
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_a_run_with_declarations_is_always_reviewed_even_when_trivial_diffs_are_skipped(git_repo, monkeypatch):
     """With the trivial-diff skip on, a run that changed nothing would pass
     unreviewed — exactly when the developer's claim most needs checking."""
-    from forge.config.store import set_config
+    from elstin.config.store import set_config
 
     set_config("verifier_skip_llm_trivial_chars", "100000")
     reviewed: list[dict] = []
@@ -245,13 +245,13 @@ async def test_a_run_with_declarations_is_always_reviewed_even_when_trivial_diff
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("forge_db", "fake_agents")
+@pytest.mark.usefixtures("elstin_db", "fake_agents")
 async def test_declarations_travel_from_dev_to_the_gate_and_into_the_next_dev_round(postgres_url, monkeypatch):
     import uuid
 
-    import forge.orchestration.graph as graph_module
-    from forge.orchestration.graph import checkpointer_from_url, compile_graph
-    from forge.orchestration.state import initial_state
+    import elstin.orchestration.graph as graph_module
+    from elstin.orchestration.graph import checkpointer_from_url, compile_graph
+    from elstin.orchestration.state import initial_state
 
     declared = {"a.py": REASON}
     gate_calls: list[dict] = []
@@ -287,10 +287,10 @@ async def test_declarations_travel_from_dev_to_the_gate_and_into_the_next_dev_ro
 
 async def _drive(git_repo, tmp_path, project_id, monkeypatch, *, dev_result):
     """ENG-2 taken through plan approval to the end of dev, with dev returning `dev_result`."""
-    import forge.orchestration.graph as graph_module
-    from forge.config.store import set_config
-    from forge.daemon.main import poll_once
-    from forge.state.manager import StateManager
+    import elstin.orchestration.graph as graph_module
+    from elstin.config.store import set_config
+    from elstin.daemon.main import poll_once
+    from elstin.state.manager import StateManager
 
     set_config("worktrees_base_dir", str(tmp_path / "wt"))
     set_config("openai_api_key", "sk-test")
@@ -310,7 +310,7 @@ async def _drive(git_repo, tmp_path, project_id, monkeypatch, *, dev_result):
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("forge_db", "fake_agents")
+@pytest.mark.usefixtures("elstin_db", "fake_agents")
 async def test_a_run_that_changed_nothing_because_the_files_already_satisfy_the_ticket_is_finished(git_repo, tmp_path, project_id, monkeypatch):
     sm = await _drive(git_repo, tmp_path, project_id, monkeypatch, dev_result={
         "file_changes": [], "truncated": False, "declared_unchanged": {"src/PriceRecord.java": REASON},
@@ -319,19 +319,19 @@ async def test_a_run_that_changed_nothing_because_the_files_already_satisfy_the_
     story = sm.get_story("ENG-2")
     assert (story["status"], story["parked_reason"], story["failure_stage"]) == ("done", "already_satisfied", None)
     assert sm.get_pull_request("ENG-2") is None  # nothing to open a pull request for
-    from forge.services.run_activity import list_activity
+    from elstin.services.run_activity import list_activity
 
     finished = [e for e in list_activity("ENG-2") if e["title"].startswith("Finished with no changes")]
     assert len(finished) == 1 and "src/PriceRecord.java" in finished[0]["detail"] and REASON in finished[0]["detail"]
 
-    from forge.daemon.main import poll_once
+    from elstin.daemon.main import poll_once
 
     await poll_once(sm, wait=True)
     assert sm.get_epic("ENG-1")["phase"] == "complete"  # a finished story completes its epic
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("forge_db", "fake_agents")
+@pytest.mark.usefixtures("elstin_db", "fake_agents")
 async def test_a_run_with_real_changes_still_goes_to_the_pr_gate_whatever_it_declared(git_repo, tmp_path, project_id, monkeypatch):
     sm = await _drive(git_repo, tmp_path, project_id, monkeypatch, dev_result={
         "file_changes": [{"path": "b.py"}], "truncated": False, "declared_unchanged": {"a.py": REASON},
@@ -341,7 +341,7 @@ async def test_a_run_with_real_changes_still_goes_to_the_pr_gate_whatever_it_dec
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("forge_db", "fake_agents")
+@pytest.mark.usefixtures("elstin_db", "fake_agents")
 async def test_a_run_that_changed_nothing_and_declared_nothing_is_not_mistaken_for_satisfied(git_repo, tmp_path, project_id, monkeypatch):
     """Only an explicit, reasoned declaration ends a story with no changes."""
     sm = await _drive(git_repo, tmp_path, project_id, monkeypatch, dev_result={"file_changes": [], "truncated": False})

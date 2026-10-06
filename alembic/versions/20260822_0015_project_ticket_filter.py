@@ -1,6 +1,6 @@
 """project_ticket_filters — one saved JIRA query per project, the
 background-ingest alternative to typing one issue key at a time into
-"Add ticket" (forge/api/epic_routes.py's POST /api/epics/sync, which stays).
+"Add ticket" (elstin/api/epic_routes.py's POST /api/epics/sync, which stays).
 
 New table, no backfill and deliberately no default row per project:
 absence of a row is the meaningful state ("this project only takes tickets
@@ -10,7 +10,7 @@ reason — a filter saved by a future UI never starts sweeping JIRA in the
 background until someone turns it on.
 
 The structured columns hold the *parts* of the query, not compiled JQL;
-forge/services/jira_filter.py's build_jql assembles them (plus the
+elstin/services/jira_filter.py's build_jql assembles them (plus the
 free-form `extra_jql` escape hatch) on every use, so a stored filter can be
 round-tripped back into the UI's fields.
 

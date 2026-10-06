@@ -1,6 +1,6 @@
 import type { PriorWork, PriorWorkCandidate } from "../types/api";
 
-// Mirrors forge/services/prior_work.py's needs_choice / start_candidate —
+// Mirrors elstin/services/prior_work.py's needs_choice / start_candidate —
 // the two questions the UI asks of a stored lookup.
 
 // Not looked up yet, or "Look again" was pressed and the next poll has not run.

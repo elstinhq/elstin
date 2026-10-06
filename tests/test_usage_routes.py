@@ -1,17 +1,17 @@
 """GET /api/epics/{key}/usage and GET /api/stories/{key}/usage — the token/
 cost/time rollups the epic detail page and story detail dialog fetch on
-demand (forge/services/usage.py does the actual aggregation; these tests
+demand (elstin/services/usage.py does the actual aggregation; these tests
 just confirm the routes wire up and 404 correctly)."""
 from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
 
-pytestmark = pytest.mark.usefixtures("forge_db", "fake_agents")
+pytestmark = pytest.mark.usefixtures("elstin_db", "fake_agents")
 
 
 def _client() -> TestClient:
-    from forge.app import create_app
+    from elstin.app import create_app
 
     return TestClient(create_app())
 
@@ -29,8 +29,8 @@ def test_story_usage_404_for_unknown_story():
 
 
 def test_epic_usage_groups_stories_by_wave(project_id):
-    from forge.services.usage import record_phase_usage
-    from forge.state.manager import StateManager
+    from elstin.services.usage import record_phase_usage
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2"]])
@@ -49,8 +49,8 @@ def test_epic_usage_groups_stories_by_wave(project_id):
 
 
 def test_story_usage_breaks_down_by_phase(project_id):
-    from forge.services.usage import record_phase_usage
-    from forge.state.manager import StateManager
+    from elstin.services.usage import record_phase_usage
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2"]])

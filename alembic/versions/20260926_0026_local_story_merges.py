@@ -3,7 +3,7 @@
 A story used to open its own GitHub pull request, wait for CI and a review,
 then merge into the epic's integration branch. Now a finished story is
 committed on its branch, brought up to date with the epic branch,
-re-verified and fast-forwarded into it — all locally (forge/orchestration/
+re-verified and fast-forwarded into it — all locally (elstin/orchestration/
 integration.py) — and the epic opens the one pull request once every story
 has merged. So:
 
@@ -16,12 +16,12 @@ has merged. So:
   it becomes `ready_to_merge` and the merge queue lands it; the gate reasons
   parked on it (`pr_open_gate`, `pr_review_gate`, `ci_pending`, `ci_failed`)
   are cleared. A per-story pull request already open on GitHub is left alone
-  — forge no longer tracks or merges it; close it by hand.
+  — elstin no longer tracks or merges it; close it by hand.
 - The settings `require_pr_open_approval` and `require_pr_review` are
   removed, globally and per project.
 
 Downgrade restores the column set only; statuses stay `ready_to_merge`,
-which an older forge does not know, so a downgrade needs those stories
+which an older elstin does not know, so a downgrade needs those stories
 retried by hand.
 
 Revision ID: 20260926_0026

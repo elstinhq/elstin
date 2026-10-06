@@ -1,12 +1,12 @@
-"""forge/tools/dev_tools.py — the read cap and the tool-class sets the
-dev loop hands forge/agents/loop.py. No git, no toolchain: make_dev_tools
+"""elstin/tools/dev_tools.py — the read cap and the tool-class sets the
+dev loop hands elstin/agents/loop.py. No git, no toolchain: make_dev_tools
 is bound to a plain temp dir with a wide-open plan scope."""
 from __future__ import annotations
 
 import os
 
-from forge.tools.dev_tools import PROGRESS_TOOLS, READ_ONLY_TOOLS, TOOL_SCHEMAS, make_dev_tools
-from forge.tools.grep import MAX_READ_LINES
+from elstin.tools.dev_tools import PROGRESS_TOOLS, READ_ONLY_TOOLS, TOOL_SCHEMAS, make_dev_tools
+from elstin.tools.grep import MAX_READ_LINES
 
 
 def _tools(root: str):
@@ -201,7 +201,7 @@ def _tool_description(name: str) -> str:
 
 
 def test_a_passing_analyze_says_it_did_not_run_the_tests(tmp_path, monkeypatch):
-    from forge.tools import dev_tools
+    from elstin.tools import dev_tools
 
     (tmp_path / "a.ts").write_text("export {}\n")
     monkeypatch.setattr(dev_tools, "run_analyze", lambda worktree, targets: {"passed": True, "error_count": 0, "error_lines": []})
@@ -214,7 +214,7 @@ def test_a_passing_analyze_says_it_did_not_run_the_tests(tmp_path, monkeypatch):
 
 
 def test_a_failing_or_skipped_analyze_carries_no_such_note(tmp_path, monkeypatch):
-    from forge.tools import dev_tools
+    from elstin.tools import dev_tools
 
     (tmp_path / "a.ts").write_text("export {}\n")
     monkeypatch.setattr(dev_tools, "run_analyze", lambda worktree, targets: {"passed": False, "error_count": 1, "error_lines": ["a.ts:1 boom"]})
@@ -285,7 +285,7 @@ def test_a_test_command_in_a_repo_with_no_planned_tests_is_refused(tmp_path, mon
     refused — per repo, not because some repo somewhere has a planned test — as it
     is for any plan without tests. A fake profile stands in for the portal's
     toolchain so that nothing is actually run."""
-    from forge.tools import language_hooks
+    from elstin.tools import language_hooks
 
     language_hooks._ensure_default_profiles_registered()
     monkeypatch.setattr(language_hooks, "_PROFILES", dict(language_hooks._PROFILES))
@@ -329,8 +329,8 @@ def test_the_repo_argument_is_offered_only_when_the_plan_writes_a_repo_other_tha
 
 
 def test_plan_targets_are_converted_to_the_form_a_repos_profile_expects():
-    from forge.tools.dev_tools import _targets_for_repo
-    from forge.tools.workspace import Workspace
+    from elstin.tools.dev_tools import _targets_for_repo
+    from elstin.tools.workspace import Workspace
 
     workspace = Workspace(default_label="api", roots={"api": "/w/api", "web": "/w/web"})
     displays = ["src/test/FooTest.java", "@web/tests/a.spec.ts", "@web/tests/b.spec.ts", "@mobile/x.dart"]

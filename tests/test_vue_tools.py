@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from forge.tools import vue_tools
+from elstin.tools import vue_tools
 
 
 def _write(path: str, content: str) -> None:

@@ -1,6 +1,6 @@
 """Stories run in parallel: poll_once starts every story whose dependencies
 have merged as its own background task, up to max_parallel_stories, and
-returns without waiting (forge/daemon/main.py's _launch). Real Postgres and
+returns without waiting (elstin/daemon/main.py's _launch). Real Postgres and
 git; the agents are fakes, and a gate event holds runs open so the test can
 see them overlap."""
 from __future__ import annotations
@@ -9,11 +9,11 @@ import asyncio
 
 import pytest
 
-import forge.daemon.main as daemon
-from forge.config.store import set_config
-from forge.state.manager import StateManager
+import elstin.daemon.main as daemon
+from elstin.config.store import set_config
+from elstin.state.manager import StateManager
 
-pytestmark = [pytest.mark.usefixtures("forge_db", "fake_agents"), pytest.mark.asyncio]
+pytestmark = [pytest.mark.usefixtures("elstin_db", "fake_agents"), pytest.mark.asyncio]
 
 
 def _configure(tmp_path, *, max_parallel: int | None = None) -> None:
@@ -33,7 +33,7 @@ def _epic(sm: StateManager, project_id: int, git_repo: str, deps: dict[str, list
 
 
 def _held_dev(monkeypatch, release: asyncio.Event, running: set[str], peak: list[int]):
-    import forge.orchestration.graph as graph
+    import elstin.orchestration.graph as graph
 
     async def dev(**kwargs):
         running.add(kwargs["run_id"])
@@ -118,7 +118,7 @@ async def test_a_story_already_in_flight_is_not_started_again(git_repo, tmp_path
 
 
 async def test_one_story_crashing_does_not_stop_the_others(git_repo, tmp_path, project_id, monkeypatch):
-    import forge.orchestration.graph as graph
+    import elstin.orchestration.graph as graph
 
     _configure(tmp_path)
     sm = StateManager()
@@ -144,7 +144,7 @@ async def test_runs_starting_together_on_a_fresh_database_set_up_the_checkpointe
 
     import psycopg
 
-    import forge.orchestration.graph as graph
+    import elstin.orchestration.graph as graph
 
     url = os.environ["DATABASE_URL"]
     with psycopg.connect(url.replace("postgresql+psycopg://", "postgresql://", 1), autocommit=True) as conn:

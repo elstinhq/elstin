@@ -1,4 +1,4 @@
-"""forge/tools/grep.py's grep_codebase and the two tools built on it
+"""elstin/tools/grep.py's grep_codebase and the two tools built on it
 (dev's search_codebase_tool, the planner's grep_tool).
 
 Regressions from a real dev run: `--max-count` is ripgrep's cap per FILE,
@@ -12,9 +12,9 @@ import os
 
 import pytest
 
-from forge.tools.dev_tools import SEARCH_MAX_RESULTS, make_dev_tools
-from forge.tools.grep import MAX_MATCH_LINE_CHARS, grep_codebase
-from forge.tools.planner_tools import make_planner_tools
+from elstin.tools.dev_tools import SEARCH_MAX_RESULTS, make_dev_tools
+from elstin.tools.grep import MAX_MATCH_LINE_CHARS, grep_codebase
+from elstin.tools.planner_tools import make_planner_tools
 
 
 def _write(root, rel: str, content: str) -> None:

@@ -3,7 +3,7 @@
 New table, no backfill: existing ActivityEvent token-usage rows (type="token")
 are not migrated into it. This table is a forward-looking cache that phase
 runners populate on every future planner/dev/verifier/qa invocation (see
-forge/services/usage.py's record_phase_usage) — stories that ran before this
+elstin/services/usage.py's record_phase_usage) — stories that ran before this
 migration simply have no rows here, and the UI should render that as "no
 usage data" rather than a zero-cost run.
 

@@ -6,8 +6,8 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from forge.db.base import Base
-from forge.db.models import *  # noqa: F401,F403 — registers every model on Base.metadata
+from elstin.db.base import Base
+from elstin.db.models import *  # noqa: F401,F403 — registers every model on Base.metadata
 
 config = context.config
 
@@ -21,7 +21,7 @@ database_url = os.environ.get("DATABASE_URL")
 if not database_url:
     raise RuntimeError(
         "DATABASE_URL is not set — alembic needs it the same way the app does "
-        "(see forge/db/engine.py). No .env file; export it or let docker-compose wire it."
+        "(see elstin/db/engine.py). No .env file; export it or let docker-compose wire it."
     )
 config.set_main_option("sqlalchemy.url", database_url)
 

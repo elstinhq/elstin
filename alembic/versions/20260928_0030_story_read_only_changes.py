@@ -2,7 +2,7 @@
 
 `stories.read_only_changes`: [{path, purpose}] from the story's latest plan —
 files in a read-only repo or reference folder the ticket needs changed,
-which forge may not change (forge/agents/roles/plan_gate.py's
+which elstin may not change (elstin/agents/roles/plan_gate.py's
 normalize_plan). Kept outside the checkpoint so the board and the epic's
 pull request can show them without opening one.
 

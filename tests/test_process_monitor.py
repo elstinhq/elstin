@@ -1,4 +1,4 @@
-"""forge/tools/process_monitor.py and what keeps its measurements — how much
+"""elstin/tools/process_monitor.py and what keeps its measurements — how much
 memory the commands a run executes take, so `max_parallel_stories` can be set from
 data. Real child processes that really allocate."""
 from __future__ import annotations
@@ -13,11 +13,11 @@ import time
 
 import pytest
 
-import forge.orchestration.graph as graph_module
-from forge.services.memory_usage import measured, measured_run
-from forge.services.usage import get_run_outcome, record_run_outcome, record_run_peak_memory
-from forge.tools import language_hooks, process_monitor, safe_shell
-from forge.tools.process_monitor import measuring, run, take_peak, tree_rss_bytes
+import elstin.orchestration.graph as graph_module
+from elstin.services.memory_usage import measured, measured_run
+from elstin.services.usage import get_run_outcome, record_run_outcome, record_run_peak_memory
+from elstin.tools import language_hooks, process_monitor, safe_shell
+from elstin.tools.process_monitor import measuring, run, take_peak, tree_rss_bytes
 
 MB = 1024 * 1024
 
@@ -78,7 +78,7 @@ def test_a_timeout_raises_the_same_way_keeps_the_partial_output_and_kills_the_ch
 
 def test_a_command_that_cannot_start_raises_as_before(tmp_path):
     with pytest.raises(FileNotFoundError):
-        run(["definitely-not-a-command-forge"], cwd=str(tmp_path), timeout=5, env=_env())
+        run(["definitely-not-a-command-elstin"], cwd=str(tmp_path), timeout=5, env=_env())
 
 
 def test_it_needs_to_be_told_the_environment():
@@ -179,7 +179,7 @@ def test_the_gates_runner_and_the_dev_shell_are_measured(tmp_path, monkeypatch):
 # --- keeping it -------------------------------------------------------------------------
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 def test_the_peak_is_a_maximum_and_none_means_not_measured():
     assert get_run_outcome("ENG-2") is None
     record_run_outcome("ENG-2", gate_runs=1)
@@ -195,16 +195,16 @@ def test_the_peak_is_a_maximum_and_none_means_not_measured():
     assert kept["gate_runs"] == 1  # the counters were not disturbed
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 def test_nothing_is_recorded_for_no_run_or_no_measurement():
     record_run_peak_memory(None, peak_memory_mb=500, command="x")
     record_run_peak_memory("ENG-9", peak_memory_mb=0, command="x")
     assert get_run_outcome("ENG-9") is None
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 def test_a_failure_to_record_never_propagates(monkeypatch):
-    import forge.services.usage as usage
+    import elstin.services.usage as usage
 
     def broken():
         raise RuntimeError("database unreachable")
@@ -213,7 +213,7 @@ def test_a_failure_to_record_never_propagates(monkeypatch):
     record_run_peak_memory("ENG-2", peak_memory_mb=500, command="x")  # no exception
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 def test_a_measured_run_keeps_its_peak_on_exit_even_when_the_work_raises(tmp_path):
     with pytest.raises(RuntimeError):
         with measured_run("ENG-3"):
@@ -222,14 +222,14 @@ def test_a_measured_run_keeps_its_peak_on_exit_even_when_the_work_raises(tmp_pat
     assert get_run_outcome("ENG-3")["peak_memory_mb"] >= 140
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 async def test_the_measurement_follows_the_work_into_a_thread(tmp_path):
     """The gate runs its commands off the event loop (`asyncio.to_thread`)."""
     await measured("ENG-4", asyncio.to_thread(language_hooks.run, _python(_hog(150)), cwd=str(tmp_path), timeout=30))
     assert get_run_outcome("ENG-4")["peak_memory_mb"] >= 140
 
 
-@pytest.mark.usefixtures("forge_db", "fake_agents")
+@pytest.mark.usefixtures("elstin_db", "fake_agents")
 async def test_the_graphs_gate_node_keeps_the_peak_of_the_commands_it_ran(tmp_path, monkeypatch):
     async def gate_that_builds(**kwargs):
         await asyncio.to_thread(language_hooks.run, _python(_hog(150)), cwd=str(tmp_path), timeout=30)

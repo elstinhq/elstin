@@ -10,7 +10,7 @@
  */
 export type Theme = "light" | "dark";
 
-const STORAGE_KEY = "forge-theme";
+const STORAGE_KEY = "elstin-theme";
 const listeners = new Set<() => void>();
 
 export function systemTheme(): Theme {

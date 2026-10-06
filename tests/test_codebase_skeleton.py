@@ -1,10 +1,10 @@
-"""forge/tools/codebase_skeleton.py — the pre-computed repo map folded into
+"""elstin/tools/codebase_skeleton.py — the pre-computed repo map folded into
 the planner brief. Pure filesystem; no git, no DB."""
 from __future__ import annotations
 
 import os
 
-from forge.tools.codebase_skeleton import build_codebase_skeleton, extract_declarations, render_skeleton, scan_repo
+from elstin.tools.codebase_skeleton import build_codebase_skeleton, extract_declarations, render_skeleton, scan_repo
 
 
 def _write(root: str, rel: str, content: str = "") -> None:

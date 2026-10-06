@@ -1,7 +1,7 @@
 """Reference folders and read-only repos: a workspace folder like ~/dev/mono
 read for context (its CLAUDE.md, docs) and a shared contract repo read but
-never changed. forge/tools/reference_folder.py (the copy runs read),
-forge/api/project_routes.py (attaching, marking read-only), and a run through
+never changed. elstin/tools/reference_folder.py (the copy runs read),
+elstin/api/project_routes.py (attaching, marking read-only), and a run through
 the daemon (what the planner is given, where branches are made)."""
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from forge.tools import reference_folder
-from forge.tools.reference_folder import plan_reference, sync_reference_copy
+from elstin.tools import reference_folder
+from elstin.tools.reference_folder import plan_reference, sync_reference_copy
 
 
 def _git_repo(path) -> str:
@@ -95,18 +95,18 @@ def test_the_copy_is_reused_while_fresh_and_rebuilt_after(tmp_path, monkeypatch)
 
 # --- attaching and marking over the API ----------------------------------------
 
-pytestmark_db = pytest.mark.usefixtures("forge_db")
+pytestmark_db = pytest.mark.usefixtures("elstin_db")
 
 
 def _client() -> TestClient:
-    from forge.app import create_app
+    from elstin.app import create_app
 
     return TestClient(create_app())
 
 
 @pytestmark_db
 def test_attach_a_reference_folder_and_a_read_only_repo(tmp_path):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     root = _workspace(tmp_path)
     sm = StateManager()
@@ -139,7 +139,7 @@ def test_attach_a_reference_folder_and_a_read_only_repo(tmp_path):
 
 @pytestmark_db
 def test_marking_a_repo_read_only_moves_epics_off_it_and_waits_for_unfinished_work(tmp_path):
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     project_id = sm.create_project("MONO")
@@ -183,16 +183,16 @@ def test_create_a_project_with_repos_a_read_only_one_and_the_reference_folder(tm
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("forge_db", "fake_agents")
+@pytest.mark.usefixtures("elstin_db", "fake_agents")
 async def test_a_run_reads_the_reference_folder_and_never_branches_read_only_repos(tmp_path, monkeypatch):
     """The planner gets the workspace's CLAUDE.md first in its guide, the
     reference copy and the read-only repo as readable roots, and is told
     they are read-only; the epic branch is made only where a story can write."""
-    import forge.daemon.main as daemon
-    import forge.orchestration.graph as graph
-    from forge.config.store import set_config
-    from forge.orchestration.integration import integration_branch_name
-    from forge.state.manager import StateManager
+    import elstin.daemon.main as daemon
+    import elstin.orchestration.graph as graph
+    from elstin.config.store import set_config
+    from elstin.orchestration.integration import integration_branch_name
+    from elstin.state.manager import StateManager
     from tests.conftest import fake_run_planner
 
     set_config("openai_api_key", "sk-openai-dummy")
@@ -245,15 +245,15 @@ async def test_a_run_reads_the_reference_folder_and_never_branches_read_only_rep
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("forge_db", "fake_agents")
+@pytest.mark.usefixtures("elstin_db", "fake_agents")
 async def test_changes_a_plan_needs_in_a_read_only_repo_are_kept_for_a_person(git_repo, tmp_path, project_id, monkeypatch):
     """One story: the plan goes ahead without the contract change, which is
     kept on the story — the board's tag, the details — and listed in the
     epic's pull request. The next plan replaces the list."""
-    import forge.daemon.main as daemon
-    import forge.orchestration.graph as graph
-    from forge.config.store import set_config
-    from forge.state.manager import StateManager
+    import elstin.daemon.main as daemon
+    import elstin.orchestration.graph as graph
+    from elstin.config.store import set_config
+    from elstin.state.manager import StateManager
     from tests.conftest import fake_run_planner
 
     set_config("openai_api_key", "sk-openai-dummy")

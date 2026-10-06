@@ -1,7 +1,7 @@
-"""The epic's pull request — the only thing forge sends to GitHub. Stories
+"""The epic's pull request — the only thing elstin sends to GitHub. Stories
 merge into the epic branch locally; once every one has, the daemon pushes
 the epic branch and opens one pull request into the default branch
-(forge/daemon/main.py's _finish_epic), then follows its CI status and a
+(elstin/daemon/main.py's _finish_epic), then follows its CI status and a
 human's merge. Real Postgres and git; GitHub is a fake."""
 from __future__ import annotations
 
@@ -9,12 +9,12 @@ import os
 
 import pytest
 
-from forge.config.store import set_config, set_project_config
-from forge.daemon.main import check_story_action, execute_story_action, poll_once
-from forge.orchestration.integration import integration_branch_name
-from forge.state.manager import StateManager
+from elstin.config.store import set_config, set_project_config
+from elstin.daemon.main import check_story_action, execute_story_action, poll_once
+from elstin.orchestration.integration import integration_branch_name
+from elstin.state.manager import StateManager
 
-pytestmark = [pytest.mark.usefixtures("forge_db", "fake_agents"), pytest.mark.asyncio]
+pytestmark = [pytest.mark.usefixtures("elstin_db", "fake_agents"), pytest.mark.asyncio]
 
 
 class _FakeGitHub:
@@ -41,7 +41,7 @@ class _FakeGitHub:
 
 @pytest.fixture()
 def github(monkeypatch):
-    import forge.daemon.main as daemon
+    import elstin.daemon.main as daemon
 
     _FakeGitHub.configured = True
     _FakeGitHub.created = []
@@ -55,7 +55,7 @@ def github(monkeypatch):
 
 
 def _setup(tmp_path, project_id, git_repo, monkeypatch, stories=("ENG-2", "ENG-3")) -> StateManager:
-    import forge.orchestration.graph as graph
+    import elstin.orchestration.graph as graph
 
     set_config("openai_api_key", "sk-openai-dummy")
     set_config("worktrees_base_dir", str(tmp_path / "worktrees"))
@@ -140,7 +140,7 @@ async def test_without_github_the_epic_branch_is_left_ready_locally(git_repo, tm
 
 
 async def test_a_push_failure_is_recorded_and_retried_on_the_next_poll(git_repo, tmp_path, project_id, monkeypatch, github):
-    import forge.daemon.main as daemon
+    import elstin.daemon.main as daemon
 
     sm = _setup(tmp_path, project_id, git_repo, monkeypatch)
     await _run_to_merged(sm)
@@ -160,12 +160,12 @@ async def test_a_push_failure_is_recorded_and_retried_on_the_next_poll(git_repo,
     assert sm.get_epic("ENG-1")["phase"] == "pr_open"
 
 
-async def test_the_body_names_code_forge_as_co_author_only_when_a_commit_author_is_configured(
+async def test_the_body_names_elstin_as_co_author_only_when_a_commit_author_is_configured(
     git_repo, tmp_path, project_id, monkeypatch, github
 ):
-    """With no git_author_* set, commits are authored by code_forge itself,
+    """With no git_author_* set, commits are authored by elstin itself,
     so a co-author line would only repeat the author and is left off."""
-    import forge.daemon.main as daemon
+    import elstin.daemon.main as daemon
 
     sm = _setup(tmp_path, project_id, git_repo, monkeypatch, stories=("ENG-2",))
     await _run_to_merged(sm)
@@ -173,7 +173,7 @@ async def test_the_body_names_code_forge_as_co_author_only_when_a_commit_author_
 
     set_config("git_author_name", "Leo Elstin")
     set_config("git_author_email", "leo@example.com")
-    assert daemon._epic_pr_body(sm, sm.get_epic("ENG-1")).endswith("Co-authored-by: code_forge <forge@localhost>")
+    assert daemon._epic_pr_body(sm, sm.get_epic("ENG-1")).endswith("Co-authored-by: elstin <elstin@localhost>")
 
 
 async def test_a_manual_run_epic_opens_its_pull_request_after_its_last_story(
@@ -198,7 +198,7 @@ async def test_an_attached_repo_without_origin_runs_merges_and_ends_ready_locall
     to propose it to, even with a token configured."""
     import subprocess
 
-    import forge.daemon.main as daemon
+    import elstin.daemon.main as daemon
 
     repo = tmp_path / "local-app"
     repo.mkdir()
@@ -235,7 +235,7 @@ async def test_an_attached_repo_without_origin_runs_merges_and_ends_ready_locall
 
 
 async def test_the_body_carries_this_epics_accepted_lessons(git_repo, tmp_path, project_id, monkeypatch, github):
-    import forge.daemon.main as daemon
+    import elstin.daemon.main as daemon
 
     sm = _setup(tmp_path, project_id, git_repo, monkeypatch, stories=("ENG-2",))
     await _run_to_merged(sm)
@@ -250,12 +250,12 @@ async def test_the_body_carries_this_epics_accepted_lessons(git_repo, tmp_path, 
     assert "## Lessons from building this" in body
     assert "- Build with JDK 21; 26 crashes javac." in body
     assert "Learned on some other epic." not in body and "Not yet reviewed by anyone." not in body
-    assert "1 more from this epic is still waiting for review in forge." in body
+    assert "1 more from this epic is still waiting for review in elstin." in body
     assert body.index("## Lessons from building this") < body.index("## How this was built")
 
 
 async def test_a_body_without_lessons_is_unchanged(git_repo, tmp_path, project_id, monkeypatch, github):
-    import forge.daemon.main as daemon
+    import elstin.daemon.main as daemon
 
     sm = _setup(tmp_path, project_id, git_repo, monkeypatch, stories=("ENG-2",))
     await _run_to_merged(sm)
@@ -264,7 +264,7 @@ async def test_a_body_without_lessons_is_unchanged(git_repo, tmp_path, project_i
 
 
 async def test_a_lessons_read_failure_never_costs_the_pull_request(git_repo, tmp_path, project_id, monkeypatch, github):
-    import forge.daemon.main as daemon
+    import elstin.daemon.main as daemon
 
     sm = _setup(tmp_path, project_id, git_repo, monkeypatch, stories=("ENG-2",))
     await _run_to_merged(sm)
@@ -281,7 +281,7 @@ async def test_a_lessons_read_failure_never_costs_the_pull_request(git_repo, tmp
 
 # --- the PR gate (`require_pr_approval`) ----------------------------------------------
 #
-# The epic branch is the only thing forge pushes to GitHub, and a pull request is
+# The epic branch is the only thing elstin pushes to GitHub, and a pull request is
 # visible to other people. With the gate on, an epic whose stories have all merged
 # parks as "awaiting" and nothing leaves the machine until a person decides.
 
@@ -289,7 +289,7 @@ async def test_a_lessons_read_failure_never_costs_the_pull_request(git_repo, tmp
 def _client():
     from fastapi.testclient import TestClient
 
-    from forge.app import create_app
+    from elstin.app import create_app
 
     return TestClient(create_app())
 
@@ -306,7 +306,7 @@ async def _merged_and_held(sm: StateManager) -> None:
 
 
 def _titles(epic_key: str) -> list[str]:
-    from forge.services.run_activity import list_activity
+    from elstin.services.run_activity import list_activity
 
     return [e["title"] for e in list_activity(epic_key)]
 
@@ -422,7 +422,7 @@ async def test_with_no_github_there_is_nothing_to_approve(git_repo, tmp_path, pr
 
 
 async def test_with_nothing_to_propose_there_is_nothing_to_approve(git_repo, tmp_path, project_id, monkeypatch, github):
-    import forge.daemon.main as daemon
+    import elstin.daemon.main as daemon
 
     sm = _setup(tmp_path, project_id, git_repo, monkeypatch)
     monkeypatch.setattr(daemon, "_repos_worth_proposing", lambda sm_, epic_: [])
@@ -435,7 +435,7 @@ async def test_with_nothing_to_propose_there_is_nothing_to_approve(git_repo, tmp
 
 
 async def test_an_approved_epic_whose_push_fails_stays_approved_and_is_retried(git_repo, tmp_path, project_id, monkeypatch, github):
-    import forge.daemon.main as daemon
+    import elstin.daemon.main as daemon
 
     sm = _setup(tmp_path, project_id, git_repo, monkeypatch)
     await _merged_and_held(sm)
@@ -457,7 +457,7 @@ async def test_an_approved_epic_whose_push_fails_stays_approved_and_is_retried(g
 async def test_the_poll_and_an_approval_arriving_together_open_one_pull_request(git_repo, tmp_path, project_id, monkeypatch, github):
     import asyncio
 
-    import forge.daemon.main as daemon
+    import elstin.daemon.main as daemon
 
     sm = _setup(tmp_path, project_id, git_repo, monkeypatch)
     await _merged_and_held(sm)
@@ -499,7 +499,7 @@ async def test_there_is_nothing_to_decide_unless_the_epic_is_waiting(git_repo, t
 
 
 async def test_the_setting_is_a_workflow_setting_a_project_may_override():
-    from forge.config.store import CONFIG_CATEGORIES, PROJECT_OVERRIDABLE_KEYS, get_config
+    from elstin.config.store import CONFIG_CATEGORIES, PROJECT_OVERRIDABLE_KEYS, get_config
 
     assert get_config("require_pr_approval") == "false"
     assert "require_pr_approval" in PROJECT_OVERRIDABLE_KEYS

@@ -9,7 +9,7 @@ were stored — so a test that only passes levels reads the old way; tests
 about per-story scheduling pass `depends_on` explicitly."""
 from __future__ import annotations
 
-from forge.orchestration.reconciler import (
+from elstin.orchestration.reconciler import (
     Blocked,
     DispatchStory,
     EpicSnapshot,
@@ -129,7 +129,7 @@ def test_a_failure_stops_dependents_transitively():
 
 def test_a_story_waiting_for_a_branch_pick_holds_only_itself_and_its_dependents():
     """Several diverged branches carry this ticket's work and nobody has said
-    which to build on (forge/services/prior_work.py): it waits, like a
+    which to build on (elstin/services/prior_work.py): it waits, like a
     dependency would, and nothing else does."""
     base = _snapshot(
         [["ENG-2", "ENG-3"], ["ENG-4"]],

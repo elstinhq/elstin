@@ -1,6 +1,6 @@
-"""forge/tools/jdk.py — which JDK a Java project is built with, and
-forge/tools/java_tools.py's toolchain-failure check. One story: the project
-targets Java 21, forge built it on JDK 26, javac crashed, and three passes
+"""elstin/tools/jdk.py — which JDK a Java project is built with, and
+elstin/tools/java_tools.py's toolchain-failure check. One story: the project
+targets Java 21, elstin built it on JDK 26, javac crashed, and three passes
 went on "fixing" working code. Fake JDK homes on disk; no JVM runs."""
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import subprocess
 
 import pytest
 
-from forge.tools import java_tools, jdk, language_hooks
+from elstin.tools import java_tools, jdk, language_hooks
 
 
 def _write(path, text: str) -> None:
@@ -68,13 +68,13 @@ def test_the_newest_installed_jdk_of_the_stated_version_is_used(tmp_path, jdks):
 
     assert env["JAVA_HOME"] == jdks["21"]
     assert env["PATH"].startswith(os.path.join(jdks["21"], "bin") + os.pathsep)
-    assert jdk.describe(str(tmp_path)) == f"The project targets Java 21; forge builds it with {jdks['21']}."
+    assert jdk.describe(str(tmp_path)) == f"The project targets Java 21; elstin builds it with {jdks['21']}."
 
 
 def test_no_stated_version_or_none_installed_leaves_the_environment_alone(tmp_path, jdks):
     _write(tmp_path / "pom.xml", "<java.version>17</java.version>")
     assert jdk.java_env(str(tmp_path)) == {}
-    assert "no JDK 17 is installed where forge looks (installed: 21, 26) — install one, then Retry" in jdk.describe(str(tmp_path))
+    assert "no JDK 17 is installed where elstin looks (installed: 21, 26) — install one, then Retry" in jdk.describe(str(tmp_path))
 
     _write(tmp_path / "pom.xml", "<project/>")
     assert jdk.java_env(str(tmp_path)) == {}
@@ -83,7 +83,7 @@ def test_no_stated_version_or_none_installed_leaves_the_environment_alone(tmp_pa
 def test_every_command_in_a_java_worktree_runs_on_that_jdk(tmp_path, jdks):
     """The build check's commands (language_hooks.run) and the developer
     step's own (safe_shell) both get it."""
-    from forge.tools import safe_shell
+    from elstin.tools import safe_shell
 
     _write(tmp_path / "pom.xml", "<java.version>21</java.version>")
     _write(tmp_path / "mvnw", '#!/bin/sh\necho "$JAVA_HOME"\n')
@@ -113,7 +113,7 @@ def test_a_javac_crash_is_the_environment(tmp_path, jdks):
         "The Java build fails before compiling any source: Fatal error compiling: java.lang.ExceptionInInitializerError: "
         "com.sun.tools.javac.code.TypeTag :: UNKNOWN"
     )
-    assert reason.endswith(f"The project targets Java 21; forge builds it with {jdks['21']}.")
+    assert reason.endswith(f"The project targets Java 21; elstin builds it with {jdks['21']}.")
 
 
 @pytest.mark.parametrize("result", [
@@ -156,8 +156,8 @@ def _git(repo, *args) -> str:
 def test_build_output_is_excluded_in_every_worktree_of_the_clone(git_repo, tmp_path):
     """One story: no .gitignore on main, and 168 files under target/ were
     staged for the epic's pull request."""
-    from forge.tools.git_tools import list_changed_files
-    from forge.tools.worktree import exclude_build_output
+    from elstin.tools.git_tools import list_changed_files
+    from elstin.tools.worktree import exclude_build_output
 
     with open(os.path.join(git_repo, "pom.xml"), "w") as handle:
         handle.write("<project/>")
@@ -179,4 +179,4 @@ def test_build_output_is_excluded_in_every_worktree_of_the_clone(git_repo, tmp_p
         handle.write("class Search {}\n")
     assert list_changed_files(worktree) == ["Search.java"]
     text = open(info_exclude).read()
-    assert "*.local\n" in text and text.count("# >>> code_forge") == 1 and "\ntarget/\n" in text
+    assert "*.local\n" in text and text.count("# >>> elstin") == 1 and "\ntarget/\n" in text

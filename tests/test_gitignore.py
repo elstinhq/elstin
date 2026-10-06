@@ -1,6 +1,6 @@
-"""forge adding a repo's missing build-output entries to its .gitignore
-(forge/tools/worktree.py's missing_gitignore_entries / add_to_gitignore,
-forge/daemon/main.py's _ignore_build_output_on_epic). One story: the
+"""elstin adding a repo's missing build-output entries to its .gitignore
+(elstin/tools/worktree.py's missing_gitignore_entries / add_to_gitignore,
+elstin/daemon/main.py's _ignore_build_output_on_epic). One story: the
 `mono-apiservice` main branch had no .gitignore, and a build left target/
 to be committed. Real git; agents are fakes."""
 from __future__ import annotations
@@ -10,8 +10,8 @@ import subprocess
 
 import pytest
 
-from forge.tools.git_tools import commit_paths
-from forge.tools.worktree import add_to_gitignore, missing_gitignore_entries
+from elstin.tools.git_tools import commit_paths
+from elstin.tools.worktree import add_to_gitignore, missing_gitignore_entries
 
 
 def _git(repo: str, *args: str) -> str:
@@ -29,7 +29,7 @@ def test_a_maven_repo_without_a_gitignore_gets_one(git_repo):
     assert missing_gitignore_entries(git_repo) == ["target/"]
     add_to_gitignore(git_repo, ["target/"])
 
-    assert open(os.path.join(git_repo, ".gitignore")).read() == "# Build output (added by code_forge)\ntarget/\n"
+    assert open(os.path.join(git_repo, ".gitignore")).read() == "# Build output (added by elstin)\ntarget/\n"
     assert missing_gitignore_entries(git_repo) == []
 
 
@@ -41,12 +41,12 @@ def test_only_what_the_repo_does_not_already_ignore_is_added(git_repo):
     add_to_gitignore(git_repo, ["coverage/"])
 
     assert open(os.path.join(git_repo, ".gitignore")).read() == (
-        "node_modules\n/dist\n!coverage/\n\n# Build output (added by code_forge)\ncoverage/\n"
+        "node_modules\n/dist\n!coverage/\n\n# Build output (added by elstin)\ncoverage/\n"
     )
 
 
 def test_this_machines_own_excludes_do_not_count(git_repo):
-    """info/exclude (where forge hides build output locally) does nothing for
+    """info/exclude (where elstin hides build output locally) does nothing for
     the next person to clone the repo."""
     _write(git_repo, "pom.xml", "<project/>")
     with open(os.path.join(git_repo, ".git", "info", "exclude"), "a") as handle:
@@ -65,10 +65,10 @@ def test_commit_paths_commits_only_what_it_is_given(git_repo):
 
     commit_paths(git_repo, [".gitignore"], "Ignore build output: target/", author=("Leo", "leo@example.com"))
 
-    from forge.tools.git_tools import CODE_FORGE_CO_AUTHOR
+    from elstin.tools.git_tools import CODE_ELSTIN_CO_AUTHOR
 
     assert _git(git_repo, "log", "-1", "--format=%an <%ae>") == "Leo <leo@example.com>"
-    assert _git(git_repo, "log", "-1", "--format=%B") == f"Ignore build output: target/\n\n{CODE_FORGE_CO_AUTHOR}"
+    assert _git(git_repo, "log", "-1", "--format=%B") == f"Ignore build output: target/\n\n{CODE_ELSTIN_CO_AUTHOR}"
     assert _git(git_repo, "show", "--name-only", "--format=", "HEAD") == ".gitignore"
     assert _git(git_repo, "status", "--porcelain") == "M README.md"
 
@@ -77,16 +77,16 @@ def test_commit_paths_commits_only_what_it_is_given(git_repo):
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("forge_db", "fake_agents")
+@pytest.mark.usefixtures("elstin_db", "fake_agents")
 @pytest.mark.parametrize("manage", [True, False])
 async def test_the_epic_branch_gets_the_missing_entries(git_repo, tmp_path, project_id, manage, monkeypatch):
-    import forge.daemon.main as daemon
-    import forge.tools.worktree as worktree
+    import elstin.daemon.main as daemon
+    import elstin.tools.worktree as worktree
 
     monkeypatch.setattr(worktree, "ensure_dependencies", lambda path: {"passed": True})  # no Maven here
-    from forge.config.store import set_config, set_project_config
-    from forge.orchestration.integration import integration_branch_name
-    from forge.state.manager import StateManager
+    from elstin.config.store import set_config, set_project_config
+    from elstin.orchestration.integration import integration_branch_name
+    from elstin.state.manager import StateManager
 
     _write(git_repo, "pom.xml", "<project/>")
     _git(git_repo, "add", "pom.xml")
@@ -110,7 +110,7 @@ async def test_the_epic_branch_gets_the_missing_entries(git_repo, tmp_path, proj
     story_worktree = sm.get_story("ENG-2")["worktree_path"]
     if manage:
         assert subjects == ["Ignore build output: target/"]
-        assert _git(git_repo, "show", f"{epic_branch}:.gitignore") == "# Build output (added by code_forge)\ntarget/"
+        assert _git(git_repo, "show", f"{epic_branch}:.gitignore") == "# Build output (added by elstin)\ntarget/"
         assert os.path.isfile(os.path.join(story_worktree, ".gitignore"))  # the story branched after it
     else:
         assert subjects == []

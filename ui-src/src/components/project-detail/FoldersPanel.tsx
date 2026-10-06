@@ -13,9 +13,9 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { RepoGuideControl } from "./RepoGuide";
 
 // No repo is bound to an epic — every repo here is already readable and
-// writable by the plan (forge/tools/workspace.py). There is no per-epic
+// writable by the plan (elstin/tools/workspace.py). There is no per-epic
 // picker; a new epic gets a default assigned automatically on sync
-// (forge/services/epic_sync.py, the project's first-added repo). This
+// (elstin/services/epic_sync.py, the project's first-added repo). This
 // covers the one case that misses: an epic synced before this project had
 // any repo at all, which stays folder-less until the daemon's next sweep
 // backfills it — adding a repo here backfills it immediately instead.

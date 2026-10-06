@@ -1,7 +1,7 @@
 """Per-repo worktrees and pull requests for a story.
 
 The writable repo is no longer bound to an epic or a story: the approved
-plan names which repos it touches (forge/tools/workspace.py), so one story
+plan names which repos it touches (elstin/tools/workspace.py), so one story
 can have a worktree, a branch and a pull request in each of several repos.
 Two scalar columns on `stories` cannot hold that.
 

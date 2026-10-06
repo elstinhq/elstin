@@ -1,4 +1,4 @@
-"""A model endpoint that cannot be reached (forge/llm/errors.py's
+"""A model endpoint that cannot be reached (elstin/llm/errors.py's
 LlmUnreachableError): told apart from a timeout at the adapter, waited out by the
 loop for longer than a transient error, and — when that is not enough — parked and
 retried by the daemon instead of failing the story.
@@ -16,14 +16,14 @@ from datetime import datetime, timedelta, timezone
 import openai
 import pytest
 
-import forge.agents.loop as loop_mod
-import forge.daemon.main as daemon
-import forge.orchestration.graph as graph_module
-from forge.agents.loop import LoopConfig, run_agent_loop, unreachable_backoff_seconds
-from forge.agents.roles.dev_loop import DevLoopError
-from forge.config.store import set_config
-from forge.llm.base import Capabilities
-from forge.llm.errors import (
+import elstin.agents.loop as loop_mod
+import elstin.daemon.main as daemon
+import elstin.orchestration.graph as graph_module
+from elstin.agents.loop import LoopConfig, run_agent_loop, unreachable_backoff_seconds
+from elstin.agents.roles.dev_loop import DevLoopError
+from elstin.config.store import set_config
+from elstin.llm.base import Capabilities
+from elstin.llm.errors import (
     LlmConnectionError,
     LlmRateLimitError,
     LlmTimeoutError,
@@ -32,18 +32,18 @@ from forge.llm.errors import (
     is_retryable,
     provider_limit_of,
 )
-from forge.llm.openai_compat import OpenAiCompatProvider
-from forge.llm.registry import get_provider
-from forge.llm.types import LlmRequest, LlmResponse, TextBlock, Usage, text_message
-from forge.services.provider_limit import (
+from elstin.llm.openai_compat import OpenAiCompatProvider
+from elstin.llm.registry import get_provider
+from elstin.llm.types import LlmRequest, LlmResponse, TextBlock, Usage, text_message
+from elstin.services.provider_limit import (
     MAX_AUTO_UNREACHABLE_RETRIES,
     UNREACHABLE_REASON,
     UNREACHABLE_RETRY_SECONDS,
     USAGE_LIMIT_REASON,
     plan_parking,
 )
-from forge.services.run_activity import list_activity
-from forge.state.manager import StateManager
+from elstin.services.run_activity import list_activity
+from elstin.state.manager import StateManager
 
 # --- what is unreachable, and what is not --------------------------------------------
 
@@ -154,7 +154,7 @@ def test_the_connect_timeout_is_set_and_the_sdks_other_timeouts_are_left_alone()
     assert OpenAiCompatProvider(api_key="sk-test", connect_timeout_seconds=0)._client.timeout.connect == 5.0
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 def test_the_connect_timeout_comes_from_settings_and_defaults_to_thirty_seconds():
     set_config("openai_api_key", "sk-test")
     assert get_provider()._client.timeout.connect == 30
@@ -257,7 +257,7 @@ NOW = datetime(2026, 10, 4, 9, 0, tzinfo=timezone.utc)
 UNREACHABLE = {"kind": "unreachable", "reset_at": None, "message": "Could not connect to the model endpoint within 30s: timed out"}
 
 
-def test_an_unreachable_endpoint_is_retried_on_forges_own_schedule():
+def test_an_unreachable_endpoint_is_retried_on_elstins_own_schedule():
     parking = plan_parking(UNREACHABLE, retry_count=1, auto_resume=True, now=NOW)
 
     assert parking.retry_at == NOW + timedelta(seconds=UNREACHABLE_RETRY_SECONDS)
@@ -305,7 +305,7 @@ def _park(sm: StateManager, key: str, when: datetime | None, *, reason: str = UN
     sm.set_story_status(key, "failed", parked_reason=reason, failure_stage="run", retry_at=when)
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 def test_the_sweep_query_finds_stories_parked_on_either_reason_once_their_time_has_come(board):
     past, future = datetime.now(timezone.utc) - timedelta(minutes=1), datetime.now(timezone.utc) + timedelta(hours=1)
     board.create_story("ENG-4", epic_key="ENG-1", wave=0)
@@ -318,7 +318,7 @@ def test_the_sweep_query_finds_stories_parked_on_either_reason_once_their_time_h
     assert sorted(s["jira_key"] for s in board.list_stories_waiting_on_a_limit()) == ["ENG-2", "ENG-3"]
 
 
-@pytest.mark.usefixtures("forge_db", "fake_agents")
+@pytest.mark.usefixtures("elstin_db", "fake_agents")
 async def test_the_sweep_retries_a_story_parked_on_an_unreachable_endpoint_and_says_why(board):
     _park(board, "ENG-2", datetime.now(timezone.utc) - timedelta(seconds=1))
 
@@ -337,11 +337,11 @@ def _configure(worktrees_base_dir: str) -> None:
     set_config("require_plan_approval", "false")
 
 
-@pytest.mark.usefixtures("forge_db", "fake_agents")
+@pytest.mark.usefixtures("elstin_db", "fake_agents")
 async def test_an_unreachable_endpoint_parks_the_story_and_the_daemon_resumes_it_at_dev(git_repo, tmp_path, project_id, monkeypatch):
     """A failed connect's road, through the daemon's own run path and the real
     checkpointer: dev cannot reach the endpoint, the story is parked with a retry
-    time of forge's own choosing, and when it comes the daemon continues at dev
+    time of elstin's own choosing, and when it comes the daemon continues at dev
     with the plan it already has. A person pressed nothing."""
     _configure(str(tmp_path / "worktrees"))
     sm = StateManager()

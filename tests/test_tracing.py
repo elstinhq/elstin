@@ -1,4 +1,4 @@
-"""LangSmith tracing (forge/services/tracing.py).
+"""LangSmith tracing (elstin/services/tracing.py).
 
 Nothing here reaches LangSmith: the SDK client is replaced by one that records
 the runs it is handed. What is under test is what a story's run puts into
@@ -15,21 +15,21 @@ import pytest
 from langsmith import Client
 from langsmith.utils import tracing_is_enabled
 
-import forge.orchestration.graph as graph_module
-import forge.services.tracing as tracing
-from forge.agents import loop as agent_loop
-from forge.config.store import CONFIG_FIELDS, PROJECT_OVERRIDABLE_KEYS, set_config, set_project_config
-from forge.daemon.main import _invoke_graph
-from forge.llm import openai_compat
-from forge.llm.errors import LlmAuthError
-from forge.llm.openai_compat import OpenAiCompatProvider
-from forge.llm.types import LlmRequest, text_message
-from forge.orchestration.graph import checkpointer_from_url, compile_graph
-from forge.orchestration.state import initial_state
-from forge.services.redaction import redact_value
-from forge.state.manager import StateManager
+import elstin.orchestration.graph as graph_module
+import elstin.services.tracing as tracing
+from elstin.agents import loop as agent_loop
+from elstin.config.store import CONFIG_FIELDS, PROJECT_OVERRIDABLE_KEYS, set_config, set_project_config
+from elstin.daemon.main import _invoke_graph
+from elstin.llm import openai_compat
+from elstin.llm.errors import LlmAuthError
+from elstin.llm.openai_compat import OpenAiCompatProvider
+from elstin.llm.types import LlmRequest, text_message
+from elstin.orchestration.graph import checkpointer_from_url, compile_graph
+from elstin.orchestration.state import initial_state
+from elstin.services.redaction import redact_value
+from elstin.state.manager import StateManager
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
 COMPLETION = {
     "id": "chatcmpl-1", "object": "chat.completion", "created": 1, "model": "openai/gpt-5.6-terra",
@@ -108,7 +108,7 @@ def test_tracing_is_off_unless_turned_on():
 def test_tracing_needs_an_api_key_and_says_so_once(caplog):
     set_config("langsmith_tracing_enabled", "true")
 
-    with caplog.at_level(logging.WARNING, logger="forge.services.tracing"):
+    with caplog.at_level(logging.WARNING, logger="elstin.services.tracing"):
         assert tracing.tracing_settings(None) is None
         assert tracing.tracing_settings(None) is None
 
@@ -122,7 +122,7 @@ def test_default_settings():
     settings = tracing.tracing_settings(None)
 
     assert settings == tracing.TracingSettings(
-        api_key="ls-test-key", project="forge", endpoint="https://api.smith.langchain.com", workspace_id=None,
+        api_key="ls-test-key", project="elstin", endpoint="https://api.smith.langchain.com", workspace_id=None,
     )
 
 
@@ -175,7 +175,7 @@ def test_unreadable_settings_mean_no_tracing_not_a_failed_run(monkeypatch, caplo
 
     monkeypatch.setattr(tracing, "resolve_bool_config", broken)
 
-    with caplog.at_level(logging.ERROR, logger="forge.services.tracing"):
+    with caplog.at_level(logging.ERROR, logger="elstin.services.tracing"):
         assert tracing.tracing_settings(None) is None
 
     assert "could not read the LangSmith settings" in caplog.text
@@ -190,13 +190,13 @@ def test_the_client_is_built_from_the_settings_and_reused(monkeypatch):
 
     monkeypatch.setattr(tracing, "Client", FakeClient)
     monkeypatch.setattr(tracing, "_clients", {})
-    settings = tracing.TracingSettings("ls-key", "forge", "https://eu.api.smith.langchain.com", "ws-1")
+    settings = tracing.TracingSettings("ls-key", "elstin", "https://eu.api.smith.langchain.com", "ws-1")
 
     first, again = tracing._client(settings), tracing._client(settings)
-    other = tracing._client(tracing.TracingSettings("another-key", "forge", "https://eu.api.smith.langchain.com", None))
+    other = tracing._client(tracing.TracingSettings("another-key", "elstin", "https://eu.api.smith.langchain.com", None))
 
     assert first is again and first is not other
-    # Every client scrubs credentials out of what it sends (forge/services/redaction.py).
+    # Every client scrubs credentials out of what it sends (elstin/services/redaction.py).
     scrub = redact_value
     assert built == [
         {"api_url": "https://eu.api.smith.langchain.com", "api_key": "ls-key", "anonymizer": scrub, "workspace_id": "ws-1"},
@@ -213,8 +213,8 @@ def test_a_client_that_cannot_be_built_means_no_tracing_not_a_failed_run(monkeyp
 
     monkeypatch.setattr(tracing, "_client", cannot_build)
 
-    with caplog.at_level(logging.ERROR, logger="forge.services.tracing"):
-        with tracing.traced_run(None, name="forge:ENG-2") as extra:
+    with caplog.at_level(logging.ERROR, logger="elstin.services.tracing"):
+        with tracing.traced_run(None, name="elstin:ENG-2") as extra:
             assert extra == {}
 
     assert "could not set up the LangSmith client" in caplog.text
@@ -224,26 +224,26 @@ def test_a_client_that_cannot_be_built_means_no_tracing_not_a_failed_run(monkeyp
 
 
 def test_off_means_off_even_when_the_environment_says_otherwise(monkeypatch):
-    """forge's settings are the only switch: an ambient LANGSMITH_TRACING does
+    """elstin's settings are the only switch: an ambient LANGSMITH_TRACING does
     not turn on tracing of a run."""
     monkeypatch.setenv("LANGSMITH_TRACING", "true")
 
-    with tracing.traced_run(None, name="forge:ENG-2") as extra:
+    with tracing.traced_run(None, name="elstin:ENG-2") as extra:
         assert extra == {}
         assert tracing_is_enabled() is False
-    with tracing.traced_operation(None, name="forge:lessons:ENG-2"):
+    with tracing.traced_operation(None, name="elstin:lessons:ENG-2"):
         assert tracing_is_enabled() is False
 
 
 def test_on_hands_the_run_a_tracer_and_its_labels(langsmith):
-    with tracing.traced_run(None, name="forge:ENG-2", metadata={"story_key": "ENG-2"}, tags=["forge", "dev"]) as extra:
+    with tracing.traced_run(None, name="elstin:ENG-2", metadata={"story_key": "ENG-2"}, tags=["elstin", "dev"]) as extra:
         assert tracing_is_enabled() is True
 
-    assert extra["run_name"] == "forge:ENG-2"
+    assert extra["run_name"] == "elstin:ENG-2"
     assert extra["metadata"] == {"story_key": "ENG-2"}
-    assert set(extra["tags"]) == {"forge", "dev"}
+    assert set(extra["tags"]) == {"elstin", "dev"}
     assert len(extra["callbacks"]) == 1
-    assert extra["callbacks"][0].project_name == "forge"
+    assert extra["callbacks"][0].project_name == "elstin"
     assert extra["callbacks"][0].client is langsmith
 
 
@@ -271,7 +271,7 @@ async def test_a_story_run_is_one_trace_with_a_child_per_node(langsmith, postgre
     result = await _run_graph(postgres_url, project_id)
 
     assert result["status"] == "completed"  # tracing does not change what the run does
-    [root] = langsmith.named("forge:ENG-2")
+    [root] = langsmith.named("elstin:ENG-2")
     assert root["parent"] == "None"
     assert root["metadata"] | {"thread_id": "ENG-2"} == root["metadata"]
     assert root["metadata"]["story_key"] == "ENG-2"
@@ -280,11 +280,11 @@ async def test_a_story_run_is_one_trace_with_a_child_per_node(langsmith, postgre
     assert root["metadata"]["resume"] is False
     assert root["metadata"]["retry_count"] == 1
     assert root["metadata"]["ticket"] == "Add a widget"
-    assert set(root["tags"]) == {"forge", "dev", "fresh"}
+    assert set(root["tags"]) == {"elstin", "dev", "fresh"}
     for node in ("planner", "dev", "gate", "verifier"):
         [run] = langsmith.named(node)
-        assert langsmith.parent_name(run) == "forge:ENG-2", node
-    assert {run["project"] for run in langsmith.created.values()} == {"forge"}
+        assert langsmith.parent_name(run) == "elstin:ENG-2", node
+    assert {run["project"] for run in langsmith.created.values()} == {"elstin"}
 
 
 @pytest.mark.asyncio
@@ -292,9 +292,9 @@ async def test_a_story_run_is_one_trace_with_a_child_per_node(langsmith, postgre
 async def test_a_resumed_run_is_labelled_as_one(langsmith, postgres_url, project_id):
     await _run_graph(postgres_url, project_id, resume=True)
 
-    [root] = langsmith.named("forge:ENG-2")
+    [root] = langsmith.named("elstin:ENG-2")
     assert root["metadata"]["resume"] is True
-    assert set(root["tags"]) == {"forge", "dev", "resume"}
+    assert set(root["tags"]) == {"elstin", "dev", "resume"}
 
 
 @pytest.mark.asyncio
@@ -363,7 +363,7 @@ async def test_a_model_call_is_recorded_under_the_node_that_made_it(langsmith, p
     assert replies[0].usage.cost_usd == pytest.approx(0.0021)
     [call] = [run for run in langsmith.created.values() if run["type"] == "llm"]
     assert langsmith.parent_name(call) == "planner"
-    assert call["project"] == "forge"
+    assert call["project"] == "elstin"
     assert call["metadata"]["ls_model_name"] == "openai/gpt-5.6-terra"
     assert call["metadata"]["ls_invocation_params"] == {"reasoning_effort": "high"}
     assert call["inputs"]["messages"][0]["content"] == "Plan it."
@@ -379,7 +379,7 @@ async def test_a_provider_error_is_still_the_same_typed_error_and_the_span_recor
         monkeypatch, lambda request: httpx.Response(401, json={"error": {"message": "bad key", "code": "invalid_api_key"}}),
     )
 
-    with tracing.traced_operation(None, name="forge:probe"):
+    with tracing.traced_operation(None, name="elstin:probe"):
         with pytest.raises(LlmAuthError):
             await provider.complete(_request())
 
@@ -410,7 +410,7 @@ async def test_a_tool_call_is_a_span_and_the_result_is_unchanged(langsmith):
 
     tools = {"read_file": read_file, "explode": explode}
 
-    with tracing.traced_operation(None, name="forge:probe"):
+    with tracing.traced_operation(None, name="elstin:probe"):
         assert await agent_loop._call_tool(tools, "read_file", {"path": "a.py"}) == ("contents of a.py", False)
         text, is_error = await agent_loop._call_tool(tools, "explode", {})
         assert (is_error, "disk on fire" in text) == (True, True)
@@ -418,7 +418,7 @@ async def test_a_tool_call_is_a_span_and_the_result_is_unchanged(langsmith):
 
     [ok] = langsmith.named("read_file")
     assert ok["type"] == "tool"
-    assert langsmith.parent_name(ok) == "forge:probe"
+    assert langsmith.parent_name(ok) == "elstin:probe"
     assert ok["inputs"] == {"path": "a.py"}
     assert langsmith.output_of(ok)["outputs"] == {"output": "contents of a.py", "is_error": False}
     assert langsmith.output_of(ok).get("error") is None
@@ -448,20 +448,20 @@ def test_a_long_tool_input_or_output_is_cut_and_says_so():
 
 
 def test_an_operation_is_a_trace_of_its_own(langsmith):
-    with tracing.traced_operation(None, name="forge:lessons:ENG-2", metadata={"story_key": "ENG-2"}, tags=["forge", "lessons"]):
+    with tracing.traced_operation(None, name="elstin:lessons:ENG-2", metadata={"story_key": "ENG-2"}, tags=["elstin", "lessons"]):
         pass
 
-    [run] = langsmith.named("forge:lessons:ENG-2")
-    assert run["parent"] == "None" and run["project"] == "forge"
-    assert run["metadata"]["story_key"] == "ENG-2" and set(run["tags"]) == {"forge", "lessons"}
+    [run] = langsmith.named("elstin:lessons:ENG-2")
+    assert run["parent"] == "None" and run["project"] == "elstin"
+    assert run["metadata"]["story_key"] == "ENG-2" and set(run["tags"]) == {"elstin", "lessons"}
 
 
 def test_an_operation_that_raises_still_raises_and_is_recorded_as_failed(langsmith):
     with pytest.raises(ValueError, match="boom"):
-        with tracing.traced_operation(None, name="forge:lessons:ENG-2"):
+        with tracing.traced_operation(None, name="elstin:lessons:ENG-2"):
             raise ValueError("boom")
 
-    [run] = langsmith.named("forge:lessons:ENG-2")
+    [run] = langsmith.named("elstin:lessons:ENG-2")
     assert "boom" in langsmith.output_of(run)["error"]
 
 
@@ -471,7 +471,7 @@ def test_an_operation_that_raises_still_raises_and_is_recorded_as_failed(langsmi
 def _client():
     from fastapi.testclient import TestClient
 
-    from forge.app import create_app
+    from elstin.app import create_app
 
     return TestClient(create_app())
 
@@ -484,7 +484,7 @@ def test_the_settings_api_lists_the_tracing_fields_and_masks_the_key():
             "langsmith_workspace_id",
         } <= set(listed)
         assert listed["langsmith_tracing_enabled"]["value"] == "false"
-        assert listed["langsmith_project"]["value"] == "forge"
+        assert listed["langsmith_project"]["value"] == "elstin"
 
         assert client.put("/api/config/langsmith_api_key", json={"value": "ls-secret-123"}).status_code == 200
         after = {item["key"]: item for item in client.get("/api/config").json()}

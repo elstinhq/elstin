@@ -19,10 +19,10 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-import forge.orchestration.graph as graph_module
-import forge.services.generation as generation
-import forge.services.model_options as model_options
-from forge.config.store import (
+import elstin.orchestration.graph as graph_module
+import elstin.services.generation as generation
+import elstin.services.model_options as model_options
+from elstin.config.store import (
     CONFIG_FIELDS,
     PROJECT_OVERRIDABLE_KEYS,
     project_override,
@@ -30,27 +30,27 @@ from forge.config.store import (
     set_config,
     set_project_config,
 )
-from forge.daemon import main as daemon
-from forge.llm import openai_compat
-from forge.llm.base import Capabilities
-from forge.llm.errors import LlmAuthError, LlmConnectionError
-from forge.llm.openai_compat import OpenAiCompatProvider
-from forge.llm.pricing import known_models
-from forge.llm.registry import LlmNotConfiguredError, get_provider
-from forge.llm.types import LlmRequest, LlmResponse, TextBlock, Usage
-from forge.orchestration.graph import checkpointer_from_url, compile_graph
-from forge.orchestration.reconciler import DispatchStory, ResumeStory
-from forge.orchestration.state import initial_state
-from forge.state.manager import StateManager
+from elstin.daemon import main as daemon
+from elstin.llm import openai_compat
+from elstin.llm.base import Capabilities
+from elstin.llm.errors import LlmAuthError, LlmConnectionError
+from elstin.llm.openai_compat import OpenAiCompatProvider
+from elstin.llm.pricing import known_models
+from elstin.llm.registry import LlmNotConfiguredError, get_provider
+from elstin.llm.types import LlmRequest, LlmResponse, TextBlock, Usage
+from elstin.orchestration.graph import checkpointer_from_url, compile_graph
+from elstin.orchestration.reconciler import DispatchStory, ResumeStory
+from elstin.orchestration.state import initial_state
+from elstin.state.manager import StateManager
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
-MODEL_KEYS = ("planner_sdk_model", "planner_explorer_model", "dev_sdk_model", "verifier_qa_model")
+MODEL_KEYS = ("planner_sdk_model", "planner_explorer_model", "po_model", "dev_sdk_model", "verifier_qa_model")
 CONNECTION_KEYS = ("llm_provider", "llm_base_url", "openai_api_key")
 
 
 def _client() -> TestClient:
-    from forge.app import create_app
+    from elstin.app import create_app
 
     return TestClient(create_app())
 
@@ -387,8 +387,8 @@ async def test_an_explicit_model_beats_the_projects_review_model(project_id, mon
 
 
 def test_lessons_and_guides_are_written_on_the_projects_planner_model(project_id):
-    from forge.services.lessons import _lesson_model
-    from forge.services.project_guide import _guide_model
+    from elstin.services.lessons import _lesson_model
+    from elstin.services.project_guide import _guide_model
 
     set_config("planner_sdk_model", "global-planner")
     set_project_config(project_id, "planner_sdk_model", "project-planner")
@@ -482,7 +482,7 @@ async def test_the_providers_own_listing_is_what_is_offered(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_without_a_listing_the_models_forge_has_prices_for_are_offered(monkeypatch):
+async def test_without_a_listing_the_models_elstin_has_prices_for_are_offered(monkeypatch):
     _use_provider(monkeypatch, _Provider(raises=LlmAuthError("bad key")))
 
     result = await model_options.list_model_options()

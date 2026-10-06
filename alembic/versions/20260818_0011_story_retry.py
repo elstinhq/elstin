@@ -1,15 +1,15 @@
 """stories.retry_count/failure_stage — lets a human retry a story the
-reconciler halted the epic on (forge/orchestration/reconciler.py's
+reconciler halted the epic on (elstin/orchestration/reconciler.py's
 `any(status == "failed")` check), instead of the epic staying dead until
 someone edits the database by hand.
 
 `failure_stage` records which of the two distinct things "failed" can mean
-(see forge/daemon/main.py): "run" — the LangGraph run itself ended in
+(see elstin/daemon/main.py): "run" — the LangGraph run itself ended in
 status=failed (verifier exhausted its iterations, or a node failed
 outright) with no PR opened yet, so recovery is a full redispatch — versus
 "merge" — the story's own run succeeded but merging its branch into the
 epic's integration branch conflicted, so recovery is only a re-attempted
-merge, not redoing the implementation. `retry_story` (forge/state/
+merge, not redoing the implementation. `retry_story` (elstin/state/
 manager_story.py) reads this to pick the right recovery path.
 
 Existing rows backfill to retry_count=0 / failure_stage=NULL: no story

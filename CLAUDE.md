@@ -30,21 +30,21 @@ Local dev setup (no Docker for the app itself, Postgres via Docker):
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 docker compose up postgres -d
-export DATABASE_URL=postgresql+psycopg://forge:forge@localhost:5433/forge
+export DATABASE_URL=postgresql+psycopg://elstin:elstin@localhost:5433/elstin
 alembic upgrade head
 ```
 
 Run the full stack instead:
 
 ```bash
-scripts/forge.sh
+scripts/elstin.sh
 # Dashboard: http://localhost:8000/
 # Settings:  http://localhost:8000/settings
 ```
 
-`scripts/forge.sh` wraps `docker compose` (or `podman compose`) with
+`scripts/elstin.sh` wraps `docker compose` (or `podman compose`) with
 engine detection, an image rebuild on every `up` — the image bakes in
-`forge/`, `alembic/` and the UI bundle, so a stale one runs code you no
+`elstin/`, `alembic/` and the UI bundle, so a stale one runs code you no
 longer have and fails migrations with a misleading "Can't locate
 revision" — a health wait, and `stop`/`down`/`logs`/`status`/`rebuild`/
 `psql`/`reset` subcommands. `scripts/stop.sh` is the stop half (`--keep`
@@ -73,10 +73,11 @@ New DB column/table: add an Alembic migration under
 backfill/default semantics for existing rows), then `alembic upgrade head`.
 
 UI changes: the settings UI is a TypeScript/React app under `ui-src/src/`
-(three independent React roots — projects list, settings, project detail —
-mounted into the three thin HTML shells at `settings-ui/*.html`; no
+(five independent React roots — projects list, settings, project detail, PO
+start page, PO draft page — mounted into the five thin HTML shells at
+`settings-ui/*.html`; no
 client-side router, matching FastAPI's existing one-route-per-page setup
-in `forge/app.py`). After editing anything under `ui-src/src/`, rebuild:
+in `elstin/app.py`). After editing anything under `ui-src/src/`, rebuild:
 
 ```bash
 cd ui-src && npm install && npm run build   # -> settings-ui/vendor/app-*.js
@@ -107,9 +108,9 @@ stylesheet `<link>`, both of which must run before the JS bundle.
 - Never call a real LLM provider / GitHub / live JIRA in tests.
   `tests/conftest.py`'s `fake_agents` fixture monkeypatches the five
   graph entry points (planner, dev, the Tier 1 deterministic gate,
-  verifier, epic QA) on `forge.orchestration.graph` (imported by name at
+  verifier, epic QA) on `elstin.orchestration.graph` (imported by name at
   module load, so patch them there, not at their definition site); a role
-  module tested directly instead fakes `forge.llm.registry.get_provider`.
+  module tested directly instead fakes `elstin.llm.registry.get_provider`.
 - `git_repo` fixture (`tests/conftest.py`) gives a real repo with an
   `origin` remote — worktree code assumes `origin/<default>` exists, so
   tests should too.
@@ -120,25 +121,25 @@ stylesheet `<link>`, both of which must run before the JS bundle.
 
 1. Figure out which package owns it via AGENTS.md's package map and "Where
    to change what" table — this codebase enforces strict layering (e.g.
-   only `state/`+`db/` may import `forge.db.models`; the reconciler must
-   stay pure; planner/dev run only through `forge/agents/loop.py`, never a
+   only `state/`+`db/` may import `elstin.db.models`; the reconciler must
+   stay pure; planner/dev run only through `elstin/agents/loop.py`, never a
    hand-rolled second chat loop or a direct provider-SDK call).
-2. Adding a language: `forge/tools/*_tools.py` (see `vue_tools.py` /
+2. Adding a language: `elstin/tools/*_tools.py` (see `vue_tools.py` /
    `java_tools.py` for the current shape) + register in
-   `forge/tools/language_hooks.py`'s `_ensure_default_profiles_registered()`
+   `elstin/tools/language_hooks.py`'s `_ensure_default_profiles_registered()`
    + tests under `tests/test_*_tools.py`. Never special-case a language
    name inside `safe_shell`/`dev_tools` directly.
-3. Changing sync/dispatch behavior: `forge/services/epic_sync.py` (levels,
-   parent/sub-task hierarchy) and `forge/services/story_kind.py`
+3. Changing sync/dispatch behavior: `elstin/services/epic_sync.py` (levels,
+   parent/sub-task hierarchy) and `elstin/services/story_kind.py`
    (dev-vs-qa classification) are the two places that decide what gets
    worked on and in what order — read both before changing either.
    *Which* tickets arrive in the first place is a third place:
-   `forge/services/jira_filter.py` (a project's saved JIRA query, compiled
-   to JQL) plus `forge/daemon/ticket_sync.py` (the slow background sweep
+   `elstin/services/jira_filter.py` (a project's saved JIRA query, compiled
+   to JQL) plus `elstin/daemon/ticket_sync.py` (the slow background sweep
    that re-runs it). A sweep ingests new roots and **re-walks** roots
-   forge already has (and every in-progress epic, matched or not) so stories
+   elstin already has (and every in-progress epic, matched or not) so stories
    added later still arrive; nothing is ever unsynced or reordered. The
    re-walk also reconciles content and closure with the source — see
-   `forge/services/external_sync.py`: text changed under a plan is *held*
+   `elstin/services/external_sync.py`: text changed under a plan is *held*
    for a human, never rewritten; closed/deleted tickets stop being
    dispatched.

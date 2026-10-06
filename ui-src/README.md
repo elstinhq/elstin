@@ -1,11 +1,11 @@
-# code_forge UI build
+# elstin UI build
 
-`src/` is a TypeScript + React app — three independent entry points
-(`src/entries/projects.tsx`, `settings.tsx`, `project-detail.tsx`), one per
-page under `../settings-ui/*.html`. There is no client-side router: each
-entry mounts its own React root into that page's `<div id="root">`,
-matching the three routes FastAPI already serves
-(`../forge/app.py`) — navigation between pages is still a plain page load.
+`src/` is a TypeScript + React app — five independent entry points
+(`src/entries/projects.tsx`, `settings.tsx`, `project-detail.tsx`,
+`po-start.tsx`, `po-session.tsx`), one per page under `../settings-ui/*.html`. There is no
+client-side router: each entry mounts its own React root into that page's
+`<div id="root">`, matching the routes FastAPI already serves
+(`../elstin/app.py`) — navigation between pages is still a plain page load.
 
 ## Components
 
@@ -44,7 +44,7 @@ that needs registry credentials, or a build step that fetches from one
 
 Theming is one attribute, not shadcn's default `.dark` class. `<html>`
 uses `data-theme="dark"|"light"` (set by `lib/theme.ts`, persisted under
-`forge-theme`) because that is what the pre-paint inline script in each
+`elstin-theme`) because that is what the pre-paint inline script in each
 `../settings-ui/*.html` shell already sets from `localStorage` before
 first paint — `globals.css`'s `@custom-variant dark` selector points at
 that attribute instead of the class shadcn scaffolds by default. Keep the

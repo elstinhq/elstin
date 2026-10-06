@@ -1,4 +1,4 @@
-"""forge/tools/progress.py — the dev agent's live checklist, plus the
+"""elstin/tools/progress.py — the dev agent's live checklist, plus the
 `update_progress_tool` that maintains it and the loop hook that re-shows
 it. The mechanism exists because the idle-turn guard could detect drift but
 not correct it; what makes it work is that the checklist is re-sent every
@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from forge.tools.dev_tools import PROGRESS_TOOLS, READ_ONLY_TOOLS, make_dev_tools
-from forge.tools.progress import (
+from elstin.tools.dev_tools import PROGRESS_TOOLS, READ_ONLY_TOOLS, make_dev_tools
+from elstin.tools.progress import (
     PROGRESS_STATUSES,
     merge_progress_update,
     render_progress,

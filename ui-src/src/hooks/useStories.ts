@@ -120,7 +120,8 @@ function appendEvent(events: ActivityEvent[], incoming: ActivityEvent): Activity
 }
 
 /**
- * Live activity for one story, pushed over SSE.
+ * Live activity from one stream, pushed over SSE — a story's run, or a PO
+ * session's (the same events, the same endpoint code, a different URL).
  *
  * The one piece of server state in this app that isn't a TanStack query,
  * and deliberately so: the server decides when there is something new, so
@@ -131,22 +132,22 @@ function appendEvent(events: ActivityEvent[], incoming: ActivityEvent): Activity
  * its whole history every few seconds.
  *
  * `enabled` is the dialog's open flag: the effect tears the connection
- * down when it goes false or the story changes, so a closed dialog leaves
+ * down when it goes false or the URL changes, so a closed dialog leaves
  * nothing behind (a browser will otherwise hold an EventSource open, and
  * keep reconnecting it, for the life of the page).
  */
-export function useStoryActivity(storyKey: string | null, enabled: boolean) {
+export function useActivityStream(url: string | null, enabled: boolean) {
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [connection, setConnection] = useState<ActivityConnection>("connecting");
 
   useEffect(() => {
-    if (!enabled || storyKey == null) return;
+    if (!enabled || url == null) return;
 
-    // Reopening on a different story must not show the previous one's tail.
+    // Reopening on a different stream must not show the previous one's tail.
     setEvents([]);
     setConnection("connecting");
 
-    const source = new EventSource(api.storyActivityStreamUrl(storyKey));
+    const source = new EventSource(url);
     source.onopen = () => setConnection("live");
     source.onmessage = (message: MessageEvent<string>) => {
       let event: ActivityEvent;
@@ -163,9 +164,13 @@ export function useStoryActivity(storyKey: string | null, enabled: boolean) {
     source.onerror = () => setConnection(source.readyState === EventSource.CLOSED ? "closed" : "reconnecting");
 
     return () => source.close();
-  }, [storyKey, enabled]);
+  }, [url, enabled]);
 
   return { events, connection };
+}
+
+export function useStoryActivity(storyKey: string | null, enabled: boolean) {
+  return useActivityStream(storyKey == null ? null : api.storyActivityStreamUrl(storyKey), enabled);
 }
 
 export function useStoryUsage(storyKey: string | null) {

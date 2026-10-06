@@ -1,5 +1,5 @@
 """Work from tickets closed as done in the source, not in the default branch
-yet (forge/daemon/main.py's _bring_done_work_into_epic and
+yet (elstin/daemon/main.py's _bring_done_work_into_epic and
 _replan_behind_done_work). One such case: two item-search tickets Done
 in JIRA, their branches unmerged, and the next story planning against a main
 that had no item search at all. Real Postgres and git; agents are fakes."""
@@ -11,13 +11,13 @@ import subprocess
 import pytest
 from fastapi.testclient import TestClient
 
-import forge.daemon.main as daemon
-from forge.config.store import set_config
-from forge.orchestration.integration import integration_branch_name
-from forge.services.run_activity import append_activity
-from forge.state.manager import StateManager
+import elstin.daemon.main as daemon
+from elstin.config.store import set_config
+from elstin.orchestration.integration import integration_branch_name
+from elstin.services.run_activity import append_activity
+from elstin.state.manager import StateManager
 
-pytestmark = [pytest.mark.usefixtures("forge_db", "fake_agents"), pytest.mark.asyncio]
+pytestmark = [pytest.mark.usefixtures("elstin_db", "fake_agents"), pytest.mark.asyncio]
 
 
 def _git(repo: str, *args: str) -> str:
@@ -39,7 +39,7 @@ def _push_branch(repo: str, branch: str, files: dict[str, str]) -> str:
 
 
 def _setup(tmp_path, project_id, repo, *, done: dict[str, str], pending: list[str], approval: bool = False) -> StateManager:
-    """`done`: {story key: its status in the source}, closed before forge
+    """`done`: {story key: its status in the source}, closed before elstin
     ever started them."""
     set_config("openai_api_key", "sk-openai-dummy")
     set_config("worktrees_base_dir", str(tmp_path / "worktrees"))
@@ -59,7 +59,7 @@ def _setup(tmp_path, project_id, repo, *, done: dict[str, str], pending: list[st
 def _planner_log(monkeypatch) -> list[dict]:
     """A fake planner that records its calls and, like the real one, logs
     when planning starts."""
-    import forge.orchestration.graph as graph
+    import elstin.orchestration.graph as graph
     from tests.conftest import fake_run_planner
 
     calls: list[dict] = []
@@ -91,7 +91,7 @@ async def test_a_done_tickets_unmerged_work_is_in_the_epic_branch_before_any_sto
     assert os.path.exists(os.path.join(worktree, "CustomerSearchController.java"))  # what the planner reads
     assert calls[0]["project_path"] == worktree
     assert _merge_result(sm, "ENG-2")["result"] == "merged"
-    assert sm.get_story("ENG-2")["status"] == "skipped"  # still not forge's to run
+    assert sm.get_story("ENG-2")["status"] == "skipped"  # still not elstin's to run
     assert "`feature/ENG-2-customer-api` is merged into this one" in daemon._epic_pr_body(sm, sm.get_epic("ENG-1"))
 
     await daemon.poll_once(sm, wait=True)  # nothing to do twice
@@ -136,7 +136,7 @@ async def test_a_plan_made_before_done_work_arrived_is_made_again(git_repo, tmp_
     sm.set_story_clarification_questions("ENG-3", [{"id": "q1", "question": "BE or FE?", "options": []}])
 
     _push_branch(git_repo, "feature/ENG-2-customer-api", {"CustomerSearchController.java": "class C {}\n"})
-    TestClient(__import__("forge.app", fromlist=["create_app"]).create_app()).post("/api/epics/ENG-1/prior-work/refresh")
+    TestClient(__import__("elstin.app", fromlist=["create_app"]).create_app()).post("/api/epics/ENG-1/prior-work/refresh")
     await daemon.poll_once(sm, wait=True)
 
     story = sm.get_story("ENG-3")
@@ -156,7 +156,7 @@ async def test_a_done_ticket_with_diverged_branches_waits_for_a_pick(git_repo, t
     await daemon.poll_once(sm, wait=True)
     assert _merge_result(sm, "ENG-2")["result"] == "choose"
 
-    from forge.app import create_app
+    from elstin.app import create_app
 
     picked = TestClient(create_app()).post("/api/stories/ENG-2/prior-work", json={"repo_label": "widgets", "branch": "ENG-2-b"})
     assert picked.status_code == 200

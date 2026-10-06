@@ -31,11 +31,12 @@ export function ProjectSettingsDialog({ projectId, ticketSource, open, onClose }
   // override start open, so what this project customizes is visible at once.
   const [openIds, setOpenIds] = useState<Set<string> | null>(null);
 
-  // A GitHub project has no use for the JIRA connection fields.
+  // A GitHub project has no use for the JIRA connection fields, nor for the PO agent's
+  // JIRA write switches (publishing is JIRA-only).
   const sections = useMemo(
     () =>
       buildSections(
-        (configQuery.data ?? []).filter((field) => !(ticketSource === "github" && field.key.startsWith("jira_"))),
+        (configQuery.data ?? []).filter((field) => !(ticketSource === "github" && (field.key.startsWith("jira_") || field.key.startsWith("po_jira_")))),
         categoriesQuery.data,
       ),
     [configQuery.data, categoriesQuery.data, ticketSource],
@@ -48,7 +49,7 @@ export function ProjectSettingsDialog({ projectId, ticketSource, open, onClose }
 
   // A project that sends its calls to its own endpoint must bring its own key —
   // the global key is never sent to an endpoint it was not issued for
-  // (forge/llm/registry.py) — so say so here, not when its first run fails.
+  // (elstin/llm/registry.py) — so say so here, not when its first run fails.
   const byKey = new Map((configQuery.data ?? []).map((field) => [field.key, field]));
   const own = (key: string) => (byKey.get(key)?.overridden ? (byKey.get(key)?.value ?? "").trim() : "");
   const ownsEndpoint = own("llm_base_url") !== "" || (own("llm_provider") !== "" && own("llm_provider").toLowerCase() !== "openai");

@@ -1,8 +1,8 @@
-"""What the last sync learned about a ticket that forge has not acted on.
+"""What the last sync learned about a ticket that elstin has not acted on.
 
 Revision 0020 recorded where each ticket came from. Sync now also refreshes
 content and notices closure, and both need somewhere to land that does not
-disturb a story forge is already working on:
+disturb a story elstin is already working on:
 
 - `epics.external_status` / `stories.external_status`: the status text the
   source last reported ("In Progress", "Done"), for display.
@@ -11,7 +11,7 @@ disturb a story forge is already working on:
   'closed_externally'); one in flight is only flagged; an epic is put on
   hold (manual_gate).
 - `stories.external_pending` / `external_changed_at`: content the source
-  changed after forge planned or started the story, held back for a human
+  changed after elstin planned or started the story, held back for a human
   to apply, apply-and-replan, or dismiss. NULL means nothing waiting.
   Epics have no pending column: their prose is applied directly.
 

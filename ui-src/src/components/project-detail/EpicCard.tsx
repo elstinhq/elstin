@@ -4,6 +4,8 @@ import { Twisty } from "../shared/Twisty";
 import { PrApprovalPrompt } from "./PrApprovalPrompt";
 import { RemoveEpicButton } from "./RemoveEpicButton";
 import { StoryRow } from "./StoryRow";
+import { StoryGraph } from "./StoryGraph";
+import { useState } from "react";
 import { useRefreshPriorWork, useSetEpicGate } from "../../hooks/useEpics";
 import { continuedBranches, doneWorkOutcome, lookupDue, needsChoice, onlyInDefault } from "../../lib/priorWork";
 import { useToast } from "../../lib/toast";
@@ -46,6 +48,7 @@ export function EpicCard({
   onOpenStory,
 }: EpicCardProps) {
   const setEpicGate = useSetEpicGate(projectId);
+  const [storyView, setStoryView] = useState<"list" | "graph">("list");
 
   // Progress counts top-level stories only. Sub-tasks are never dispatched
   // and never reach a done status, so counting them would peg every epic's
@@ -68,7 +71,7 @@ export function EpicCard({
   const total = stories.length;
   const pct = total ? Math.round((doneCount / total) * 100) : 0;
   // Pause/Resume is a hold on dispatch, and the daemon stops polling an epic
-  // once it is merged or complete (forge/state/manager_epic.py's
+  // once it is merged or complete (elstin/state/manager_epic.py's
   // _TERMINAL_EPIC_PHASES), so on a finished epic the flag does nothing — yet
   // it was left set from the epic's creation (epics start paused) and read
   // "Paused / Resume" on work that was long done. Keyed on the phase rather
@@ -137,7 +140,7 @@ export function EpicCard({
             <Tag label="Awaiting PR approval" appearance="warning" title="Every story has merged; nothing is pushed until you open the pull request or keep the branch local." />
           ) : null}
           {epic.external_closed ? (
-            <Tag label="closed in source" appearance="secondary" title="The source reports this epic closed, so forge put it on hold. Resume it to keep going." />
+            <Tag label="closed in source" appearance="secondary" title="The source reports this epic closed, so Elstin put it on hold. Resume it to keep going." />
           ) : null}
 
           <div className="flex-1" />
@@ -166,10 +169,26 @@ export function EpicCard({
             <span className="text-muted-foreground text-xs whitespace-nowrap">
               {doneCount}/{total} done
             </span>
+            <div className="flex gap-1 text-xs" role="group" aria-label="Story layout">
+              {(["list", "graph"] as const).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  aria-pressed={storyView === v}
+                  onClick={() => setStoryView(v)}
+                  className={cn("rounded px-1.5 py-0.5", storyView === v ? "bg-muted font-medium" : "text-muted-foreground hover:text-foreground")}
+                >
+                  {v === "list" ? "List" : "Graph"}
+                </button>
+              ))}
+            </div>
           </div>
 
           <PriorWorkSummary projectId={projectId} epic={epic} stories={stories} />
 
+          {storyView === "graph" && stories.length > 0 ? (
+            <StoryGraph stories={stories} onOpenStory={onOpenStory} />
+          ) : (
           <div className="flex flex-col">
             {stories.map((story) => (
               <StoryRow
@@ -185,13 +204,14 @@ export function EpicCard({
               />
             ))}
           </div>
+          )}
         </div>
       </div>
     </Card>
   );
 }
 
-// What the look-up of earlier work found (forge/services/prior_work.py), in
+// What the look-up of earlier work found (elstin/services/prior_work.py), in
 // one line: which tickets continue an existing branch, which wait for a pick,
 // which are already in main — and "Look again" while any ticket has not
 // started, for a branch pushed after the epic was added.

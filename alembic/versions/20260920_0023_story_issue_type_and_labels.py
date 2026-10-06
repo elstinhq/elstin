@@ -1,6 +1,6 @@
 """The ticket's own issue type and labels, kept on the story.
 
-Both already existed on `Ticket` at sync time (forge/services/ticket_source.py)
+Both already existed on `Ticket` at sync time (elstin/services/ticket_source.py)
 and were handed to `classify_story_kind`, but only the dev/qa verdict was
 persisted — the signals behind it were thrown away. Branch naming needs them:
 `feat/` vs `fix/` is exactly the distinction a label carries, and for a GitHub
@@ -15,7 +15,7 @@ Backfill: both NULL for existing rows. Nothing recomputes them for a story
 already on the board — a re-sync leaves an existing story's fields alone, the
 same rule `Story.kind` already follows — so a story created before this
 migration keeps a NULL type and falls back to the default branch prefix
-(forge/tools/worktree.py's DEFAULT_TYPE_PREFIX). Existing branches are not
+(elstin/tools/worktree.py's DEFAULT_TYPE_PREFIX). Existing branches are not
 renamed: they are recorded in `story_worktrees.branch` and, once pushed, own
 an open pull request that a rename would close.
 

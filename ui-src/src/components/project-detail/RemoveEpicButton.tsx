@@ -8,7 +8,7 @@ import type { Epic } from "../../types/api";
 import { Button } from "../ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 
-// Removing a ticket forgets it in forge — its board entry, run history, token
+// Removing a ticket forgets it in elstin — its board entry, run history, token
 // usage, worktrees, local branches and saved run state — and nothing else.
 // The confirmation spells out both halves, because "remove" is easy to read as
 // "close": a pull request that was opened stays open, and a branch that was
@@ -36,7 +36,7 @@ export function RemoveEpicButton({ projectId, epic }: { projectId: number; epic:
     removeEpic.mutate(epic.jira_key, {
       onSuccess: (report) => {
         setOpen(false);
-        showToast(`Removed ${label} from forge`, "success");
+        showToast(`Removed ${label} from Elstin`, "success");
         if (report.left_on_remote.pull_requests.length) {
           const numbers = report.left_on_remote.pull_requests.map((pr) => `#${pr.number}`).join(", ");
           showToast(`Pull request ${numbers} on GitHub was not touched — close it there if you want it gone.`, "info");
@@ -55,8 +55,8 @@ export function RemoveEpicButton({ projectId, epic }: { projectId: number; epic:
         variant="outline"
         size="icon"
         className="size-8"
-        aria-label={`Remove ${label} from forge`}
-        title={running ? "A run is in progress — cancel it (on the story) or wait for it to finish before removing this ticket." : "Remove this ticket from forge"}
+        aria-label={`Remove ${label} from Elstin`}
+        title={running ? "A run is in progress — cancel it (on the story) or wait for it to finish before removing this ticket." : "Remove this ticket from Elstin"}
         disabled={running}
         onClick={(e) => {
           e.stopPropagation();
@@ -69,12 +69,12 @@ export function RemoveEpicButton({ projectId, epic }: { projectId: number; epic:
       <Dialog open={open} onOpenChange={(next) => !removeEpic.isPending && setOpen(next)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Remove {label} from forge?</DialogTitle>
+            <DialogTitle>Remove {label} from Elstin?</DialogTitle>
             <DialogDescription>This can't be undone.</DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-3 text-sm">
             <div>
-              <p className="font-medium">Deleted from forge</p>
+              <p className="font-medium">Deleted from Elstin</p>
               <p className="text-muted-foreground">
                 {taskCount > 1 ? `The ticket and its ${taskCount} tasks` : "The ticket"}, along with run history and token usage,
                 worktrees, local branches and saved run state.

@@ -1,5 +1,5 @@
-"""Deleting a project (forge/daemon/project_removal.py, DELETE /api/projects/{id}):
-every ticket as Remove ticket does, forge's own clones, and the project's
+"""Deleting a project (elstin/daemon/project_removal.py, DELETE /api/projects/{id}):
+every ticket as Remove ticket does, elstin's own clones, and the project's
 rows — but never an attached folder, and never anything on GitHub or JIRA.
 Real Postgres and git; the agents are fakes."""
 from __future__ import annotations
@@ -10,12 +10,12 @@ import subprocess
 import pytest
 from fastapi.testclient import TestClient
 
-import forge.daemon.main as daemon
-from forge.config.store import get_project_config, set_config, set_project_config
-from forge.orchestration.integration import integration_branch_name
-from forge.state.manager import StateManager
+import elstin.daemon.main as daemon
+from elstin.config.store import get_project_config, set_config, set_project_config
+from elstin.orchestration.integration import integration_branch_name
+from elstin.state.manager import StateManager
 
-pytestmark = [pytest.mark.usefixtures("forge_db", "fake_agents"), pytest.mark.asyncio]
+pytestmark = [pytest.mark.usefixtures("elstin_db", "fake_agents"), pytest.mark.asyncio]
 
 
 def _git(cwd: str, *args: str) -> str:
@@ -41,7 +41,7 @@ def _repo(tmp_path, bare_name: str, checkout: str) -> str:
 
 @pytest.fixture()
 def project(tmp_path):
-    """A project with a folder forge cloned and a folder that was attached,
+    """A project with a folder elstin cloned and a folder that was attached,
     two tickets (one underway in both repos, one not started), a settings
     override and a ticket filter."""
     set_config("openai_api_key", "sk-openai-dummy")
@@ -70,7 +70,7 @@ def project(tmp_path):
 
 
 def _client() -> TestClient:
-    from forge.app import create_app
+    from elstin.app import create_app
 
     return TestClient(create_app())
 
@@ -101,7 +101,7 @@ async def test_deleting_a_project_removes_its_tickets_clones_and_rows_but_keeps_
     assert not os.path.exists(project["cloned"])
     assert not os.path.exists(project["tmp"] / "clones" / str(pid))
     assert os.listdir(project["tmp"] / "worktrees") == []
-    # The attached folder is someone's checkout: still there, with forge's
+    # The attached folder is someone's checkout: still there, with elstin's
     # branches and worktrees gone from it and its own work untouched.
     attached = project["attached"]
     assert os.path.isfile(os.path.join(attached, "README.md"))
@@ -126,7 +126,7 @@ async def test_a_run_in_progress_refuses_the_deletion_before_anything_is_touched
     assert os.path.isdir(project["cloned"])
 
 
-async def test_an_unknown_project_is_a_404(forge_db):
+async def test_an_unknown_project_is_a_404(elstin_db):
     assert _client().delete("/api/projects/9999").status_code == 404
 
 

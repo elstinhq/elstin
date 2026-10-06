@@ -1,10 +1,10 @@
 """story_usage.provider — the LLM provider a usage row belongs to.
 
-forge/db/models/story_usage.py's uniqueness was previously (run_id, phase,
+elstin/db/models/story_usage.py's uniqueness was previously (run_id, phase,
 model) only. That collides once two providers can serve a same-named
 model (e.g. an OpenAI-compatible self-hosted endpoint proxying a model
 also reachable directly), and it can't distinguish which provider a row's
-`model` string actually came from now that forge/llm/ supports more than
+`model` string actually came from now that elstin/llm/ supports more than
 one. This migration adds the column and widens the uniqueness to include
 it.
 
@@ -12,8 +12,8 @@ Backfill: every row written before this migration ran through the old
 Claude Agent SDK path exclusively, so existing rows backfill to
 provider='anthropic' (not the new default 'openai') — that reflects what
 actually produced them, even though 'anthropic' is not itself a currently
-wired forge/llm/ adapter. New rows get the column's own default
-('openai') going forward; forge/services/usage.py:record_phase_usage
+wired elstin/llm/ adapter. New rows get the column's own default
+('openai') going forward; elstin/services/usage.py:record_phase_usage
 always writes it explicitly regardless of the column default.
 
 Revision ID: 20260912_0016

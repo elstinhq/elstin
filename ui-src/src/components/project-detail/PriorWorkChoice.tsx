@@ -8,9 +8,9 @@ import { Button } from "../ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 
 // Several branches carry diverged work for this ticket and none contains the
-// others (forge/services/prior_work.py). forge does not guess which code to
+// others (elstin/services/prior_work.py). elstin does not guess which code to
 // build on, so the story waits here — only it and the stories depending on
-// it. Picking one makes forge's branch start from it; "Start fresh" starts
+// it. Picking one makes elstin's branch start from it; "Start fresh" starts
 // from the epic branch as for any ticket. The branch itself is never changed.
 export function PriorWorkChoiceButton({ projectId, story }: { projectId: number; story: Story }) {
   const [open, setOpen] = useState(false);
@@ -85,7 +85,7 @@ function PriorWorkChoiceDialog({
           <DialogTitle>Which work should {displayKey(story)} continue?</DialogTitle>
           <DialogDescription>
             In {label}, {unmerged.length} branches carry work for this ticket that isn't in {finding.default_branch}, and none
-            contains the others. forge starts its own branch from the one you pick and never changes the original.
+            contains the others. Elstin starts its own branch from the one you pick and never changes the original.
             {remaining > 0 ? ` (${remaining} more repo${remaining > 1 ? "s" : ""} to decide after this one.)` : ""}
           </DialogDescription>
         </DialogHeader>

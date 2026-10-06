@@ -5,11 +5,11 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 
-// How a project gets a git repo (see forge/services/repo_clone.py): clone a
+// How a project gets a git repo (see elstin/services/repo_clone.py): clone a
 // URL into storage the app controls — works the same on the host and inside
 // `docker compose up` — or attach a repo that already exists on disk, used in
-// place. Attaching only works for a path the forge process can see: any path
-// when forge runs on the host, and inside Docker only a folder mounted into
+// place. Attaching only works for a path the elstin process can see: any path
+// when elstin runs on the host, and inside Docker only a folder mounted into
 // the container (docker-compose.yml).
 export type RepoSourceMode = "clone" | "attach";
 
@@ -32,7 +32,7 @@ const MODES: Record<RepoSourceMode, { label: string; field: string; placeholder:
     field: "Folder path",
     placeholder: "/Users/you/code/app",
     hint:
-      "A git repo already on this machine, used in place — or a folder holding several, to pick from. forge never " +
+      "A git repo already on this machine, used in place — or a folder holding several, to pick from. Elstin never " +
       "changes their checked-out files; it creates its branches and worktrees from them. Running in Docker? Mount " +
       "the folder first (see docker-compose.yml) and give the path inside the container.",
   },

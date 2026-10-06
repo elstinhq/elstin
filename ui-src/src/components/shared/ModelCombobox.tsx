@@ -18,7 +18,7 @@ interface ModelComboboxProps {
 }
 
 // A text field with a list of suggestions under it. Not a <select>: the
-// suggestions are only that, and a model id forge has never heard of must be
+// suggestions are only that, and a model id elstin has never heard of must be
 // typeable. Not a native datalist either — that narrows its suggestions to the
 // text already in the box, so a field holding the current model would offer
 // nothing else. Here the whole list shows until the person starts typing.

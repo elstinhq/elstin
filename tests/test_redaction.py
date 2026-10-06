@@ -1,13 +1,13 @@
-"""forge/services/redaction.py — credentials never reach the activity feed or
+"""elstin/services/redaction.py — credentials never reach the activity feed or
 LangSmith. Tool output is not curated: a command that prints its environment,
 a file read that turns out to be a `.env`, a build log that echoes a token."""
 from __future__ import annotations
 
 import pytest
 
-from forge.config.store import set_config, set_project_config
-from forge.services import redaction, tracing
-from forge.services.redaction import REDACTED, redact, redact_value
+from elstin.config.store import set_config, set_project_config
+from elstin.services import redaction, tracing
+from elstin.services.redaction import REDACTED, redact, redact_value
 
 # Built from parts so the repo itself never holds a string that looks like a live token.
 GITHUB = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6"
@@ -76,7 +76,7 @@ def test_ordinary_text_is_left_alone(text):
 # --- values -------------------------------------------------------------------
 
 
-def test_a_value_forge_holds_is_replaced_even_with_no_recognisable_shape():
+def test_a_value_elstin_holds_is_replaced_even_with_no_recognisable_shape():
     secret = "correct-horse-battery-staple"
     assert redact(f"password is {secret}!", values=[secret]) == f"password is {REDACTED}!"
 
@@ -100,12 +100,12 @@ def test_empty_text_and_none_pass_through():
 def test_the_environments_credential_named_values_are_collected_and_the_rest_are_not():
     env = {
         "GITHUB_TOKEN": GITHUB,
-        "DATABASE_URL": "postgresql://forge:hunter2hunter2@db/forge",
+        "DATABASE_URL": "postgresql://elstin:hunter2hunter2@db/elstin",
         "SSH_AUTH_SOCK": "/private/tmp/com.apple.launchd.abc/Listeners",
         "PATH": "/usr/bin:/bin",
         "EMPTY_TOKEN": "",
     }
-    assert redaction.environment_secret_values(env) == {GITHUB, "postgresql://forge:hunter2hunter2@db/forge"}
+    assert redaction.environment_secret_values(env) == {GITHUB, "postgresql://elstin:hunter2hunter2@db/elstin"}
 
 
 # --- JSON-like values ----------------------------------------------------------
@@ -133,10 +133,10 @@ def test_a_value_nested_too_deeply_to_walk_is_still_scrubbed():
     assert GITHUB not in str(redact_value(value, values=()))
 
 
-# --- what forge holds ----------------------------------------------------------
+# --- what elstin holds ----------------------------------------------------------
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 def test_secret_settings_global_and_per_project_are_scrubbed_by_value(project_id):
     set_config("openai_api_key", "global-model-key-0123456789")
     set_config("github_token", "gh-token-with-no-known-shape-1")
@@ -151,7 +151,7 @@ def test_secret_settings_global_and_per_project_are_scrubbed_by_value(project_id
     assert redact(text) == f"a {REDACTED} b {REDACTED} c {REDACTED} d https://jira.example.com"
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 def test_a_value_set_after_the_cache_was_filled_is_covered_once_it_expires(monkeypatch):
     set_config("openai_api_key", "first-key-0123456789abc")
     assert redact("x first-key-0123456789abc") == f"x {REDACTED}"
@@ -172,10 +172,10 @@ def test_unreadable_settings_fall_back_to_shapes_and_do_not_fail(monkeypatch):
 # --- where it is applied --------------------------------------------------------
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 def test_the_activity_feed_stores_and_streams_the_scrubbed_text(project_id, monkeypatch):
-    import forge.services.run_activity as run_activity
-    from forge.state.manager import StateManager
+    import elstin.services.run_activity as run_activity
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id)
@@ -196,7 +196,7 @@ def test_the_activity_feed_stores_and_streams_the_scrubbed_text(project_id, monk
     assert stored["meta"] == {"stdout": f"AWS_KEY={REDACTED}", "ok": True}
 
 
-@pytest.mark.usefixtures("forge_db")
+@pytest.mark.usefixtures("elstin_db")
 def test_the_langsmith_client_scrubs_inputs_outputs_errors_and_metadata(monkeypatch):
     monkeypatch.setattr(tracing, "_clients", {})  # a client built here must not outlive the test
     set_config("langsmith_tracing_enabled", "true")

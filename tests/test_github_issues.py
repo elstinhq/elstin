@@ -1,4 +1,4 @@
-"""GitHub Issues as a ticket source (forge/services/github_issues.py).
+"""GitHub Issues as a ticket source (elstin/services/github_issues.py).
 
 httpx's MockTransport plays GitHub — no token is ever sent anywhere."""
 from __future__ import annotations
@@ -8,14 +8,14 @@ import re
 import httpx
 import pytest
 
-import forge.services.epic_sync as epic_sync
-import forge.services.jira_filter as jira_filter
-from forge.config.store import set_config
-from forge.services import github_issues, ticket_source
-from forge.services.github_issues import GitHubApiError, GitHubIssuesSource, make_key, normalize_key, parse_key
-from forge.state.manager import StateManager
+import elstin.services.epic_sync as epic_sync
+import elstin.services.jira_filter as jira_filter
+from elstin.config.store import set_config
+from elstin.services import github_issues, ticket_source
+from elstin.services.github_issues import GitHubApiError, GitHubIssuesSource, make_key, normalize_key, parse_key
+from elstin.state.manager import StateManager
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
 
 # ---------------------------------------------------------------- fake GitHub
@@ -244,11 +244,11 @@ def test_an_api_error_carries_status_and_message(gh):
 
 def test_the_filter_compiles_to_a_github_search_query(gh):
     query = _source(gh).compile_filter(
-        {"jira_project_key": "acme/app", "assignee": "currentUser()", "statuses": ["Open"], "labels": ["forge", "help wanted"],
+        {"jira_project_key": "acme/app", "assignee": "currentUser()", "statuses": ["Open"], "labels": ["elstin", "help wanted"],
          "issue_types": ["Bug"], "extra_jql": "milestone:v2"}
     )
 
-    assert query == 'is:issue repo:acme/app assignee:@me is:open label:"forge","help wanted" type:"Bug" milestone:v2'
+    assert query == 'is:issue repo:acme/app assignee:@me is:open label:"elstin","help wanted" type:"Bug" milestone:v2'
 
 
 def test_a_bare_owner_scopes_to_an_organisation_and_unknown_statuses_are_ignored(gh):
@@ -418,7 +418,7 @@ def test_a_github_story_key_works_as_a_url_path_segment(gh, github_project):
     """The reason the board key is `gh.owner.repo.12` and not `owner/repo#12`."""
     from fastapi.testclient import TestClient
 
-    from forge.app import create_app
+    from elstin.app import create_app
 
     _tree(gh)
     epic_sync.sync_epic_from_jira("acme/app#1", project_id=github_project)
@@ -436,7 +436,7 @@ def test_adding_a_github_issue_by_url_over_http_returns_the_epic_under_its_board
     answered 404 "No such epic: https://github.com/…"."""
     from fastapi.testclient import TestClient
 
-    from forge.app import create_app
+    from elstin.app import create_app
 
     _tree(gh)
     with TestClient(create_app()) as client:

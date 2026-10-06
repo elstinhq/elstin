@@ -5,7 +5,7 @@ into `Epic.levels`, and thrown away — so the reconciler could only schedule
 level by level: a story in level 2 waited for EVERY level-1 story, not just
 the ones it depends on, and nothing in an epic ran in parallel with an
 unrelated failure. `stories.depends_on` keeps the edges themselves
-(list[story_key]); forge/services/epic_sync.py writes it on every sync and
+(list[story_key]); elstin/services/epic_sync.py writes it on every sync and
 relevel, and the reconciler starts a story once each of them has merged.
 
 Backfill: every top-level story in an epic's levels gets "every story in an

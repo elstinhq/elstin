@@ -1,4 +1,4 @@
-"""forge/services/repo_clone.py — clones from a local bare repo so this
+"""elstin/services/repo_clone.py — clones from a local bare repo so this
 stays fast and network-free, same reasoning as conftest.py's git_repo
 fixture."""
 from __future__ import annotations
@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from forge.services.repo_clone import RepoCloneError, _derive_repo_name, clone_repository
+from elstin.services.repo_clone import RepoCloneError, _derive_repo_name, clone_repository
 
 
 def _run_git(args: list[str], cwd: str) -> None:
@@ -87,7 +87,7 @@ def test_derive_repo_name(url, expected):
 
 # --- attach: a repo already on disk, used in place ---------------------------
 
-from forge.services.repo_clone import RepoAttachError, attach_local_repository  # noqa: E402
+from elstin.services.repo_clone import RepoAttachError, attach_local_repository  # noqa: E402
 
 
 def _local_repo(path, *, commit: bool = True) -> str:
@@ -127,7 +127,7 @@ def test_attach_expands_a_home_relative_path(tmp_path, monkeypatch):
         (lambda tmp: _local_repo(tmp / "empty", commit=False), "has no commits yet"),
     ],
 )
-def test_attach_refuses_what_forge_cannot_work_from(tmp_path, setup, fragment):
+def test_attach_refuses_what_elstin_cannot_work_from(tmp_path, setup, fragment):
     with pytest.raises(RepoAttachError, match=fragment):
         attach_local_repository(setup(tmp_path))
 
@@ -140,16 +140,16 @@ def test_attach_refuses_a_subfolder_and_names_the_repo_to_attach(tmp_path):
         attach_local_repository(str(tmp_path / "app" / "src"))
 
 
-def test_attach_refuses_forges_own_worktrees(tmp_path):
+def test_attach_refuses_elstins_own_worktrees(tmp_path):
     _local_repo(tmp_path / "worktrees" / "eng-2")
 
-    with pytest.raises(RepoAttachError, match="forge's own working folder"):
+    with pytest.raises(RepoAttachError, match="elstin's own working folder"):
         attach_local_repository(str(tmp_path / "worktrees" / "eng-2"), forbidden_dirs=[str(tmp_path / "worktrees")])
 
 
 # --- a folder holding repos, not being one -----------------------------------
 
-from forge.services.repo_clone import scan_folder  # noqa: E402
+from elstin.services.repo_clone import scan_folder  # noqa: E402
 
 
 def _workspace(tmp_path):
@@ -200,7 +200,7 @@ def test_attaching_a_folder_that_holds_repos_names_them(tmp_path):
 
 # --- browsing, for the folder picker ------------------------------------------
 
-from forge.services.repo_clone import browse_folder  # noqa: E402
+from elstin.services.repo_clone import browse_folder  # noqa: E402
 
 
 def test_browsing_lists_subfolders_and_marks_repos(tmp_path, monkeypatch):

@@ -1,15 +1,15 @@
 """story_run_outcomes — per-run work counters (the shape of a run).
 
-forge/db/models/story_usage.py records what a run cost. Nothing recorded
+elstin/db/models/story_usage.py records what a run cost. Nothing recorded
 how much work it took: gate failures, verifier rejections, dev passes and
 turns, and how the dev loop terminated. Those lived only inside the
 LangGraph checkpoint blob and as prose in the activity feed, so no question
 about whether the Tier 1 gate or the turn budgets are set sensibly could be
-answered from data. See forge/db/models/run_outcome.py's docstring.
+answered from data. See elstin/db/models/run_outcome.py's docstring.
 
 Backfill: none, and none is possible. Every counter here is observed while
-a run executes (forge/services/usage.py:record_run_outcome, called from
-forge/orchestration/graph.py's nodes), and runs that finished before this
+a run executes (elstin/services/usage.py:record_run_outcome, called from
+elstin/orchestration/graph.py's nodes), and runs that finished before this
 table existed never emitted them. Existing stories therefore have NO row
 at all rather than a row of zeros — a missing row means "not measured",
 which is materially different from "measured as zero" and readers must

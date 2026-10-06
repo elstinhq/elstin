@@ -1,4 +1,4 @@
-"""forge/tools/workspace.py and the multi-repo tool paths built on it.
+"""elstin/tools/workspace.py and the multi-repo tool paths built on it.
 
 No repo is bound to an epic or a story. The whole project is the
 workspace, the planner reads all of it, and the approved plan is what
@@ -15,10 +15,10 @@ import os
 
 import pytest
 
-from forge.tools.dev_tools import TOOL_SCHEMAS, make_dev_tools
-from forge.tools.path_guard import PathGuardError
-from forge.tools.planner_tools import make_planner_tools
-from forge.tools.workspace import (
+from elstin.tools.dev_tools import TOOL_SCHEMAS, make_dev_tools
+from elstin.tools.path_guard import PathGuardError
+from elstin.tools.planner_tools import make_planner_tools
+from elstin.tools.workspace import (
     REFERENCE_SIGIL,
     Workspace,
     build_repo_roots,

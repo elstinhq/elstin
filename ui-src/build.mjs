@@ -1,5 +1,5 @@
 // Bundles the settings UI's TypeScript/React source into static assets
-// settings-ui/vendor/ can serve directly, since code_forge's UI has no
+// settings-ui/vendor/ can serve directly, since elstin's UI has no
 // other build step and no server-side rendering. Run via `npm run build`
 // (see package.json) or from the Dockerfile's ui-build stage.
 //
@@ -29,6 +29,8 @@ await esbuild.build({
     "app-projects": path.join(__dirname, "src", "entries", "projects.tsx"),
     "app-settings": path.join(__dirname, "src", "entries", "settings.tsx"),
     "app-project-detail": path.join(__dirname, "src", "entries", "project-detail.tsx"),
+    "app-po-start": path.join(__dirname, "src", "entries", "po-start.tsx"),
+    "app-po-session": path.join(__dirname, "src", "entries", "po-session.tsx"),
   },
   outdir: outDir,
   bundle: true,
@@ -39,8 +41,8 @@ await esbuild.build({
 });
 
 // Compiled rather than imported from an entry: each HTML shell links it
-// once with a <link>, so bundling it into all three JS entries would ship
-// three copies of the same stylesheet and delay first paint until JS
+// once with a <link>, so bundling it into every JS entry would ship
+// a copy per page of the same stylesheet and delay first paint until JS
 // parses. The Tailwind CLI (not a bundler plugin) does the compiling —
 // esbuild has no CSS-transform story of its own, and this is the one
 // piece of the build shadcn/ui actually needs Tailwind for.

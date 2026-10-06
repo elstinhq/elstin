@@ -1,11 +1,11 @@
-"""The lookup of work already done on a ticket (forge/services/prior_work.py),
+"""The lookup of work already done on a ticket (elstin/services/prior_work.py),
 against real git repos: a clone with an `origin`, branches pushed the way a
 teammate would push them."""
 from __future__ import annotations
 
 import subprocess
 
-from forge.services.prior_work import is_searchable_key, needs_choice, start_candidate, survey_repo
+from elstin.services.prior_work import is_searchable_key, needs_choice, start_candidate, survey_repo
 
 
 def _git(repo: str, *args: str) -> str:
@@ -14,7 +14,7 @@ def _git(repo: str, *args: str) -> str:
 
 def _branch_with(repo: str, branch: str, files: dict[str, str], *, start: str = "main", push: bool = True, keep_local: bool = False) -> str:
     """Commit `files` on `branch` (from `start`), push it, and by default
-    drop the local copy — in forge's clone a teammate's branch exists only
+    drop the local copy — in elstin's clone a teammate's branch exists only
     as `origin/<branch>`."""
     _git(repo, "checkout", "-q", "-b", branch, start)
     for path, text in files.items():
@@ -158,10 +158,10 @@ def test_a_local_copy_that_diverged_from_origin_is_two_choices(git_repo):
     assert sorted(c["branch"] for c in finding["candidates"]) == ["ENG-2-tab", "origin/ENG-2-tab"]
 
 
-def test_forges_own_branches_are_not_prior_work(git_repo):
-    _branch_with(git_repo, "feat/ENG-2-forge-made", {"a.txt": "a\n"}, keep_local=True, push=False)
+def test_elstins_own_branches_are_not_prior_work(git_repo):
+    _branch_with(git_repo, "feat/ENG-2-elstin-made", {"a.txt": "a\n"}, keep_local=True, push=False)
 
-    finding = survey_repo(git_repo, {"ENG-2": ["ENG-2"]}, exclude_branches={"feat/ENG-2-forge-made"})["ENG-2"]
+    finding = survey_repo(git_repo, {"ENG-2": ["ENG-2"]}, exclude_branches={"feat/ENG-2-elstin-made"})["ENG-2"]
 
     assert finding["verdict"] == "none"
 

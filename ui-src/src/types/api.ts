@@ -1,8 +1,8 @@
-// Mirrors the `dict`/`list[dict]` shapes returned by forge/api/*.py — see
-// forge/state/manager_project.py, forge/state/manager_epic.py,
-// forge/state/manager_story.py, forge/state/manager_pr.py,
-// forge/services/usage.py, forge/services/run_activity.py, and
-// forge/config/store.py for the Python side of each of these.
+// Mirrors the `dict`/`list[dict]` shapes returned by elstin/api/*.py — see
+// elstin/state/manager_project.py, elstin/state/manager_epic.py,
+// elstin/state/manager_story.py, elstin/state/manager_pr.py,
+// elstin/services/usage.py, elstin/services/run_activity.py, and
+// elstin/config/store.py for the Python side of each of these.
 
 export interface Project {
   id: number;
@@ -15,8 +15,8 @@ export interface Project {
   repos?: ProjectRepo[]; // only present on GET /api/projects/{id}
 }
 
-// The guide a run against a repo would read (forge/services/project_guide.py):
-// the repo's own AGENTS.md/CLAUDE.md, else one forge generated, else none.
+// The guide a run against a repo would read (elstin/services/project_guide.py):
+// the repo's own AGENTS.md/CLAUDE.md, else one elstin generated, else none.
 export interface RepoGuide {
   source: "repo" | "generated" | "none";
   filename: string | null;
@@ -42,7 +42,7 @@ export interface ProjectRepo {
 
 // One saved JIRA query per project — the background-ingest alternative to
 // adding tickets one key at a time. `jql` is compiled server-side from the
-// structured fields (forge/services/jira_filter.py's build_jql) and is
+// structured fields (elstin/services/jira_filter.py's build_jql) and is
 // read-only here; it is null when the filter is too empty to compile.
 export interface TicketFilter {
   project_id: number;
@@ -106,7 +106,7 @@ export interface PullRequest {
   state: string;
 }
 
-// Work counters for a story's run (forge/services/usage.py's
+// Work counters for a story's run (elstin/services/usage.py's
 // StoryRunOutcome) — null until the story's first dispatch. Accumulate
 // across every retry under the same run_id, so on a retried story these
 // are the run's lifetime totals, not just the latest attempt.
@@ -123,7 +123,7 @@ export interface RunOutcome {
   verifier_rejections: number;
   dev_terminal_reason: string | null;
   outcome: string | null;
-  // The most memory one command of this run reached, and which (forge/tools/
+  // The most memory one command of this run reached, and which (elstin/tools/
   // process_monitor.py). null: not measured — not "zero".
   peak_memory_mb: number | null;
   peak_memory_command: string | null;
@@ -134,7 +134,7 @@ export type StoryStatus =
   | "dispatched"
   | "awaiting_plan_approval"
   // The run passed; its work waits for the merge queue to land it on the
-  // epic branch, locally (forge/daemon/main.py).
+  // epic branch, locally (elstin/daemon/main.py).
   | "ready_to_merge"
   | "merging"
   | "merged"
@@ -144,7 +144,7 @@ export type StoryStatus =
 
 export type StoryKind = "dev" | "qa";
 
-// Text the ticket's source changed after forge planned or started the story,
+// Text the ticket's source changed after elstin planned or started the story,
 // held for a person to decide on. Only the fields that changed are present.
 export interface ExternalPending {
   summary?: string;
@@ -156,7 +156,7 @@ export interface ExternalPending {
 export type ExternalChangeAction = "accept" | "replan" | "dismiss";
 
 // A design decision the planner found genuinely ambiguous — see
-// forge/agents/roles/planner.py's CLARIFICATION QUESTIONS rules. Answered
+// elstin/agents/roles/planner.py's CLARIFICATION QUESTIONS rules. Answered
 // via POST /api/stories/{key}/answer, one option id per question.
 export interface ClarificationOption {
   id: string;
@@ -179,7 +179,7 @@ export interface ClarificationAnswer {
   option_description: string | null;
 }
 
-// The planner's structured output (forge/agents/roles/planner.py), read
+// The planner's structured output (elstin/agents/roles/planner.py), read
 // back from the story's LangGraph checkpoint — see GET
 // /api/stories/{key}/plan. Deliberately loose: this is whatever the LLM
 // returned as JSON, and the UI only ever reads plan_markdown/feature_summary
@@ -199,8 +199,8 @@ export interface StoryPlan {
   plan: Plan | null;
 }
 
-// A branch that already carried work for a ticket, found before forge made
-// its own branch (forge/services/prior_work.py).
+// A branch that already carried work for a ticket, found before elstin made
+// its own branch (elstin/services/prior_work.py).
 export interface PriorWorkCandidate {
   branch: string;
   ref: string;
@@ -257,9 +257,9 @@ export interface EpicMergeResult {
   at?: string;
 }
 
-// A change the ticket needs that forge may not make, so a person has to: in a
+// A change the ticket needs that elstin may not make, so a person has to: in a
 // read-only repo or reference folder, or a file the project says agents must
-// not change (forge/agents/roles/plan_gate.py's normalize_plan).
+// not change (elstin/agents/roles/plan_gate.py's normalize_plan).
 export interface ReadOnlyChange {
   path: string;
   purpose: string | null;
@@ -267,7 +267,7 @@ export interface ReadOnlyChange {
 
 // Something the ticket's criteria lean on that no agent here can do, so a
 // person has to: run a script against data the agent cannot reach, check open
-// pull requests, publish, review (forge/agents/roles/plan_gate.py's
+// pull requests, publish, review (elstin/agents/roles/plan_gate.py's
 // person_actions_of). The non-file counterpart of ReadOnlyChange.
 export interface PersonAction {
   action: string;
@@ -292,7 +292,7 @@ export interface Story {
   worktree_path: string | null;
   branch: string | null;
   parked_reason: string | null;
-  // When forge retries a story parked on a provider limit (ISO); null when no
+  // When elstin retries a story parked on a provider limit (ISO); null when no
   // retry is scheduled — the provider did not say when the limit lifts.
   retry_at: string | null;
   gate_approved: boolean;
@@ -324,7 +324,7 @@ export interface Story {
 // (GitHub not configured, nothing to propose, or the PR was closed).
 export type EpicPhase = "planning" | "implementing" | "complete" | "pr_open" | "merged" | "failed";
 
-// The epic's pull request, per repo — the only one forge opens.
+// The epic's pull request, per repo — the only one elstin opens.
 export interface EpicPullRequest {
   repo_label: string;
   repo_path: string;
@@ -342,9 +342,9 @@ export interface EpicLevel {
 }
 
 // What removing a ticket did, and what it deliberately did not touch
-// (forge/daemon/ticket_removal.py). Removal is local only.
-// One folder's subfolders on the machine forge runs on — the folder picker
-// browses through forge (POST /api/projects/browse-folder), since a browser
+// (elstin/daemon/ticket_removal.py). Removal is local only.
+// One folder's subfolders on the machine elstin runs on — the folder picker
+// browses through elstin (POST /api/projects/browse-folder), since a browser
 // cannot give a page a real filesystem path.
 export interface FolderListing {
   path: string;
@@ -356,7 +356,7 @@ export interface FolderListing {
 }
 
 // What attaching a folder would mean (POST /api/projects/scan-folder): a git
-// repo as is, or a folder holding repos to pick from — forge works inside
+// repo as is, or a folder holding repos to pick from — elstin works inside
 // one repository at a time, so each picked one becomes a folder of its own.
 export interface ScannedRepo {
   path: string;
@@ -382,7 +382,7 @@ export interface ScanFolderResult {
   reference?: ReferencePreview;
 }
 
-// What deleting a project did (forge/daemon/project_removal.py). Local only:
+// What deleting a project did (elstin/daemon/project_removal.py). Local only:
 // attached folders stay on disk and nothing on GitHub or JIRA is touched.
 export interface DeleteProjectReport {
   project_id: number;
@@ -464,7 +464,7 @@ export interface ConfigField {
 /** GET /api/config/models: suggestions for a model setting. */
 export interface ModelOptions {
   models: string[];
-  /** "provider" = the provider's own listing; "known" = models forge has prices for. */
+  /** "provider" = the provider's own listing; "known" = models Elstin has prices for. */
   source: "provider" | "known";
   /** Why the provider's listing was not used, when it was not. */
   error: string | null;
@@ -485,7 +485,7 @@ export interface ActivityEvent {
   // after a reconnect.
   id: number;
   type: "status" | "thinking" | "tool_use" | "llm_call" | "error";
-  phase: "planner" | "dev" | "verifier" | "qa" | "system" | null;
+  phase: "planner" | "dev" | "verifier" | "qa" | "system" | "po" | null;
   title: string;
   detail: string | null;
   ts: string;
@@ -530,8 +530,8 @@ export interface EpicUsage {
   totals: UsageTotals;
 }
 
-// A lesson forge proposed from its own runs (forge/services/lessons.py,
-// forge/state/manager_lesson.py). Only "accepted" ones reach an agent.
+// A lesson elstin proposed from its own runs (elstin/services/lessons.py,
+// elstin/state/manager_lesson.py). Only "accepted" ones reach an agent.
 export type LessonStatus = "proposed" | "accepted" | "rejected";
 
 export interface ProjectLesson {
@@ -547,4 +547,198 @@ export interface ProjectLesson {
   evidence_quote: string | null;
   created_at: string | null;
   updated_at: string | null;
+}
+
+
+// -- PO sessions: a person and the PO agent drafting a backlog together ------
+// Mirrors elstin/api/po_routes.py and elstin/agents/roles/product_owner.py's
+// PO_DRAFT_SCHEMA as it is *stored* (the agent's per-turn reply and questions
+// live on the session and in the conversation, not in the draft).
+
+export type PoMode = "brainstorm" | "split" | "gap";
+
+export type PoStatus =
+  | "queued"
+  | "running"
+  | "awaiting_input"
+  | "ready"
+  | "publishing"
+  | "published"
+  | "failed"
+  | "discarded";
+
+export type PoAssessment = "done" | "partial" | "not_started" | "obsolete" | "unclear";
+
+export interface PoEvidence {
+  source: "code" | "jira" | "confluence";
+  ref: string;
+  quote: string;
+  // Set by the server: true when the quote was found in the file, ticket or
+  // page the agent actually read. Absent on a person's own addition.
+  verified?: boolean;
+}
+
+export interface PoSubtask {
+  summary: string;
+  description: string;
+}
+
+export interface PoStory {
+  ref: string;
+  summary: string;
+  description: string;
+  acceptance_criteria: string[];
+  issue_type: "Story" | "Task";
+  kind: "dev" | "qa";
+  labels: string[];
+  depends_on: string[];
+  subtasks: PoSubtask[];
+  evidence: PoEvidence[];
+  rationale: string;
+  size: "S" | "M" | "L";
+}
+
+export interface PoExisting {
+  key: string;
+  assessment: PoAssessment;
+  evidence: PoEvidence[];
+  suggested_edit: string | null;
+}
+
+export interface PoEpicDraft {
+  summary: string;
+  description: string;
+  acceptance_criteria: string[];
+  existing_key: string | null;
+  suggested_description: string | null;
+}
+
+export interface PoDraft {
+  mode: PoMode;
+  epic: PoEpicDraft;
+  stories: PoStory[];
+  existing: PoExisting[];
+  gaps: string[];
+  assumptions: string[];
+  out_of_scope: string[];
+}
+
+// A finding of elstin/agents/roles/po_gate.py: `problems` are blocking
+// (publishing refuses), `warnings` are advice. `where` points into the saved
+// draft ("stories[2].acceptance_criteria").
+export interface PoDefect {
+  kind: string;
+  reason: string;
+  where: string | null;
+  blocking: boolean;
+}
+
+export interface PoMessage {
+  id: number;
+  session_id: number;
+  role: "person" | "agent";
+  text: string;
+  draft_version: number | null;
+  delivered: boolean;
+  created_at: string;
+}
+
+export interface PoAnswer {
+  id: string;
+  question: string;
+  answer: string;
+}
+
+export interface PoCounts {
+  epics: number;
+  stories: number;
+  subtasks: number;
+  links: number;
+}
+
+// elstin/services/po_sessions.py's publish_state: whether the draft can go to JIRA
+// and, when it cannot, why in words.
+export interface PoPublishState {
+  allowed: boolean;
+  reason: string | null;
+  jira_project_key: string | null;
+  // Posting an existing ticket's suggested edit as a comment has its own gate.
+  comments_allowed: boolean;
+}
+
+// One proposed story's own Publish button (elstin/services/po_sessions.py's
+// story_publish_states): the JIRA key it was made as (null until it is), whether it
+// can be published on its own now (else `reason`, in words), and what that would create.
+export interface PoStoryPublish {
+  key: string | null;
+  allowed: boolean;
+  reason: string | null;
+  counts: PoCounts;
+}
+
+// The publisher's checkpoint (elstin/services/backlog_publisher.py): what has been
+// created so far, which is what lets a stopped publish continue without repeating.
+export interface PoPublishResult {
+  started?: boolean;
+  created?: Record<string, string>;
+  links?: string[];
+  comments?: string[];
+  epic_key?: string;
+  synced?: boolean;
+  sync_error?: string | null;
+  synced_stories?: number;
+  failed?: { step: string; ref: string | null; error: string } | null;
+}
+
+export interface PoSessionSummary {
+  id: number;
+  project_id: number;
+  epic_key: string | null;
+  mode: PoMode;
+  status: PoStatus;
+  error: string | null;
+  brief: string;
+  title: string | null;
+  stories: number;
+  cost_usd: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PoSession {
+  id: number;
+  project_id: number;
+  epic_key: string | null;
+  jira_project_key: string | null;
+  mode: PoMode;
+  brief: string;
+  status: PoStatus;
+  draft: PoDraft | null;
+  draft_version: number;
+  edited_by_person: boolean;
+  person_edits: string[];
+  questions: ClarificationQuestion[];
+  answers: PoAnswer[];
+  publish_result: PoPublishResult | null;
+  error: string | null;
+  cost_usd: number;
+  created_at: string;
+  updated_at: string;
+  epic_summary: string;
+  existing_stories: { key: string; summary: string }[];
+  problems: PoDefect[];
+  warnings: PoDefect[];
+  counts: PoCounts;
+  publish: PoPublishState;
+  // By story ref.
+  story_publish: Record<string, PoStoryPublish>;
+  // Present on GET /api/po-sessions/{id}.
+  messages?: PoMessage[];
+}
+
+export interface PoModePreview {
+  mode: PoMode;
+  epic_key: string | null;
+  epic_summary: string | null;
+  stories: number;
 }

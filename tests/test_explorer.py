@@ -1,5 +1,5 @@
-"""forge/agents/roles/explorer.py — the planner's parallel read-only recon
-sub-agents. Faked at the forge/llm/ boundary (a scripted provider handed
+"""elstin/agents/roles/explorer.py — the planner's parallel read-only recon
+sub-agents. Faked at the elstin/llm/ boundary (a scripted provider handed
 straight in), so the real loop, the real read-only tools and the real
 prompt assembly all run.
 """
@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from forge.agents.roles.explorer import (
+from elstin.agents.roles.explorer import (
     _SCOPE_JSON_SCHEMA,
     EXPLORER_SYSTEM,
     _explorer_budget,
@@ -20,9 +20,9 @@ from forge.agents.roles.explorer import (
     run_explorer,
     scope_investigation,
 )
-from forge.llm.base import Capabilities
-from forge.llm.errors import LlmBadRequestError
-from forge.llm.types import LlmRequest, LlmResponse, TextBlock, ToolCallBlock, Usage
+from elstin.llm.base import Capabilities
+from elstin.llm.errors import LlmBadRequestError
+from elstin.llm.types import LlmRequest, LlmResponse, TextBlock, ToolCallBlock, Usage
 
 
 @dataclass
@@ -213,7 +213,7 @@ def _capped_turn(text: str = "Let me check the schema.") -> LlmResponse:
 
 
 async def test_a_gateway_that_rejects_tool_choice_gets_the_tool_free_wrap_up(git_repo):
-    """tool_choice is standard, but forge runs against any OpenAI-compatible
+    """tool_choice is standard, but elstin runs against any OpenAI-compatible
     endpoint. One that rejects it still gets a report: the old request with
     no tools at all, uncached but certain to be prose."""
     provider = FakeProvider(script=[
@@ -374,7 +374,7 @@ async def test_every_explorer_failing_yields_no_block(git_repo):
 @pytest.mark.parametrize(
     "planner_budget,agents,expected",
     [
-        # Unbounded stays unbounded, as zero does everywhere else in forge.
+        # Unbounded stays unbounded, as zero does everywhere else in elstin.
         (0.0, 3, 0.0),
         # Half the cap is reserved for the plan loop, the rest is split.
         (1.20, 3, 0.20),

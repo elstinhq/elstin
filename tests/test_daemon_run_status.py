@@ -14,11 +14,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from forge.daemon import main as daemon
-from forge.orchestration.reconciler import NoOp, ResumeStory, plan_orchestration
-from forge.state.manager import StateManager
+from elstin.daemon import main as daemon
+from elstin.orchestration.reconciler import NoOp, ResumeStory, plan_orchestration
+from elstin.state.manager import StateManager
 
-pytestmark = [pytest.mark.usefixtures("forge_db"), pytest.mark.asyncio]
+pytestmark = [pytest.mark.usefixtures("elstin_db"), pytest.mark.asyncio]
 
 STORY = "ENG-2"
 
@@ -269,7 +269,7 @@ async def test_a_shutdown_is_still_a_restore_and_not_mistaken_for_a_person_cance
 
 async def test_the_poll_loop_survives_a_cancel_and_does_not_redispatch_the_story(git_repo, tmp_path, project_id, monkeypatch):
     """The integration property: poll_once is what awaits the run."""
-    from forge.config.store import set_config
+    from elstin.config.store import set_config
 
     set_config("worktrees_base_dir", str(tmp_path / "wt"))
     set_config("openai_api_key", "sk-test")
@@ -302,7 +302,7 @@ def sm_status(sm: StateManager) -> str:
 
 
 def _activity(run_id: str) -> list[dict]:
-    from forge.services.run_activity import list_activity
+    from elstin.services.run_activity import list_activity
 
     return list_activity(run_id)
 
@@ -317,8 +317,8 @@ def test_the_cancel_route_maps_its_outcomes(approved_story, monkeypatch):
     stopping is covered above; this is the HTTP contract.)"""
     from fastapi.testclient import TestClient
 
-    import forge.api.run_routes as run_routes
-    from forge.app import create_app
+    import elstin.api.run_routes as run_routes
+    from elstin.app import create_app
 
     set_project_config_off(approved_story)
     answers = {STORY: False}
@@ -337,7 +337,7 @@ def test_the_cancel_route_maps_its_outcomes(approved_story, monkeypatch):
 
 
 def set_project_config_off(sm: StateManager) -> None:
-    from forge.config.store import set_project_config
+    from elstin.config.store import set_project_config
 
     project_id = sm.get_epic("ENG-1")["project_id"]
     set_project_config(project_id, "auto_run_enabled", "false")  # keep the poller out of the request

@@ -3,7 +3,7 @@ a dev story runs and merges, then the epic's QA ticket dispatches in the
 final wave, gets a QA context assembled from the merged integration branch,
 completes without a PR, and has its report posted to JIRA.
 
-Only the model call inside forge/agents/roles/qa.py is faked (via the
+Only the model call inside elstin/agents/roles/qa.py is faked (via the
 `fake_agents` fixture) — the wave sequencing, worktree creation off the
 integration branch, context assembly and status mapping are all real.
 """
@@ -13,12 +13,12 @@ import os
 
 import pytest
 
-import forge.daemon.main as daemon
-from forge.config.store import set_config
-from forge.daemon.main import poll_once
-from forge.state.manager import StateManager
+import elstin.daemon.main as daemon
+from elstin.config.store import set_config
+from elstin.daemon.main import poll_once
+from elstin.state.manager import StateManager
 
-pytestmark = [pytest.mark.usefixtures("forge_db", "fake_agents"), pytest.mark.asyncio]
+pytestmark = [pytest.mark.usefixtures("elstin_db", "fake_agents"), pytest.mark.asyncio]
 
 
 def _configure(worktrees_base_dir: str) -> None:
@@ -163,7 +163,7 @@ async def test_qa_context_without_an_integration_branch_reports_an_empty_diff(
 
 async def test_story_brief_folds_in_its_subtasks(git_repo: str, tmp_path, project_id, monkeypatch):
     """Sub-tasks aren't dispatched, so their file-level detail only reaches
-    the agent if the parent's brief carries it. If this regresses, forge
+    the agent if the parent's brief carries it. If this regresses, elstin
     silently plans five stories with none of the breakdown the team wrote."""
     monkeypatch.setenv("DATABASE_URL", os.environ["DATABASE_URL"])
     _configure(str(tmp_path / "worktrees"))
@@ -303,7 +303,7 @@ async def test_qa_context_nests_subtasks_under_their_story(git_repo: str, tmp_pa
     assert [t["jira_key"] for t in context["dev_stories"][0]["subtasks"]] == ["ENG-20"]
 
 
-# --- multi-repo workspace (forge/tools/workspace.py) -------------------
+# --- multi-repo workspace (elstin/tools/workspace.py) -------------------
 
 
 def _add_reference_repo(sm, project_id: int, tmp_path, name: str, rel: str, content: str) -> str:
@@ -414,7 +414,7 @@ async def test_dispatch_hands_every_repo_to_the_planner(
     sm.create_story("ENG-2", epic_key="ENG-1", wave=0, summary="Show the cart total")
     api = _add_reference_repo(sm, project_id, tmp_path, "api", "models/cart.py", "class Cart:\n    pass\n")
 
-    import forge.orchestration.graph as graph_module
+    import elstin.orchestration.graph as graph_module
     from tests.conftest import fake_run_planner
 
     seen: dict = {}

@@ -1,4 +1,4 @@
-# code_forge
+# elstin
 
 A local, single-tenant JIRA-epic-to-PR agent platform: a LangGraph
 planner/dev/verifier/qa loop with activity streaming, wrapped in a
@@ -8,8 +8,8 @@ human-approval gates, CI-aware merge gating) — trimmed to run on a laptop
 with `docker compose up`, no Kubernetes, no multi-tenancy, no Teams bot.
 
 The daemon polls for ready work, drives each story through a real
-planner → dev → verifier → QA loop (forge's own agent loop —
-`forge/agents/loop.py` — against an OpenAI-compatible LLM provider) in its
+planner → dev → verifier → QA loop (elstin's own agent loop —
+`elstin/agents/loop.py` — against an OpenAI-compatible LLM provider) in its
 own git worktree, opens a real GitHub PR when implementation completes,
 waits for CI to pass, and merges into a shared epic integration branch —
 with a human approval gate at both the plan-review and PR-review steps by
@@ -18,7 +18,7 @@ default (configurable).
 ## Run locally
 
 ```bash
-scripts/forge.sh
+scripts/elstin.sh
 ```
 
 That is `docker compose up` with the rough edges taken off: it finds your
@@ -34,10 +34,10 @@ scripts/stop.sh --keep   # stop them in place, for a faster restart
 ```
 
 Neither deletes anything: the Postgres, worktree, cloned-repo and `/data`
-volumes survive, and `scripts/forge.sh up` picks up where you left off.
+volumes survive, and `scripts/elstin.sh up` picks up where you left off.
 Other commands: `stop`, `down`, `logs`, `status`, `rebuild`, `psql`,
 `reset` (the one that does delete data, and asks first), and `--help` for
-the rest. Ports follow `FORGE_APP_PORT` / `FORGE_PG_PORT`.
+the rest. Ports follow `ELSTIN_APP_PORT` / `ELSTIN_PG_PORT`.
 
 Then open **http://localhost:8000/** to watch epics/stories and
 approve gated steps, or **http://localhost:8000/settings** to fill in your
@@ -45,7 +45,7 @@ JIRA URL/credentials (or, for a project that pulls from GitHub Issues, just the 
 OpenAI-compatible endpoint's key + base URL — Azure, OpenRouter, vLLM,
 Ollama, etc.). Nothing is read from a `.env` file — `DATABASE_URL` (wired
 automatically by `docker-compose.yml`) is the only process environment
-variable code_forge needs; every other setting lives in Postgres and is
+variable elstin needs; every other setting lives in Postgres and is
 edited live from that page, no restart required.
 
 ### UI
@@ -73,7 +73,7 @@ the Dockerfile just copies whatever's in `settings-ui/vendor/`.
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 docker compose up postgres -d
-export DATABASE_URL=postgresql+psycopg://forge:forge@localhost:5433/forge
+export DATABASE_URL=postgresql+psycopg://elstin:elstin@localhost:5433/elstin
 alembic upgrade head
 pytest
 ```
@@ -86,8 +86,8 @@ service classes stand in at those boundaries.
 
 ## What's real vs. not yet ported
 
-Everything in `forge/` is real and tested against Postgres/git, except the
-node bodies' RAG context pre-seeding: `forge/agents/roles/planner_loop.py`'s
+Everything in `elstin/` is real and tested against Postgres/git, except the
+node bodies' RAG context pre-seeding: `elstin/agents/roles/planner_loop.py`'s
 agent still explores the target codebase live via its own read/grep/find tools every
 run (real), but doesn't yet get a pre-computed head start from a
 Qdrant-backed RAG pipeline or prior-branch discovery — see that module's

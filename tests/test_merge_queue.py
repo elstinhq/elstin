@@ -1,5 +1,5 @@
-"""The merge queue (forge/daemon/main.py's `_merge_story_into_epic`, over
-forge/orchestration/integration.py): a finished story is brought up to date
+"""The merge queue (elstin/daemon/main.py's `_merge_story_into_epic`, over
+elstin/orchestration/integration.py): a finished story is brought up to date
 with the epic branch, re-verified, and fast-forwarded into it — locally.
 
 Real Postgres, real git repos, the daemon's own poll loop. Only the agents
@@ -12,12 +12,12 @@ import subprocess
 
 import pytest
 
-from forge.config.store import set_config
-from forge.daemon.main import _MAX_MERGE_ATTEMPTS, poll_once
-from forge.orchestration.integration import integration_branch_name
-from forge.state.manager import StateManager
+from elstin.config.store import set_config
+from elstin.daemon.main import _MAX_MERGE_ATTEMPTS, poll_once
+from elstin.orchestration.integration import integration_branch_name
+from elstin.state.manager import StateManager
 
-pytestmark = [pytest.mark.usefixtures("forge_db", "fake_agents"), pytest.mark.asyncio]
+pytestmark = [pytest.mark.usefixtures("elstin_db", "fake_agents"), pytest.mark.asyncio]
 
 
 def _configure(tmp_path) -> None:
@@ -53,7 +53,7 @@ def _show(repo: str, ref: str, path: str) -> str:
 
 
 async def _state(story_key: str) -> dict:
-    from forge.daemon.main import _story_run_values
+    from elstin.daemon.main import _story_run_values
 
     return await _story_run_values(story_key)
 
@@ -61,8 +61,8 @@ async def _state(story_key: str) -> dict:
 async def test_parallel_stories_on_different_files_both_land(git_repo, tmp_path, project_id, monkeypatch):
     """N1 and N2 run in parallel; whichever finishes first lands, the other is
     brought up to date with it, re-verified, and lands too."""
-    import forge.daemon.main as daemon
-    import forge.orchestration.graph as graph
+    import elstin.daemon.main as daemon
+    import elstin.orchestration.graph as graph
 
     _configure(tmp_path)
     sm = StateManager()
@@ -89,7 +89,7 @@ async def test_parallel_stories_on_different_files_both_land(git_repo, tmp_path,
 
 
 async def test_a_conflict_sends_the_story_back_to_dev_and_it_lands_once_resolved(git_repo, tmp_path, project_id, monkeypatch):
-    import forge.orchestration.graph as graph
+    import elstin.orchestration.graph as graph
 
     _configure(tmp_path)
     sm = StateManager()
@@ -129,8 +129,8 @@ async def test_a_conflict_sends_the_story_back_to_dev_and_it_lands_once_resolved
 
 
 async def test_the_combined_code_failing_its_checks_sends_the_story_back(git_repo, tmp_path, project_id, monkeypatch):
-    import forge.daemon.main as daemon
-    import forge.orchestration.graph as graph
+    import elstin.daemon.main as daemon
+    import elstin.orchestration.graph as graph
 
     _configure(tmp_path)
     sm = StateManager()
@@ -158,7 +158,7 @@ async def test_the_combined_code_failing_its_checks_sends_the_story_back(git_rep
 async def test_a_story_that_cannot_land_fails_with_a_clean_worktree_after_the_attempt_budget(
     git_repo, tmp_path, project_id, monkeypatch
 ):
-    import forge.orchestration.graph as graph
+    import elstin.orchestration.graph as graph
 
     _configure(tmp_path)
     sm = StateManager()

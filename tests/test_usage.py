@@ -1,15 +1,15 @@
-"""forge/services/usage.py — accumulation semantics of record_phase_usage
+"""elstin/services/usage.py — accumulation semantics of record_phase_usage
 and the per-story/per-epic rollup shapes get_story_usage/get_epic_usage
-return. Also forge/llm/pricing.py's fallback cost estimate math."""
+return. Also elstin/llm/pricing.py's fallback cost estimate math."""
 from __future__ import annotations
 
 import pytest
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
 
 def _seed_story(project_id: int, story_key: str = "ENG-2") -> None:
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id, levels=[[story_key]])
@@ -17,7 +17,7 @@ def _seed_story(project_id: int, story_key: str = "ENG-2") -> None:
 
 
 def _seed_epic(project_id: int) -> None:
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id, levels=[["ENG-2", "ENG-3"], ["ENG-4"]])
@@ -29,14 +29,14 @@ def _seed_epic(project_id: int) -> None:
 
 
 def test_pricing_estimate_known_model():
-    from forge.llm.pricing import estimate_cost_usd
+    from elstin.llm.pricing import estimate_cost_usd
 
     cost = estimate_cost_usd("openai", "gpt-5.1", input_tokens=1_000_000, cache_read_tokens=0, output_tokens=0)
     assert cost == pytest.approx(1.25)
 
 
 def test_pricing_estimate_unknown_model_returns_none():
-    from forge.llm.pricing import estimate_cost_usd
+    from elstin.llm.pricing import estimate_cost_usd
 
     assert estimate_cost_usd("openai", "some-future-model", input_tokens=1000, cache_read_tokens=0, output_tokens=0) is None
     assert estimate_cost_usd(None, "gpt-5.1", input_tokens=1000, cache_read_tokens=0, output_tokens=0) is None
@@ -47,15 +47,15 @@ def test_pricing_estimate_two_providers_same_model_name_dont_collide():
     """A same-named model under a different provider key must not
     accidentally hit the "openai" pricing row — the (provider, model) pair
     is the whole point of keying by both."""
-    from forge.llm.pricing import estimate_cost_usd
+    from elstin.llm.pricing import estimate_cost_usd
 
     assert estimate_cost_usd("self-hosted", "gpt-5.1", input_tokens=1_000_000, cache_read_tokens=0, output_tokens=0) is None
 
 
 def test_pricing_gpt_5_6_luna_including_cache_writes():
-    """The model forge's own dev and planner runs use: without a row, both
+    """The model elstin's own dev and planner runs use: without a row, both
     runs recorded cost_source="unknown" and max_budget_usd never counted."""
-    from forge.llm.pricing import estimate_cost_usd
+    from elstin.llm.pricing import estimate_cost_usd
 
     cost = estimate_cost_usd(
         "openai", "gpt-5.6-luna",
@@ -67,7 +67,7 @@ def test_pricing_gpt_5_6_luna_including_cache_writes():
 
 
 def test_pricing_matches_a_dated_snapshot_id_to_its_row():
-    from forge.llm.pricing import estimate_cost_usd
+    from elstin.llm.pricing import estimate_cost_usd
 
     dated = estimate_cost_usd("openai", "gpt-5.6-luna-2026-08-01", input_tokens=1_000_000, cache_read_tokens=0, output_tokens=0)
     permaslug = estimate_cost_usd(
@@ -79,7 +79,7 @@ def test_pricing_matches_a_dated_snapshot_id_to_its_row():
 
 
 def test_pricing_does_not_guess_between_two_undated_matches(monkeypatch):
-    from forge.llm import pricing
+    from elstin.llm import pricing
 
     rows = dict(pricing.MODEL_PRICING["openai"])
     rows["vendor/model-0101"] = pricing.ModelPricing(input_per_mtok=1, output_per_mtok=1, cached_input_per_mtok=1)
@@ -90,7 +90,7 @@ def test_pricing_does_not_guess_between_two_undated_matches(monkeypatch):
 
 
 def test_record_phase_usage_accumulates_across_invocations(project_id):
-    from forge.services.usage import get_story_usage, record_phase_usage
+    from elstin.services.usage import get_story_usage, record_phase_usage
 
     _seed_story(project_id)
     record_phase_usage(
@@ -118,7 +118,7 @@ def test_record_phase_usage_accumulates_across_invocations(project_id):
 
 
 def test_record_phase_usage_no_run_id_is_a_noop():
-    from forge.services.usage import record_phase_usage
+    from elstin.services.usage import record_phase_usage
 
     # Must not raise and must not create a row for an empty run_id.
     record_phase_usage("", phase="dev", model="gpt-5.1", input_tokens=10)
@@ -126,7 +126,7 @@ def test_record_phase_usage_no_run_id_is_a_noop():
 
 
 def test_record_phase_usage_falls_back_to_estimated_cost_when_sdk_reports_none(project_id):
-    from forge.services.usage import get_story_usage, record_phase_usage
+    from elstin.services.usage import get_story_usage, record_phase_usage
 
     _seed_story(project_id)
     record_phase_usage(
@@ -143,7 +143,7 @@ def test_record_phase_usage_falls_back_to_estimated_cost_when_sdk_reports_none(p
 
 
 def test_record_phase_usage_sdk_source_outranks_estimated(project_id):
-    from forge.services.usage import get_story_usage, record_phase_usage
+    from elstin.services.usage import get_story_usage, record_phase_usage
 
     _seed_story(project_id)
     # First an SDK-reported cost, then an estimated one (e.g. a later
@@ -157,7 +157,7 @@ def test_record_phase_usage_sdk_source_outranks_estimated(project_id):
 
 
 def test_get_story_usage_for_unknown_story_returns_empty_shape():
-    from forge.services.usage import get_story_usage
+    from elstin.services.usage import get_story_usage
 
     usage = get_story_usage("NO-SUCH-STORY")
     assert usage == {
@@ -173,7 +173,7 @@ def test_get_story_usage_for_unknown_story_returns_empty_shape():
 
 
 def test_get_story_usage_with_no_recorded_usage_is_not_a_zero_cost_run(project_id):
-    from forge.services.usage import get_story_usage
+    from elstin.services.usage import get_story_usage
 
     _seed_story(project_id)
     usage = get_story_usage("ENG-2")
@@ -182,7 +182,7 @@ def test_get_story_usage_with_no_recorded_usage_is_not_a_zero_cost_run(project_i
 
 
 def test_get_epic_usage_groups_by_wave_and_excludes_subtasks(project_id):
-    from forge.services.usage import get_epic_usage, record_phase_usage
+    from elstin.services.usage import get_epic_usage, record_phase_usage
 
     _seed_epic(project_id)
     record_phase_usage("ENG-2", phase="dev", model="gpt-5.1", input_tokens=1000, output_tokens=500, cost_usd=0.10, duration_ms=1000)
@@ -212,7 +212,7 @@ def test_get_epic_usage_groups_by_wave_and_excludes_subtasks(project_id):
 
 
 def test_get_epic_usage_for_epic_with_no_usage_recorded(project_id):
-    from forge.services.usage import get_epic_usage
+    from elstin.services.usage import get_epic_usage
 
     _seed_epic(project_id)
     usage = get_epic_usage("ENG-1")
@@ -223,10 +223,10 @@ def test_get_epic_usage_for_epic_with_no_usage_recorded(project_id):
 def test_pricing_covers_every_model_a_config_default_names():
     """A model with no pricing row silently disables max_budget_usd for
     that model (estimate_cost_usd returns None, so the loop's running
-    total never moves). Any model forge ships as a default must therefore
+    total never moves). Any model elstin ships as a default must therefore
     have a row."""
-    from forge.config.store import CONFIG_FIELDS
-    from forge.llm.pricing import MODEL_PRICING
+    from elstin.config.store import CONFIG_FIELDS
+    from elstin.llm.pricing import MODEL_PRICING
 
     model_keys = {"dev_sdk_model", "planner_sdk_model", "verifier_qa_model"}
     defaults = {f.default for f in CONFIG_FIELDS if f.key in model_keys and f.default}
@@ -236,10 +236,10 @@ def test_pricing_covers_every_model_a_config_default_names():
 
 
 def test_openrouter_models_are_priced_under_the_openai_provider_key():
-    """forge/llm/registry.py names the provider after the adapter, not the
+    """elstin/llm/registry.py names the provider after the adapter, not the
     base_url, so an OpenRouter model resolves as provider="openai". A row
     filed under any other key would never be looked up."""
-    from forge.llm.pricing import estimate_cost_usd
+    from elstin.llm.pricing import estimate_cost_usd
 
     for model in ("moonshotai/kimi-k3", "z-ai/glm-5.3", "deepseek/deepseek-v4-pro-0813", "deepseek/deepseek-v4.1-flash"):
         cost = estimate_cost_usd("openai", model, input_tokens=1_000_000, cache_read_tokens=0, output_tokens=0)
@@ -247,10 +247,10 @@ def test_openrouter_models_are_priced_under_the_openai_provider_key():
 
 
 def test_cached_input_is_always_cheaper_than_uncached():
-    """The tombstone compaction in forge/agents/loop.py exists to keep the
+    """The tombstone compaction in elstin/agents/loop.py exists to keep the
     prompt prefix cacheable, and these rows are what turn that into a
     number. A row where cached >= uncached is a typo."""
-    from forge.llm.pricing import MODEL_PRICING
+    from elstin.llm.pricing import MODEL_PRICING
 
     offenders = [
         f"{provider}/{model}"

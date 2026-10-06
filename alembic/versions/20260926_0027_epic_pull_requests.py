@@ -1,7 +1,7 @@
-"""The epic's pull request — the only one forge opens.
+"""The epic's pull request — the only one elstin opens.
 
 Stories now merge into the epic branch locally (20260926_0026); once all of
-them have, forge pushes the epic branch and opens one pull request from it
+them have, elstin pushes the epic branch and opens one pull request from it
 into the default branch, per repo the epic's stories wrote.
 `epic_pull_requests` records it: number/url (NULL until it could be opened,
 with `error` saying why), `state` ("open" | "merged" | "closed") and

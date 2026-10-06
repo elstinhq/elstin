@@ -140,7 +140,7 @@ function ModelField({
         <p className="text-muted-foreground text-xs">
           {options.data.source === "provider"
             ? `${models.length} models from your provider. Any model id can be typed.`
-            : `${sentence(options.data.error ?? "The provider's list is unavailable")} Suggesting the models forge has prices for. Any model id can be typed.`}
+            : `${sentence(options.data.error ?? "The provider's list is unavailable")} Suggesting the models Elstin has prices for. Any model id can be typed.`}
         </p>
       ) : null}
     </div>

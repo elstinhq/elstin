@@ -1,4 +1,4 @@
-"""forge/services/activity_stream.py + the SSE route that exposes it.
+"""elstin/services/activity_stream.py + the SSE route that exposes it.
 
 What matters here isn't "does a message arrive" — it's the three ways a
 naive push implementation quietly loses events, all of which the UI would
@@ -19,11 +19,11 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-pytestmark = pytest.mark.usefixtures("forge_db")
+pytestmark = pytest.mark.usefixtures("elstin_db")
 
 
 def _seed_story(project_id: int, story_key: str = "ENG-2") -> str:
-    from forge.state.manager import StateManager
+    from elstin.state.manager import StateManager
 
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id)
@@ -32,7 +32,7 @@ def _seed_story(project_id: int, story_key: str = "ENG-2") -> str:
 
 
 def _append(run_id: str, title: str) -> dict:
-    from forge.services.run_activity import append_activity
+    from elstin.services.run_activity import append_activity
 
     return append_activity(run_id, type="status", phase="dev", title=title)
 
@@ -57,7 +57,7 @@ async def _titles(gen, count: int, timeout: float = 5.0) -> list[str]:
 
 
 async def test_stream_replays_history_then_pushes_new_events(project_id):
-    from forge.services.activity_stream import iter_events
+    from elstin.services.activity_stream import iter_events
 
     run_id = _seed_story(project_id)
     _append(run_id, "before subscribe")
@@ -76,7 +76,7 @@ async def test_events_written_during_the_backlog_read_are_not_lost(project_id, m
     """The subscribe-then-read ordering, tested at its seam: an event that
     lands while the history query is in flight must still be delivered, and
     exactly once — this is the gap the reverse ordering would have."""
-    import forge.services.activity_stream as stream_mod
+    import elstin.services.activity_stream as stream_mod
 
     run_id = _seed_story(project_id)
     _append(run_id, "historical")
@@ -103,7 +103,7 @@ async def test_events_written_during_the_backlog_read_are_not_lost(project_id, m
 
 async def test_since_id_resumes_where_a_dropped_connection_left_off(project_id):
     """What a reconnecting EventSource does with Last-Event-ID."""
-    from forge.services.activity_stream import iter_events
+    from elstin.services.activity_stream import iter_events
 
     run_id = _seed_story(project_id)
     first = _append(run_id, "already seen")
@@ -118,9 +118,9 @@ async def test_since_id_resumes_where_a_dropped_connection_left_off(project_id):
 
 async def test_events_published_from_a_worker_thread_reach_the_stream(project_id):
     """The verifier's tool hooks call append_activity from an
-    asyncio.to_thread worker (forge/tools/dart_tools.py), so publish has to
+    asyncio.to_thread worker (elstin/tools/dart_tools.py), so publish has to
     cross back into the subscriber's loop rather than assuming it's on it."""
-    from forge.services.activity_stream import iter_events
+    from elstin.services.activity_stream import iter_events
 
     run_id = _seed_story(project_id)
 
@@ -137,7 +137,7 @@ async def test_a_subscriber_that_overflows_catches_up_from_postgres(project_id, 
     """A browser that stops reading must not create a hole in the feed: the
     events it couldn't be handed are re-read from the table on the next
     wakeup, in order and without duplicates."""
-    import forge.services.activity_stream as stream_mod
+    import elstin.services.activity_stream as stream_mod
 
     monkeypatch.setattr(stream_mod, "_QUEUE_MAXSIZE", 2)
 
@@ -155,7 +155,7 @@ async def test_a_subscriber_that_overflows_catches_up_from_postgres(project_id, 
 
 
 async def test_a_quiet_run_emits_heartbeats(project_id):
-    from forge.services.activity_stream import iter_events
+    from elstin.services.activity_stream import iter_events
 
     run_id = _seed_story(project_id)
     gen = iter_events(run_id, heartbeat=0.05)
@@ -168,7 +168,7 @@ async def test_a_quiet_run_emits_heartbeats(project_id):
 async def test_closing_the_stream_unregisters_the_subscriber(project_id):
     """Otherwise every closed dialog would leave a queue behind that every
     later publish still has to walk."""
-    from forge.services.activity_stream import iter_events, subscriber_count
+    from elstin.services.activity_stream import iter_events, subscriber_count
 
     run_id = _seed_story(project_id)
     gen = iter_events(run_id, heartbeat=0.05)
@@ -180,7 +180,7 @@ async def test_closing_the_stream_unregisters_the_subscriber(project_id):
 
 
 def test_sse_frame_carries_the_event_id_and_json_payload():
-    from forge.api.run_routes import _sse_frame
+    from elstin.api.run_routes import _sse_frame
 
     frame = _sse_frame({"id": 7, "title": "Planning started", "detail": None})
 
@@ -191,7 +191,7 @@ def test_sse_frame_carries_the_event_id_and_json_payload():
 
 @pytest.mark.parametrize("raw,expected", [(None, 0), ("", 0), ("12", 12), ("nonsense", 0), ("-4", 0)])
 def test_last_event_id_header_is_treated_as_untrusted(raw, expected):
-    from forge.api.run_routes import _parse_last_event_id
+    from elstin.api.run_routes import _parse_last_event_id
 
     assert _parse_last_event_id(raw) == expected
 
@@ -205,7 +205,7 @@ async def test_route_streams_recorded_activity_as_sse_frames(project_id):
     a real EventSource does."""
     from starlette.requests import Request
 
-    from forge.api.run_routes import stream_story_activity
+    from elstin.api.run_routes import stream_story_activity
 
     run_id = _seed_story(project_id)
     _append(run_id, "Planning started")
@@ -235,7 +235,7 @@ async def test_route_streams_recorded_activity_as_sse_frames(project_id):
 async def test_a_reconnect_replays_only_what_the_client_missed(project_id):
     from starlette.requests import Request
 
-    from forge.api.run_routes import stream_story_activity
+    from elstin.api.run_routes import stream_story_activity
 
     run_id = _seed_story(project_id)
     first = _append(run_id, "already seen")
@@ -269,7 +269,7 @@ def test_stream_endpoint_is_wired_up_and_404s_for_an_unknown_story(project_id):
     """Also the one check that the route is mounted where the UI expects
     it — a 404 comes back before any streaming starts, so a plain GET is
     safe here."""
-    from forge.app import create_app
+    from elstin.app import create_app
 
     with TestClient(create_app()) as client:
         response = client.get("/api/stories/NOPE-1/stream")

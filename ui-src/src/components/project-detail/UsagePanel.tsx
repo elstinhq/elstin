@@ -14,8 +14,8 @@ function formatUsageTokens(n: number): string {
 
 function formatUsageCost(totals: UsageTotals): string {
   if (totals.cost_usd == null) return totals.has_unknown_cost ? "cost unavailable" : "—";
-  // "≈" flags a cost forge estimated from a static pricing table (see
-  // forge/llm/pricing.py) rather than one the provider itself reported —
+  // "≈" flags a cost elstin estimated from a static pricing table (see
+  // elstin/llm/pricing.py) rather than one the provider itself reported —
   // no wired provider adapter reports cost directly today, so this is
   // the common case, not a fallback.
   const prefix = totals.has_estimated_cost ? "≈" : "";
