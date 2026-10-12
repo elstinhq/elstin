@@ -5,7 +5,7 @@ import { useProjectRepos } from "../../hooks/useFolders";
 import { useDeleteProject, useProject } from "../../hooks/useProjects";
 import { useToast } from "../../lib/toast";
 import { Button } from "../ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
+import { ConfirmDialog } from "../ui/confirm-dialog";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 
@@ -16,7 +16,7 @@ import { Label } from "../ui/label";
 export function DeleteProjectSection({ projectId }: { projectId: number }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="border-destructive/40 flex items-center justify-between gap-3 rounded-md border p-3">
+    <div className="border-destructive/40 bg-card flex flex-wrap items-center justify-between gap-3 rounded-xl border p-4">
       <div className="min-w-0">
         <div className="text-sm font-medium">Delete this project</div>
         <p className="text-muted-foreground text-xs">
@@ -60,76 +60,64 @@ function DeleteProjectDialog({ projectId, onClose }: { projectId: number; onClos
   }
 
   return (
-    <Dialog open onOpenChange={(next) => !next && !deleteProject.isPending && onClose()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Delete {name || "this project"}?</DialogTitle>
-          <DialogDescription>This can't be undone.</DialogDescription>
-        </DialogHeader>
-        <div className="flex flex-col gap-3 text-sm">
-          <div>
-            <p className="font-medium">Deleted from Elstin</p>
-            <ul className="text-muted-foreground list-disc pl-5">
-              <li>
-                {epics.length} ticket{epics.length === 1 ? "" : "s"} with their run history, token usage, worktrees, local
-                branches and saved run state
-              </li>
-              {clones.length ? (
-                <li>
-                  The clone{clones.length === 1 ? "" : "s"} Elstin made: {clones.map((r) => r.label || r.path).join(", ")}
-                </li>
-              ) : null}
-              <li>The project's settings, ticket filter and folder list</li>
-            </ul>
-          </div>
-          <div>
-            <p className="font-medium">Left as they are</p>
-            <ul className="text-muted-foreground list-disc pl-5">
-              {attached.length ? (
-                <li>
-                  Attached folder{attached.length === 1 ? "" : "s"} ({attached.map((r) => r.path).join(", ")}) — only the
-                  branches and worktrees Elstin added are removed
-                </li>
-              ) : null}
-              <li>
-                Everything on GitHub and JIRA
-                {pullRequests.length ? ` — including pull request${pullRequests.length === 1 ? "" : "s"} ${pullRequests.map((pr) => `#${pr.number}`).join(", ")}` : ""}
-              </li>
-            </ul>
-          </div>
-          {running.length ? (
-            <p className="text-destructive text-xs">
-              {running.map((s) => s.jira_key).join(", ")} {running.length === 1 ? "is" : "are"} running — cancel or wait for
-              {running.length === 1 ? " it" : " them"} first.
-            </p>
+    <ConfirmDialog
+      open
+      onOpenChange={(next) => !next && onClose()}
+      title={`Delete ${name || "this project"}?`}
+      description="This can't be undone."
+      confirmLabel="Delete project"
+      onConfirm={handleDelete}
+      pending={deleteProject.isPending}
+      confirmDisabled={!name || typed.trim() !== name || running.length > 0}
+    >
+      <div>
+        <p className="font-medium">Deleted from Elstin</p>
+        <ul className="text-muted-foreground list-disc pl-5">
+          <li>
+            {epics.length} ticket{epics.length === 1 ? "" : "s"} with their run history, token usage, worktrees, local
+            branches and saved run state
+          </li>
+          {clones.length ? (
+            <li>
+              The clone{clones.length === 1 ? "" : "s"} Elstin made: {clones.map((r) => r.label || r.path).join(", ")}
+            </li>
           ) : null}
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="confirm-project-name">
-              Type <span className="font-mono">{name}</span> to confirm
-            </Label>
-            <Input
-              id="confirm-project-name"
-              value={typed}
-              autoComplete="off"
-              spellCheck={false}
-              onChange={(e) => setTyped(e.target.value)}
-            />
-          </div>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" disabled={deleteProject.isPending} onClick={onClose}>
-            Cancel
-          </Button>
-          <Button
-            variant="destructive"
-            disabled={!name || typed.trim() !== name || running.length > 0}
-            loading={deleteProject.isPending}
-            onClick={handleDelete}
-          >
-            Delete project
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+          <li>The project's settings, ticket filter and folder list</li>
+        </ul>
+      </div>
+      <div>
+        <p className="font-medium">Left as they are</p>
+        <ul className="text-muted-foreground list-disc pl-5">
+          {attached.length ? (
+            <li>
+              Attached folder{attached.length === 1 ? "" : "s"} ({attached.map((r) => r.path).join(", ")}) — only the
+              branches and worktrees Elstin added are removed
+            </li>
+          ) : null}
+          <li>
+            Everything on GitHub and JIRA
+            {pullRequests.length ? ` — including pull request${pullRequests.length === 1 ? "" : "s"} ${pullRequests.map((pr) => `#${pr.number}`).join(", ")}` : ""}
+          </li>
+        </ul>
+      </div>
+      {running.length ? (
+        <p className="text-destructive text-xs">
+          {running.map((s) => s.jira_key).join(", ")} {running.length === 1 ? "is" : "are"} running — cancel or wait for
+          {running.length === 1 ? " it" : " them"} first.
+        </p>
+      ) : null}
+      <div className="flex flex-col gap-1.5">
+        <Label htmlFor="confirm-project-name">
+          Type <span className="font-mono">{name}</span> to confirm
+        </Label>
+        <Input
+          id="confirm-project-name"
+          value={typed}
+          autoComplete="off"
+          spellCheck={false}
+          onChange={(e) => setTyped(e.target.value)}
+        />
+      </div>
+    </ConfirmDialog>
   );
 }

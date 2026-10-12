@@ -1,9 +1,10 @@
-import { ChevronRight } from "lucide-react";
+import { Activity, ChevronRight } from "lucide-react";
 import { ACTIVITY_PHASE_LABEL, ACTIVITY_TYPE_LABEL, Tag } from "../shared/StatusTag";
 import { useActivityStream, type ActivityConnection } from "../../hooks/useStories";
+import type { ActivityEvent } from "../../types/api";
 import { cn } from "../../lib/utils";
 import { ActivityTimeline } from "./ActivityTimeline";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 const CONNECTION_LABEL: Record<ActivityConnection, string> = {
   connecting: "Connecting…",
@@ -40,21 +41,30 @@ function ConnectionStatus({ connection }: { connection: ActivityConnection }) {
 // so there's no page-global "is the dialog still open" flag and no interval
 // to keep in sync.
 //
-// `collapsible` folds it to one line — the connection, how many events, the latest
-// — that opens to the timeline. The stream stays connected while it is folded, so
-// that line is still live.
+// `collapsible` folds it to one line — a title, what it found so far (`summarize`, else
+// how many events and the latest) and the connection — that opens to the timeline. The
+// stream stays connected while it is folded, so that line is still live.
 export function ActivityFeed({
   streamUrl,
   enabled,
   emptyText = "No activity recorded yet for this ticket's current run.",
   maxHeightClass = "max-h-[280px]",
   collapsible = false,
+  title = "Activity",
+  summarize,
+  leading,
 }: {
   streamUrl: string;
   enabled: boolean;
   emptyText?: string;
   maxHeightClass?: string;
   collapsible?: boolean;
+  // The folded line's heading.
+  title?: string;
+  // The folded line's summary of the events so far; null falls back to the step count.
+  summarize?: (events: ActivityEvent[]) => string | null;
+  // Stands in for the folded line's icon — an orb while the agent works.
+  leading?: ReactNode;
 }) {
   const { events, connection } = useActivityStream(streamUrl, enabled);
   const [view, setView] = useState<"timeline" | "list">("timeline");
@@ -107,22 +117,29 @@ export function ActivityFeed({
     );
 
   if (collapsible) {
+    const summary = summarize?.(events) ?? (latest ? `${events.length} ${events.length === 1 ? "step" : "steps"} · ${latest.title}` : "nothing yet");
     return (
-      <div className="bg-card rounded-xl border">
+      <div className="bg-card rounded-xl border shadow-xs">
         <button
           type="button"
           aria-expanded={open}
           onClick={() => setOpen((o) => !o)}
           className="hover:bg-accent/50 flex w-full min-w-0 items-center gap-2 rounded-xl px-3 py-2.5 text-left transition-colors"
         >
+          {/* The orb is a little larger than the icon it replaces; the box keeps the title from shifting. */}
+          {leading ? (
+            <span className="grid size-4 shrink-0 place-items-center">{leading}</span>
+          ) : (
+            <Activity className="text-muted-foreground size-4 shrink-0" aria-hidden="true" />
+          )}
+          <span className="text-sm font-medium">{title}</span>
+          <span className="text-muted-foreground min-w-0 flex-1 truncate text-xs">{summary}</span>
+          {connection === "live" ? (
+            <span className={cn("size-1.5 shrink-0 rounded-full", CONNECTION_DOT.live)} title="Live — streaming as it happens" role="img" aria-label="Live" />
+          ) : (
+            <ConnectionStatus connection={connection} />
+          )}
           <ChevronRight className={cn("text-muted-foreground size-4 shrink-0 transition-transform", open && "rotate-90")} aria-hidden="true" />
-          <span className="text-sm font-medium">Activity</span>
-          <ConnectionStatus connection={connection} />
-          {!open ? (
-            <span className="text-muted-foreground ml-auto min-w-0 truncate text-xs">
-              {latest ? `${events.length} ${events.length === 1 ? "step" : "steps"} · ${latest.title}` : "nothing yet"}
-            </span>
-          ) : null}
         </button>
         {open ? (
           <div className="flex flex-col gap-2 border-t px-3 py-2.5">

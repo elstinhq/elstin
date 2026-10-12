@@ -2,16 +2,18 @@ import { useEffect, useMemo, useState } from "react";
 import { ChevronsDownUp, ChevronsUpDown, Plus } from "lucide-react";
 import { usePostPoSuggestion, usePublishPoSession, useSavePoDraft } from "../../../hooks/usePoSessions";
 import { useToast } from "../../../lib/toast";
+import { cn } from "../../../lib/utils";
 import type { PoAssessment, PoDraft, PoExisting, PoSession, PoStory } from "../../../types/api";
 import { PO_ASSESSMENT_APPEARANCE, PO_ASSESSMENT_LABEL, Tag } from "../../shared/StatusTag";
 import { Alert, AlertDescription } from "../../ui/alert";
 import { Button } from "../../ui/button";
 import { Card } from "../../ui/card";
 import { Input } from "../../ui/input";
+import { Label } from "../../ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../ui/select";
 import { Textarea } from "../../ui/textarea";
 import {
-  defectsForStory, defectsOutsideStories, jiraUrl, NEEDS_PROJECT_KEY_REASON, newStory, nextRef, removeStory, updateStory, withoutBlanks,
+  backlogDraft, defectsForStory, defectsOutsideStories, jiraUrl, NEEDS_PROJECT_KEY_REASON, newStory, nextRef, removeStory, updateStory, withoutBlanks,
 } from "./draftOps";
 import { EvidenceChips } from "./EvidenceChips";
 import { PublishedKey, StoryCard, type StoryPublishControl } from "./StoryCard";
@@ -20,11 +22,25 @@ import { StringList } from "./StringList";
 const EDITABLE = new Set(["ready", "awaiting_input", "failed"]);
 const ASSESSMENTS = Object.keys(PO_ASSESSMENT_LABEL) as PoAssessment[];
 
-function Section({ title, hint, action, children }: { title: React.ReactNode; hint?: string; action?: React.ReactNode; children: React.ReactNode }) {
+// A section's heading, with its hint either beside it (a short note: "Becomes the JIRA
+// epic") or under it (a sentence that tells what the section's rows are).
+export function Section({
+  title,
+  hint,
+  hintBeside = false,
+  action,
+  children,
+}: {
+  title: React.ReactNode;
+  hint?: string;
+  hintBeside?: boolean;
+  action?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
     <section className="flex flex-col gap-3">
       <div className="flex items-end justify-between gap-3">
-        <div className="flex min-w-0 flex-col gap-0.5">
+        <div className={cn("flex min-w-0 gap-x-2", hintBeside ? "flex-wrap items-baseline" : "flex-col gap-y-0.5")}>
           <h3 className="flex items-center gap-2 text-base font-semibold">{title}</h3>
           {hint ? <p className="text-muted-foreground text-xs">{hint}</p> : null}
         </div>
@@ -34,6 +50,21 @@ function Section({ title, hint, action, children }: { title: React.ReactNode; hi
     </section>
   );
 }
+
+// A field's small caption above its box.
+export function Field({ id, label, children }: { id: string; label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Label htmlFor={id} className="text-muted-foreground text-xs font-normal">
+        {label}
+      </Label>
+      {children}
+    </div>
+  );
+}
+
+// The count beside a heading: "Stories 6".
+const Count = ({ n }: { n: number }) => <span className="text-muted-foreground text-xs font-normal">{n}</span>;
 
 function ExistingCard({
   row,
@@ -135,15 +166,17 @@ export function DraftEditor({ projectId, session, jiraBaseUrl, onDirtyChange, ty
   const post = usePostPoSuggestion(projectId, session.id);
   const publishStory = usePublishPoSession(projectId, session.id);
   const { showToast } = useToast();
+  // This editor is a backlog's (epic and stories); a bug draft has BugEditor.
+  const sessionDraft = backlogDraft(session.draft);
   // The story whose own Publish was pressed last; it shows as busy while a publish runs.
   const [pressed, setPressed] = useState<string | null>(null);
   // Stories folded open. A story with a problem starts open, so it is not missed.
   const [expanded, setExpanded] = useState<Set<string>>(
-    () => new Set((session.draft?.stories ?? []).filter((_, i) => defectsForStory(session.problems, i).length > 0).map((s) => s.ref)),
+    () => new Set((sessionDraft?.stories ?? []).filter((_, i) => defectsForStory(session.problems, i).length > 0).map((s) => s.ref)),
   );
-  const [local, setLocal] = useState<PoDraft | null>(session.draft);
+  const [local, setLocal] = useState<PoDraft | null>(sessionDraft);
   const [base, setBase] = useState<{ draft: PoDraft | null; version: number }>({
-    draft: session.draft,
+    draft: sessionDraft,
     version: session.draft_version,
   });
 
@@ -158,10 +191,10 @@ export function DraftEditor({ projectId, session, jiraBaseUrl, onDirtyChange, ty
   // is pending; otherwise `behind` says so below.
   useEffect(() => {
     if (!dirty && session.draft_version !== base.version) {
-      setLocal(session.draft);
-      setBase({ draft: session.draft, version: session.draft_version });
+      setLocal(sessionDraft);
+      setBase({ draft: sessionDraft, version: session.draft_version });
     }
-  }, [session.draft_version, session.draft, dirty, base.version]);
+  }, [session.draft_version, sessionDraft, dirty, base.version]);
 
   const readOnly = !EDITABLE.has(session.status);
   const mode = session.mode;
@@ -197,8 +230,8 @@ export function DraftEditor({ projectId, session, jiraBaseUrl, onDirtyChange, ty
       { draft: withoutBlanks(local), version: base.version },
       {
         onSuccess: (saved) => {
-          setLocal(saved.draft);
-          setBase({ draft: saved.draft, version: saved.draft_version });
+          setLocal(backlogDraft(saved.draft));
+          setBase({ draft: backlogDraft(saved.draft), version: saved.draft_version });
           showToast("Draft saved", "success");
         },
         onError: (err) => showToast(err.message || "Could not save the draft", "error"),
@@ -207,8 +240,8 @@ export function DraftEditor({ projectId, session, jiraBaseUrl, onDirtyChange, ty
   }
 
   function reload() {
-    setLocal(session.draft);
-    setBase({ draft: session.draft, version: session.draft_version });
+    setLocal(sessionDraft);
+    setBase({ draft: sessionDraft, version: session.draft_version });
   }
 
   const epicEditable = mode === "brainstorm" && !readOnly && !created.epic;
@@ -227,6 +260,23 @@ export function DraftEditor({ projectId, session, jiraBaseUrl, onDirtyChange, ty
   // saved text, so it waits for that story's edits (not for the rest of the draft's).
   const savedStories = new Map((base.draft?.stories ?? []).map((s) => [s.ref, JSON.stringify(s)]));
   const epicUnsaved = JSON.stringify(draft.epic) !== JSON.stringify(base.draft?.epic);
+
+  // What the unsaved-edits bar names: the epic, each story whose text differs from the
+  // saved one (or is gone from the draft), and the two lists that are not stories.
+  const differs = (a: unknown, b: unknown) => JSON.stringify(a) !== JSON.stringify(b);
+  const changedItems = [
+    ...(epicUnsaved ? ["the epic"] : []),
+    ...draft.stories.filter((s) => savedStories.get(s.ref) !== JSON.stringify(s)).map((s) => s.ref),
+    ...(base.draft?.stories ?? []).filter((s) => !draft.stories.some((d) => d.ref === s.ref)).map((s) => `${s.ref} (removed)`),
+    ...(differs([draft.existing, draft.gaps], [base.draft?.existing, base.draft?.gaps]) ? ["the gap analysis"] : []),
+    ...(differs([draft.assumptions, draft.out_of_scope], [base.draft?.assumptions, base.draft?.out_of_scope]) ? ["assumptions and scope"] : []),
+  ];
+  const unsavedLabel =
+    changedItems.length === 0
+      ? "Unsaved edits"
+      : changedItems.length <= 3
+        ? `Unsaved edits to ${changedItems.join(", ")}`
+        : `Unsaved edits to ${changedItems.length} items`;
 
   function pressPublish(ref: string) {
     setPressed(ref);
@@ -296,29 +346,35 @@ export function DraftEditor({ projectId, session, jiraBaseUrl, onDirtyChange, ty
         title={
           <>
             {mode === "brainstorm" ? "Epic" : `Epic ${session.epic_key ?? ""}`}
-            {created.epic ? <PublishedKey ticketKey={created.epic} base={jiraBaseUrl} /> : mode === "brainstorm" ? <Tag label="new" appearance="secondary" /> : null}
+            {created.epic ? <PublishedKey ticketKey={created.epic} base={jiraBaseUrl} /> : null}
           </>
         }
+        hintBeside
         hint={
           mode === "brainstorm"
-            ? "Created in JIRA first, then the stories under it."
+            ? "Becomes the JIRA epic"
             : "The existing epic is never rewritten. A sharper description may be suggested below."
         }
       >
-        <Card className="gap-3 px-4">
-          <Input
-            aria-label="Epic summary"
-            className="font-medium"
-            value={draft.epic.summary}
-            disabled={!epicEditable}
-            onChange={(e) => edit({ ...draft, epic: { ...draft.epic, summary: e.target.value } })}
-          />
-          <Textarea
-            aria-label="Epic description"
-            value={draft.epic.description}
-            disabled={!epicEditable}
-            onChange={(e) => edit({ ...draft, epic: { ...draft.epic, description: e.target.value } })}
-          />
+        <Card className="gap-3.5 px-4">
+          <Field id="epic-summary" label="Summary">
+            <Input
+              id="epic-summary"
+              aria-label="Epic summary"
+              value={draft.epic.summary}
+              disabled={!epicEditable}
+              onChange={(e) => edit({ ...draft, epic: { ...draft.epic, summary: e.target.value } })}
+            />
+          </Field>
+          <Field id="epic-description" label="Description">
+            <Textarea
+              id="epic-description"
+              aria-label="Epic description"
+              value={draft.epic.description}
+              disabled={!epicEditable}
+              onChange={(e) => edit({ ...draft, epic: { ...draft.epic, description: e.target.value } })}
+            />
+          </Field>
           <StringList
             label="Epic acceptance criteria"
             items={draft.epic.acceptance_criteria}
@@ -377,15 +433,35 @@ export function DraftEditor({ projectId, session, jiraBaseUrl, onDirtyChange, ty
       ) : null}
 
       <Section
-        title={mode === "gap" ? `Proposed new stories (${draft.stories.length})` : `Stories (${draft.stories.length})`}
-        hint="Each becomes one JIRA ticket, planned and built by its own Elstin run. Keep them small."
+        title={
+          <>
+            {mode === "gap" ? "Proposed new stories" : "Stories"} <Count n={draft.stories.length} />
+          </>
+        }
+        hint='Each becomes a ticket exactly as shown: description, with the criteria under "Acceptance Criteria".'
         action={
-          draft.stories.length > 1 ? (
-            <Button variant="ghost" size="sm" onClick={() => setExpanded(allOpen ? new Set() : new Set(draft.stories.map((s) => s.ref)))}>
-              {allOpen ? <ChevronsDownUp /> : <ChevronsUpDown />}
-              {allOpen ? "Collapse all" : "Expand all"}
-            </Button>
-          ) : null
+          <div className="flex items-center gap-1.5">
+            {draft.stories.length > 1 ? (
+              <Button variant="ghost" size="xs" onClick={() => setExpanded(allOpen ? new Set() : new Set(draft.stories.map((s) => s.ref)))}>
+                {allOpen ? <ChevronsDownUp /> : <ChevronsUpDown />}
+                {allOpen ? "Collapse all" : "Expand all"}
+              </Button>
+            ) : null}
+            {!readOnly ? (
+              <Button
+                variant="outline"
+                size="xs"
+                onClick={() => {
+                  const story = newStory(nextRef(draft.stories));
+                  setOpen(story.ref, true);
+                  edit({ ...draft, stories: [...draft.stories, story] });
+                }}
+              >
+                <Plus />
+                Add story
+              </Button>
+            ) : null}
+          </div>
         }
       >
         {draft.stories.length === 0 ? <p className="text-muted-foreground text-sm">No stories proposed.</p> : null}
@@ -408,20 +484,6 @@ export function DraftEditor({ projectId, session, jiraBaseUrl, onDirtyChange, ty
             />
           ))}
         </div>
-        {!readOnly ? (
-          <Button
-            variant="outline"
-            className="w-fit"
-            onClick={() => {
-              const story = newStory(nextRef(draft.stories));
-              setOpen(story.ref, true);
-              edit({ ...draft, stories: [...draft.stories, story] });
-            }}
-          >
-            <Plus />
-            Add a story
-          </Button>
-        ) : null}
       </Section>
 
       <Section title="Assumptions and scope">
@@ -450,13 +512,16 @@ export function DraftEditor({ projectId, session, jiraBaseUrl, onDirtyChange, ty
       </Section>
 
       {dirty ? (
-        <div className="bg-background/95 sticky bottom-0 z-10 -mx-1 flex flex-wrap items-center gap-2 border-t px-1 py-3 backdrop-blur">
-          <span className="text-muted-foreground mr-auto text-xs">Unsaved edits. The agent sees them, and keeps them, on its next revision.</span>
-          <Button variant="outline" onClick={reload} disabled={save.isPending}>
+        <div className="bg-card sticky bottom-0 z-10 flex flex-wrap items-center gap-3 rounded-xl border px-4 py-3 shadow-lg">
+          <span className="bg-warning size-2 shrink-0 rounded-full" aria-hidden="true" />
+          <span className="min-w-0 flex-1 text-sm" title="The agent sees these edits, and keeps them, on its next revision.">
+            {unsavedLabel}
+          </span>
+          <Button variant="ghost" size="xs" onClick={reload} disabled={save.isPending}>
             Discard edits
           </Button>
-          <Button onClick={saveNow} loading={save.isPending}>
-            Save changes
+          <Button size="xs" onClick={saveNow} loading={save.isPending}>
+            Save draft
           </Button>
         </div>
       ) : null}

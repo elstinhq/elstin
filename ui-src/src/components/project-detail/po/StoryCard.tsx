@@ -12,7 +12,7 @@ import { Label } from "../../ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../ui/select";
 import { Textarea } from "../../ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../ui/tooltip";
-import { describeCounts, jiraUrl, plural } from "./draftOps";
+import { describeCounts, jiraUrl } from "./draftOps";
 import { EvidenceChips } from "./EvidenceChips";
 import { StringList } from "./StringList";
 
@@ -129,7 +129,7 @@ export function StoryCard({
   const shown = publishedKey ? [] : defects;
   const blocking = shown.filter((d) => d.blocking);
   const advice = shown.filter((d) => !d.blocking);
-  const detailCount = story.depends_on.length + story.evidence.length + story.subtasks.length;
+  const detailCount = story.depends_on.length + story.subtasks.length + story.labels.length;
 
   function toggleDependency(key: string) {
     onChange({
@@ -145,29 +145,28 @@ export function StoryCard({
   return (
     <Card className="gap-0 overflow-hidden py-0" data-testid={`po-story-${story.ref}`}>
       <Collapsible open={open} onOpenChange={onOpenChange}>
-        <div className="flex items-center gap-2 py-2.5 pr-3 pl-1.5">
+        <div className="flex items-center gap-2 py-2 pr-3 pl-1.5">
           <CollapsibleTrigger
-            className="hover:bg-accent/60 flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors"
+            className="hover:bg-accent/60 flex min-w-0 flex-1 items-center gap-2.5 rounded-md px-1.5 py-1 text-left transition-colors"
             aria-label={`${open ? "Collapse" : "Expand"} story ${story.ref}`}
           >
             <ChevronRight className={cn("text-muted-foreground size-4 shrink-0 transition-transform", open && "rotate-90")} aria-hidden="true" />
-            <Tag label={story.ref} appearance="outline" />
-            <span className="flex min-w-0 flex-1 flex-col">
-              <span className="truncate text-sm font-medium">
-                {story.summary || <span className="text-muted-foreground font-normal italic">Untitled story</span>}
-              </span>
-              <span className="text-muted-foreground truncate text-xs">
-                {story.issue_type} · {story.kind} · {story.size}
-                {story.depends_on.length > 0 ? ` · after ${story.depends_on.join(", ")}` : ""}
-                {story.subtasks.length > 0 ? ` · ${plural(story.subtasks.length, "sub-task", "sub-tasks")}` : ""}
-              </span>
+            <span className="text-muted-foreground min-w-5 shrink-0 font-mono text-xs">{story.ref}</span>
+            <span className="min-w-0 flex-1 truncate text-sm font-medium">
+              {story.summary || <span className="text-muted-foreground font-normal italic">Untitled story</span>}
             </span>
           </CollapsibleTrigger>
 
+          {/* Only what is worth a glance on a folded row: a QA story (it runs after every dev
+              story), what is wrong with it, how big it is. The rest is in the story. */}
+          {story.kind === "qa" ? <Tag label="QA" appearance="info" title="Runs after every dev story" /> : null}
           {blocking.length > 0 ? (
-            <Tag label={blocking.length === 1 ? "1 problem" : `${blocking.length} problems`} appearance="destructive" />
+            <Tag label={blocking.length === 1 ? "1 problem" : `${blocking.length} problems`} appearance="warning" />
           ) : null}
-          {advice.length > 0 && blocking.length === 0 ? <Tag label={advice.length === 1 ? "1 note" : `${advice.length} notes`} appearance="warning" /> : null}
+          {advice.length > 0 && blocking.length === 0 ? <Tag label={advice.length === 1 ? "1 note" : `${advice.length} notes`} appearance="secondary" /> : null}
+          <span className="text-muted-foreground hidden shrink-0 text-xs sm:inline" title="Size">
+            Size {story.size}
+          </span>
 
           {publishedKey ? (
             <PublishedKey ticketKey={publishedKey} base={jiraBaseUrl} />
@@ -178,7 +177,7 @@ export function StoryCard({
                 <span className="inline-flex shrink-0" tabIndex={publish.allowed ? -1 : 0}>
                   <Button
                     variant="outline"
-                    size="sm"
+                    size="xs"
                     aria-label={`Publish ${story.ref} to JIRA`}
                     disabled={!publish.allowed}
                     loading={publish.busy}
@@ -197,7 +196,7 @@ export function StoryCard({
         </div>
 
         <CollapsibleContent>
-          <div className="flex flex-col gap-4 border-t px-4 py-4">
+          <div className="flex flex-col gap-3.5 border-t py-4 pr-4 pl-4 sm:pl-[50px]">
             {publishedKey ? (
               <p className="text-muted-foreground bg-muted rounded-md px-3 py-2 text-xs">
                 Published as {publishedKey}. It is a ticket now: change it in JIRA — edits here no longer reach it.
@@ -217,28 +216,21 @@ export function StoryCard({
               </p>
             ))}
 
-            <div className="flex flex-wrap items-end gap-3">
-              <div className="flex min-w-48 flex-1 flex-col gap-1">
-                <Label htmlFor={`summary-${story.ref}`} className="text-muted-foreground text-xs font-normal">
-                  Summary
-                </Label>
-                <Input
-                  id={`summary-${story.ref}`}
-                  aria-label={`Summary of ${story.ref}`}
-                  className="font-medium"
-                  placeholder="Summary"
-                  value={story.summary}
-                  disabled={readOnly}
-                  onChange={(e) => onChange({ summary: e.target.value })}
-                />
-              </div>
-              <Pick label="Issue type" value={story.issue_type} options={["Story", "Task"] as const} disabled={readOnly} onChange={(issue_type) => onChange({ issue_type })} />
-              <Pick label="Kind" value={story.kind} options={["dev", "qa"] as const} disabled={readOnly} onChange={(kind) => onChange({ kind })} />
-              <Pick label="Size" value={story.size} options={["S", "M", "L"] as const} disabled={readOnly} onChange={(size) => onChange({ size })} />
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor={`summary-${story.ref}`} className="text-muted-foreground text-xs font-normal">
+                Summary
+              </Label>
+              <Input
+                id={`summary-${story.ref}`}
+                aria-label={`Summary of ${story.ref}`}
+                placeholder="Summary"
+                value={story.summary}
+                disabled={readOnly}
+                onChange={(e) => onChange({ summary: e.target.value })}
+              />
             </div>
-            {story.kind === "qa" ? <Tag label="runs after every dev story" appearance="info" /> : null}
 
-            <div className="flex flex-col gap-1">
+            <div className="flex flex-col gap-1.5">
               <Label htmlFor={`description-${story.ref}`} className="text-muted-foreground text-xs font-normal">
                 Description
               </Label>
@@ -260,10 +252,31 @@ export function StoryCard({
               onChange={(acceptance_criteria) => onChange({ acceptance_criteria })}
             />
 
+            <div className="flex flex-wrap items-end gap-3">
+              <Pick label="Type" value={story.issue_type} options={["Story", "Task"] as const} disabled={readOnly} onChange={(issue_type) => onChange({ issue_type })} />
+              <Pick label="Kind" value={story.kind} options={["dev", "qa"] as const} disabled={readOnly} onChange={(kind) => onChange({ kind })} />
+              <Pick label="Size" value={story.size} options={["S", "M", "L"] as const} disabled={readOnly} onChange={(size) => onChange({ size })} />
+              <span className="flex-1" />
+              {story.depends_on.length > 0 ? (
+                <span className="text-muted-foreground pb-2 text-xs">
+                  Depends on{" "}
+                  <b className="text-foreground font-mono font-medium">{story.depends_on.join(", ")}</b>
+                </span>
+              ) : null}
+            </div>
+            {story.kind === "qa" ? <Tag label="runs after every dev story" appearance="info" /> : null}
+
+            <EvidenceChips
+              label="Evidence"
+              evidence={story.evidence}
+              jiraBaseUrl={jiraBaseUrl}
+              onRemove={readOnly ? undefined : (i) => onChange({ evidence: story.evidence.filter((_, n) => n !== i) })}
+            />
+
             <Collapsible open={detailsOpen} onOpenChange={setDetailsOpen}>
               <CollapsibleTrigger className="text-muted-foreground hover:text-foreground flex items-center gap-1 text-xs">
                 {detailsOpen ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
-                Dependencies, sub-tasks, evidence{detailCount > 0 ? ` (${detailCount})` : ""}
+                Dependencies, sub-tasks, labels, rationale{detailCount > 0 ? ` (${detailCount})` : ""}
               </CollapsibleTrigger>
               <CollapsibleContent className="mt-3 flex flex-col gap-4">
                 <div className="flex flex-col gap-1.5">
@@ -368,22 +381,12 @@ export function StoryCard({
                     onChange={(e) => onChange({ rationale: e.target.value })}
                   />
                 </div>
-
-                <div className="flex flex-col gap-1.5">
-                  <span className="text-sm font-medium">Evidence</span>
-                  {story.evidence.length === 0 ? <p className="text-muted-foreground text-xs">None cited.</p> : null}
-                  <EvidenceChips
-                    evidence={story.evidence}
-                    jiraBaseUrl={jiraBaseUrl}
-                    onRemove={readOnly ? undefined : (i) => onChange({ evidence: story.evidence.filter((_, n) => n !== i) })}
-                  />
-                </div>
               </CollapsibleContent>
             </Collapsible>
 
             {!readOnly ? (
-              <div className="flex justify-end border-t pt-3">
-                <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive" aria-label={`Remove story ${story.ref}`} onClick={onRemove}>
+              <div className="flex justify-end">
+                <Button variant="ghost" size="xs" className="text-muted-foreground hover:text-destructive" aria-label={`Remove story ${story.ref}`} onClick={onRemove}>
                   <Trash2 />
                   Remove story
                 </Button>

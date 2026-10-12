@@ -1793,7 +1793,8 @@ LangGraph checkpointer creates its own tables on first use
 | Projects | `/api/projects` | `GET`/`POST ""` (create, optionally with `repo_url`, `repo_path` or `repo_paths`, `read_only_paths`, `reference_path`); `GET`/`PUT`/`DELETE /{id}` (`PUT` takes `name`, `description`, `ticket_source`; `DELETE` removes the project and everything elstin holds for it); `POST /browse-folder`, `POST /scan-folder`; `GET`/`POST /{id}/repos` (clone a `url` or attach a `path` — `elstin/services/repo_clone.py`), `PUT`/`DELETE /{id}/repos/{repo_id}` (read-only flag; detach); `GET`/`PUT .../repos/{repo_id}/guide`, `POST .../guide/generate`; `GET /{id}/lessons[?status=]`, `PUT`/`DELETE .../lessons/{lesson_id}`; `GET /{id}/config`, `PUT`/`DELETE /{id}/config/{key}` (overrides); `GET /{id}/epics` (the board); `GET`/`PUT`/`DELETE /{id}/ticket-filter`, `POST .../preview`, `POST .../sync` |
 | Epics | `/api/epics` | `GET ""`, `GET /{key}`, `GET /{key}/usage`; `POST /sync` (Add ticket: `{jira_key, project_id}` — a key or URL, an epic or a lone story); `POST /{key}/sync` (refresh the epic's own text, no tree walk); `PUT /{key}/repo` (its default folder); `PUT /{key}/gate` (Pause / Resume); `POST /{key}/prior-work/refresh`; `POST /{key}/pr-approval`; `DELETE /{key}` (remove the ticket) |
 | Stories | `/api/stories` | `GET /{key}`, `/plan`, `/activity`, `/stream` (SSE), `/usage`; `POST /{key}/start`, `/approve`, `/answer`, `/replan`, `/retry[?replan=true]`, `/cancel`, `/guidance`, `/prior-work`, `/external-change`, `/sync` (refresh its text); `PUT /{key}/kind`, `PUT /{key}/repo` (pending top-level stories only) |
-| Pages | — | `/` and `/projects`, `/projects/{id}`, `/settings` (the three HTML shells), `/settings-ui/*` (the bundles), `/healthz`. Shells and bundles are served `Cache-Control: no-cache`: they keep fixed names, so without it a browser could run an old bundle after a rebuild, missing a button the server already has |
+| Inbox | `/api` | `GET /inbox` (every project's counts and everything waiting on a person — `elstin/services/inbox.py`), `GET /projects/{id}/inbox` (one project's). Read only: each item's action goes through the route that owns it |
+| Pages | — | `/`, `/projects`, `/settings`, `/projects/{id}` and everything under it serve the one shell (`settings-ui/app.html`); the app routes on the client. `/settings-ui/*` (the bundle), `/healthz`. Shell and bundle are served `Cache-Control: no-cache`: they keep fixed names, so without it a browser could run an old bundle after a rebuild, missing a button the server already has |
 
 The normal flow needs no "start" call: add a ticket (by key, or through the
 project's ticket filter) → the epic lands paused, with the project's
@@ -1807,35 +1808,56 @@ and only gets there sooner elsewhere.
 
 ## UI
 
-- `settings-ui/*.html` — three thin shells (projects list, settings,
-  project detail), one per `elstin/app.py` route. Each just mounts a React
-  root (`<div id="root">` + one `<script type="module"
-  src="/settings-ui/vendor/app-*.js">`); only the pre-paint theme script
-  and the one `app.css` `<link>` stay as raw HTML — those must run before
-  any JS bundle loads.
+- `settings-ui/app.html` — the one thin shell. `elstin/app.py` serves it for
+  every page URL (`/`, `/projects`, `/settings`, `/projects/{id}/...`); it
+  mounts one React root (`<div id="root">` + `<script type="module"
+  src="/settings-ui/vendor/app.js">`). Only the pre-paint theme script and
+  the one `app.css` `<link>` stay as raw HTML — both must run before the JS
+  bundle loads. Any other path is a real 404, not an empty shell.
 - `ui-src/src/` — the actual UI: TypeScript + React + shadcn/ui
   (Radix UI primitives, vendored — not installed via the shadcn CLI —
-  under `components/ui/`, styled with Tailwind v4 utility classes) plus
-  page-level components under `components/{projects,project-detail,
-  settings,shared}/`. `components/ui/*` is the only place a Radix import
-  belongs; everything else composes those. Icons come from `lucide-react`;
-  toasts from `sonner` (`lib/toast.tsx` wraps it so call sites keep
-  reading `showToast(message, appearance)`). Every dependency is public —
-  see `ui-src/README.md` on why that matters. Dark mode keys off
+  under `components/ui/`, styled with Tailwind v4 utility classes over the
+  tokens in `styles/globals.css`). `components/ui/*` is the only place a
+  Radix import belongs; everything else composes those. Icons come from
+  `lucide-react`; toasts from `sonner` (`lib/toast.tsx` wraps it so call
+  sites keep reading `showToast(message, appearance)`). Every dependency is
+  public — see `ui-src/README.md` on why that matters. Dark mode keys off
   `[data-theme="dark"]` on `<html>` (not the `.dark` class shadcn
-  scaffolds by default) so the existing pre-paint script and
-  `lib/theme.ts` needed no changes — only `ui-src/src/styles/globals.css`'s
-  `@custom-variant dark` selector does. Plus TanStack Query for all server
-  state (polling via `refetchInterval`, cache invalidation after mutations
-  instead of manual refetch calls) — with one deliberate exception: the
-  story detail dialog's activity feed is pushed, not fetched.
-  `useStoryActivity` (`hooks/useStories.ts`) holds an `EventSource` on
-  `GET /api/stories/{key}/stream` for as long as the dialog is open; there
-  is no query to cache or invalidate, and the effect cleanup closes the
-  connection. No client-side router — each entry
-  (`ui-src/src/entries/*.tsx`) is an independent root matching one HTML
-  shell, same navigation model as before (plain `<a href>`/
-  `window.location` between pages).
+  scaffolds by default), set by the pre-paint script and `lib/theme.ts`.
+  TanStack Query holds all server state (polling via `refetchInterval`,
+  invalidation after mutations; every successful mutation also refreshes
+  the inbox — `lib/queryClient.ts` — and a 4xx is not retried) — with one
+  deliberate exception: a story's activity feed is pushed, not fetched
+  (`useActivityStream`, an `EventSource` on `GET /api/stories/{key}/stream`
+  held while the drawer's Activity tab is open; the effect cleanup closes it).
+- **One app, client-side routes.** `components/App.tsx` is the route table;
+  `lib/router.tsx` is the whole router (~100 lines, no dependency):
+  `useLocation`, `navigate`, `withSearch`, `matchPath`, and `<Link>`, which
+  renders a real `<a href>` and only turns a plain left click into an
+  in-app navigation (cmd/ctrl/middle-click still open a tab). Routes:
+  `/` (home: the inbox across projects, then the projects), `/settings`,
+  `/projects/:id/{tasks,folders,lessons,backlog,backlog/new,backlog/:sid,
+  settings}`; `/projects/:id` and the PO pages' old `/projects/:id/po/...`
+  URLs redirect. A new view is an entry in `ROUTES` — nothing on the server.
+- **Shell** (`components/shell/`): `AppLayout` (the sidebar beside the page;
+  under `md` it is a sheet behind the top bar's menu button), `Sidebar`
+  (projects with their "needs you" badge, each project's sections with
+  counts, Global settings and the theme toggle — all counts come from
+  `GET /api/inbox`, so the sidebar fetches no board), `Page` (the top bar:
+  breadcrumb plus the view's actions, and the tab title).
+- **Needs you** (`components/inbox/`): every gate waiting on a person, from
+  `GET /api/inbox` (`elstin/services/inbox.py`) — plans to approve or
+  questions to answer, pull requests to open, text changed in the source,
+  failed runs elstin will not retry itself, backlog drafts, lessons. One card
+  per kind, each item with the button that settles it (the same mutations as
+  everywhere else); on the Tasks page for one project, on the home page for
+  all of them.
+- **Status colours** (`lib/status.ts`): every story status falls into one of
+  five groups — merged, running, needs you, pending, failed — and the
+  legend, the progress segments, the pills and the sidebar badges all read
+  them. `lib/status.ts` also holds every status, phase, parked-reason, gate
+  and PO label (the place to add one); `components/shared/StatusTag.tsx`
+  renders them as tags and re-exports them.
 - **Settings page** (`components/settings/`): a filterable list of collapsible
   sections (`SettingsSection`) built from `GET /api/config` plus
   `GET /api/config/categories` — the page holds no per-setting knowledge, so
@@ -1844,35 +1866,51 @@ and only gets there sooner elsewhere.
   since storage can be blocked), `/settings#tracing` opens and scrolls to a
   section, and filtering opens every section that has a match. Underscores
   and spaces match each other, so a key and its label find the same setting.
-  `SettingsField` is shared with the project settings dialog, which is built
+  `SettingsField` is shared with the project settings page, which is built
   from the same sections (only the project-overridable fields, each with its
   "Using global default" / "Reset" hint; sections holding an override start
   open). A field you leave unchanged saves nothing — in a project that would
   pin today's global value as an override.
-- **Project page** (`components/project-detail/`): `ProjectDetailPage`; the
-  board — `EpicList`, `EpicCard` (one per ticket; stories in wave, then key,
-  order), `StoryRow` (status tags and the gate button); `DetailDialog`, a
-  story's details — `PlanPanel`, `ActivityFeed` (the SSE stream),
-  `UsagePanel`, `GuidanceForm`, `CancelRunButton`, the clarification
-  questions, prior work and what is left to a person; `FoldersPanel` +
-  `RepoGuide`; `LessonsPanel`; `TicketFilterDialog`; `SyncTicketDialog`
-  (Add ticket); `ProjectSettingsDialog` (+ `DeleteProjectSection`);
-  `PriorWorkChoice`; `PrApprovalPrompt`; `RemoveEpicButton`. Shared:
-  `StatusTag.tsx` holds every status, phase, parked-reason and gate label —
-  the place to add one — and the gate button names its action ("Approve
-  plan") rather than a bare "Approve"; `RepoSourceInput` / `RepoPicker` /
-  `FolderBrowser` (clone, attach, browse); `ModelCombobox`. One hook per
-  resource under `hooks/`; `lib/api.ts` is the fetch wrapper and
-  `types/api.ts` mirrors the API's response shapes — change it with the
-  route.
-- `ui-src/build.mjs` bundles all three entry points (esbuild, built-in
-  JSX/TSX support) into `settings-ui/vendor/app-*.js`, then shells out to
+- **Tasks** (`components/tasks/`): `TasksView` (top bar: ticket-filter
+  status, Filter, Plan backlog, Add ticket; then Needs you; then the
+  board), `EpicTable` (active epics first; the first one open until someone
+  toggles; open/closed kept by key across polls), `EpicRow` (key, title, PR
+  links, phase, `StoryProgress` — one segment per top-level story in its
+  group's colour — repo, Pause/Resume, a ⋯ menu with Details, Story graph,
+  Refresh, Copy branch name, Remove), `StoryTableRow` (wave, key, title,
+  notable tags, "waits for …" or the status, and at most one action:
+  Approve plan, Answer, Retry, Cancel run, Choose branch or Start).
+- **Detail drawer** (`components/detail/DetailDrawer.tsx`): a story's or an
+  epic's whole record in a right-hand sheet. The URL carries it
+  (`?story=KEY` / `?epic=KEY`, `&tab=`), so it can be linked to and Back
+  closes it. Story tabs: Overview (a held change from the source, the
+  planner's questions, failure detail, kind, branch, prior work, what is
+  left to a person, sub-tasks), Plan (+ Re-plan), Activity (the SSE feed +
+  `GuidanceForm`), Usage. Epic tabs: Overview, Stories, Graph
+  (`StoryGraph`), Usage.
+- **Other views** (`components/views/`, `components/project-detail/`):
+  `HomeView`; `FoldersView` (`FoldersPanel` + `RepoGuide`); `LessonsView`
+  (`LessonsPanel`); `BacklogView` (the PO drafts; `po/PoStartPage` and
+  `po/PoSessionPage` render inside the shell — a bug-mode session, "Report
+  a bug" / `?kind=bug`, is one Bug ticket edited in `po/BugEditor`, not
+  `po/DraftEditor`); `ProjectSettingsView`
+  (ticket filter, `ProjectSettingsPanel`, `DeleteProjectSection`). Dialogs
+  that remain: `SyncTicketDialog` (Add ticket), `TicketFilterDialog`,
+  `PriorWorkChoice`, `CreateProjectModal`, `RepoGuide`'s; every "are you
+  sure?" uses `components/ui/confirm-dialog.tsx`. Shared:
+  `RepoSourceInput` / `RepoPicker` / `FolderBrowser` (clone, attach,
+  browse); `ModelCombobox`. One hook per resource under `hooks/`;
+  `lib/api.ts` is the fetch wrapper and `types/api.ts` mirrors the API's
+  response shapes — change it with the route.
+- `ui-src/build.mjs` bundles the one entry point (`src/entries/app.tsx`;
+  esbuild, built-in JSX/TSX support) into `settings-ui/vendor/app.js` (with code-splitting:
+  each dynamic `import()` — today only mermaid, for plan diagrams — becomes a lazily
+  loaded file under `settings-ui/vendor/chunks/`), then shells out to
   the Tailwind CLI to compile `src/styles/globals.css` into
   `settings-ui/vendor/app.css` — esbuild has no CSS-transform story of its
   own, so Tailwind's CLI (not a bundler plugin) does that half of the
   build. The stylesheet is compiled standalone rather than imported from
-  an entry, so the shells `<link>` one file instead of three bundled
-  copies.
+  the entry, so the shell `<link>`s it and it loads beside the bundle.
 - **Do not commit** `settings-ui/vendor/` or `ui-src/node_modules/` — both
   are build output, regenerated by `npm run build` in seconds. The
   Dockerfile's `ui-build` stage runs that build itself, so the image is
@@ -2017,7 +2055,8 @@ and only gets there sooner elsewhere.
 | Lessons proposed from finished runs | `services/lessons.py` (capture), `state/manager_lesson.py` |
 | A person's message to a running agent | `services/guidance.py`, `agents/loop.py`'s `pending_messages`, `api/run_routes.py`'s `send_guidance`, `state/manager_story.py` |
 | Persistence API | `state/manager_*.py` + Alembic |
-| UI | `ui-src/src/` (React/TS); rebuild with `cd ui-src && npm run build` |
+| What is waiting on a person ("Needs you", the sidebar badges) | `services/inbox.py`, `api/inbox_routes.py`, `ui-src/src/components/inbox/` |
+| UI (routes in `components/App.tsx`, router in `lib/router.tsx`, shell in `components/shell/`) | `ui-src/src/` (React/TS); rebuild with `cd ui-src && npm run build` |
 | Tests | Mirror package under `tests/`; extend `fake_agents` if graph entry points change |
 
 ## Commit and PR hygiene

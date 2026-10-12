@@ -15,6 +15,42 @@ export interface Project {
   repos?: ProjectRepo[]; // only present on GET /api/projects/{id}
 }
 
+// What is waiting on a person (elstin/services/inbox.py) — GET /api/inbox and
+// GET /api/projects/{id}/inbox. One item per gate; each one's action goes
+// through the route that owns it.
+export type InboxKind = "plan_approval" | "questions" | "pr_approval" | "external_change" | "failed" | "lesson" | "po_draft";
+
+export interface InboxItem {
+  kind: InboxKind;
+  project_id: number;
+  epic_key: string | null;
+  story_key: string | null;
+  key: string | null; // the ticket key as shown (a GitHub issue's owner/repo#N)
+  title: string;
+  detail: string;
+  lesson_id?: number;
+  session_id?: number;
+}
+
+export interface InboxProjectCounts {
+  needs_you: number;
+  epics: number;
+  repos: number;
+  lessons_proposed: number;
+  drafts: number;
+}
+
+export interface InboxProject {
+  id: number;
+  name: string;
+  counts: InboxProjectCounts;
+}
+
+export interface Inbox {
+  projects: InboxProject[];
+  items: InboxItem[];
+}
+
 // The guide a run against a repo would read (elstin/services/project_guide.py):
 // the repo's own AGENTS.md/CLAUDE.md, else one elstin generated, else none.
 export interface RepoGuide {
@@ -555,7 +591,9 @@ export interface ProjectLesson {
 // PO_DRAFT_SCHEMA as it is *stored* (the agent's per-turn reply and questions
 // live on the session and in the conversation, not in the draft).
 
-export type PoMode = "brainstorm" | "split" | "gap";
+// brainstorm / split / gap are picked by the server from the epic; "bug" is the one a
+// person asks for — one Bug ticket, its cause traced in the code.
+export type PoMode = "brainstorm" | "split" | "gap" | "bug";
 
 export type PoStatus =
   | "queued"
@@ -614,7 +652,7 @@ export interface PoEpicDraft {
 }
 
 export interface PoDraft {
-  mode: PoMode;
+  mode: Exclude<PoMode, "bug">;
   epic: PoEpicDraft;
   stories: PoStory[];
   existing: PoExisting[];
@@ -622,6 +660,36 @@ export interface PoDraft {
   assumptions: string[];
   out_of_scope: string[];
 }
+
+export type PoBugConfidence = "high" | "medium" | "low";
+export type PoBugCauseIn = "code" | "data" | "configuration" | "unknown";
+
+// The one ticket a bug-mode session drafts (elstin/agents/roles/product_owner.py's
+// BUG_DRAFT_SCHEMA). Published as a JIRA Bug whose description is these fields as
+// sections, ending with the acceptance criteria.
+export interface PoBug {
+  summary: string;
+  observed: string;
+  expected: string;
+  steps_to_reproduce: string[];
+  root_cause: string;
+  confidence: PoBugConfidence;
+  cause_in: PoBugCauseIn;
+  fix_location: string;
+  to_confirm: string[];
+  acceptance_criteria: string[];
+  labels: string[];
+  evidence: PoEvidence[];
+}
+
+export interface PoBugDraft {
+  mode: "bug";
+  bug: PoBug;
+  assumptions: string[];
+  out_of_scope: string[];
+}
+
+export type PoAnyDraft = PoDraft | PoBugDraft;
 
 // A finding of elstin/agents/roles/po_gate.py: `problems` are blocking
 // (publishing refuses), `warnings` are advice. `where` points into the saved
@@ -654,6 +722,7 @@ export interface PoCounts {
   stories: number;
   subtasks: number;
   links: number;
+  bugs: number;
 }
 
 // elstin/services/po_sessions.py's publish_state: whether the draft can go to JIRA
@@ -713,7 +782,7 @@ export interface PoSession {
   mode: PoMode;
   brief: string;
   status: PoStatus;
-  draft: PoDraft | null;
+  draft: PoAnyDraft | null;
   draft_version: number;
   edited_by_person: boolean;
   person_edits: string[];

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useStoryPlan } from "../../hooks/useStories";
 import type { Plan } from "../../types/api";
 import { Button } from "../ui/button";
+import { MermaidDiagram } from "../shared/MermaidDiagram";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 
 // The planner's own markdown write-up is the readable form of a plan;
@@ -13,10 +14,57 @@ function planText(plan: Plan): string {
 
 const PREVIEW_LINES = 10;
 
+// A fenced ```mermaid block, which the planner uses for flow charts. The
+// fences must start their own line.
+const MERMAID_FENCE = /^```mermaid[^\n]*\n([\s\S]*?)^```[ \t]*$/gm;
+
+type Segment = { kind: "text"; text: string } | { kind: "mermaid"; code: string };
+
+function splitSegments(text: string): Segment[] {
+  const segments: Segment[] = [];
+  let last = 0;
+  for (const match of text.matchAll(MERMAID_FENCE)) {
+    if (match.index > last) segments.push({ kind: "text", text: text.slice(last, match.index) });
+    segments.push({ kind: "mermaid", code: (match[1] ?? "").trim() });
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) segments.push({ kind: "text", text: text.slice(last) });
+  return segments;
+}
+
 function truncateToLines(text: string, maxLines: number): { preview: string; truncated: boolean } {
-  const lines = text.split("\n");
-  if (lines.length <= maxLines) return { preview: text, truncated: false };
-  return { preview: lines.slice(0, maxLines).join("\n"), truncated: true };
+  let end = 0;
+  for (let i = 0; i < maxLines; i++) {
+    const next = text.indexOf("\n", end);
+    if (next === -1) return { preview: text, truncated: false };
+    end = next + 1;
+  }
+  // Never cut a diagram in half: its unclosed fence would show as raw source.
+  for (const match of text.matchAll(MERMAID_FENCE)) {
+    if (match.index < end && end < match.index + match[0].length) {
+      end = match.index + match[0].length;
+      break;
+    }
+  }
+  const preview = text.slice(0, end).trimEnd();
+  return { preview, truncated: end < text.trimEnd().length };
+}
+
+// Text stays monospace, as before; only the diagrams are drawn.
+function PlanText({ text, className }: { text: string; className: string }) {
+  return (
+    <div className="flex min-w-0 flex-col gap-3">
+      {splitSegments(text).map((segment, i) =>
+        segment.kind === "mermaid" ? (
+          <MermaidDiagram key={i} code={segment.code} />
+        ) : segment.text.trim() ? (
+          <pre key={i} className={className}>
+            {segment.text.trim()}
+          </pre>
+        ) : null,
+      )}
+    </div>
+  );
 }
 
 export function StoryPlanPanel({ storyKey, open }: { storyKey: string; open: boolean }) {
@@ -38,17 +86,19 @@ export function StoryPlanPanel({ storyKey, open }: { storyKey: string; open: boo
           </Button>
         ) : null}
       </div>
-      <pre className="border-border bg-accent/30 max-h-[220px] min-w-0 overflow-hidden rounded-md border p-2 font-mono text-xs whitespace-pre-wrap">
-        {preview}
-        {truncated ? "\n…" : ""}
-      </pre>
+      <PlanText
+        text={preview + (truncated ? "\n…" : "")}
+        className="border-border bg-accent/30 max-h-[220px] min-w-0 overflow-hidden rounded-md border p-2 font-mono text-xs whitespace-pre-wrap"
+      />
 
       <Dialog open={fullOpen} onOpenChange={setFullOpen}>
         <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-3xl">
           <DialogHeader>
             <DialogTitle>Plan — {storyKey}</DialogTitle>
           </DialogHeader>
-          <pre className="min-w-0 flex-1 overflow-y-auto font-mono text-xs whitespace-pre-wrap">{text}</pre>
+          <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
+            <PlanText text={text} className="min-w-0 font-mono text-xs whitespace-pre-wrap" />
+          </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setFullOpen(false)}>
               Close

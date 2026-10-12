@@ -23,8 +23,9 @@ The structure is the planner's, with three differences worth knowing:
 
 Exploration — read-only agents investigating the code in parallel, which keeps
 their file reads out of this loop's context — is the planner's mechanism
-(elstin/agents/roles/explorer.py) with the PO's wording, and runs on the first
-turn only: a revision already has the code in front of it.
+(elstin/agents/roles/explorer.py) with the PO's wording (a debugger's, in bug
+mode), and runs on the first turn only: a revision already has the code in
+front of it.
 
 This role touches no StateManager (hard constraint #3's spirit): the daemon
 gathers the inputs, hands over the clients (`ticket_source`, `confluence`,
@@ -47,7 +48,7 @@ from elstin.agents.roles.po_gate import (
     KIND_MALFORMED_OUTPUT, DraftContext, check_draft, check_draft_integrity, format_po_feedback,
 )
 from elstin.agents.roles.product_owner import (
-    PO_DRAFT_SCHEMA, PO_EXPLORER_SYSTEM, PO_SCOPE_SYSTEM, PoInputs, build_po_system, build_po_user_text,
+    PoInputs, build_po_system, build_po_user_text, draft_schema, explorer_system, scope_system,
 )
 from elstin.config.store import get_config, get_float_config, get_int_config, resolve_text
 from elstin.llm.errors import LlmError, ProviderLimit, provider_limit_of
@@ -144,7 +145,7 @@ async def run_product_owner(
     revising = inputs.revise is not None
     append_activity(
         run_id, type="status", phase="po",
-        title="Revising the draft" if revising else "Drafting the backlog",
+        title="Revising the draft" if revising else ("Investigating the bug" if inputs.mode == "bug" else "Drafting the backlog"),
         detail=f"mode: {inputs.mode}" + (f" · epic {inputs.epic_key}" if inputs.epic_key else ""),
     )
 
@@ -228,10 +229,10 @@ async def run_product_owner(
                 effort=effort,
                 on_turn=_on_turn,
                 run_id=run_id,
-                scope_system=PO_SCOPE_SYSTEM,
-                explorer_system=PO_EXPLORER_SYSTEM,
-                request_label="Brief and repository map",
-                purpose="drafting",
+                scope_system=scope_system(inputs.mode),
+                explorer_system=explorer_system(inputs.mode),
+                request_label="Bug report and repository map" if inputs.mode == "bug" else "Brief and repository map",
+                purpose="debugging" if inputs.mode == "bug" else "drafting",
                 phase="po",
             )
             api_duration_ms += explore_api_ms
@@ -260,7 +261,7 @@ async def run_product_owner(
             system=build_po_system(inputs.mode, revising=revising),
             tools=tool_defs_from_schemas([*code_schemas, *po_schemas]),
             tool_fns={**code_fns, **po_fns},
-            response_format=ResponseFormat(name="po_draft", schema=PO_DRAFT_SCHEMA),
+            response_format=ResponseFormat(name="po_draft", schema=draft_schema(inputs.mode)),
             effort=effort,
             max_turns=get_int_config("po_max_turns", 40),
             # Half of what is left funds the investigation agents, the rest is

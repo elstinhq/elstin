@@ -1,7 +1,39 @@
-import type { PoCounts, PoDefect, PoDraft, PoStory } from "../../../types/api";
+import type { PoAnyDraft, PoBugDraft, PoCounts, PoDefect, PoDraft, PoStory } from "../../../types/api";
 
 // Pure edits of a draft, so the editor's components only say what changed.
 // Every one returns a new draft; none mutates.
+
+export function isBugDraft(draft: PoAnyDraft | null | undefined): draft is PoBugDraft {
+  return draft != null && draft.mode === "bug";
+}
+
+// The session's draft when it is a backlog (epic and stories), else null.
+export function backlogDraft(draft: PoAnyDraft | null | undefined): PoDraft | null {
+  return draft != null && !isBugDraft(draft) ? draft : null;
+}
+
+// What a draft is called: its bug's summary, else its epic's.
+export function draftTitle(draft: PoAnyDraft | null | undefined): string {
+  if (!draft) return "";
+  return isBugDraft(draft) ? draft.bug.summary : draft.epic.summary;
+}
+
+export function bugWithoutBlanks(draft: PoBugDraft): PoBugDraft {
+  const clean = (items: string[]) => items.map((i) => i.trim()).filter(Boolean);
+  const bug = draft.bug;
+  return {
+    ...draft,
+    bug: {
+      ...bug,
+      steps_to_reproduce: clean(bug.steps_to_reproduce),
+      to_confirm: clean(bug.to_confirm),
+      acceptance_criteria: clean(bug.acceptance_criteria),
+      labels: clean(bug.labels),
+    },
+    assumptions: clean(draft.assumptions),
+    out_of_scope: clean(draft.out_of_scope),
+  };
+}
 
 export function nextRef(stories: PoStory[]): string {
   const used = new Set(stories.map((s) => s.ref));
@@ -79,6 +111,7 @@ export function plural(n: number, one: string, many: string): string {
 // "1 epic, 6 stories, 4 sub-tasks and 3 links" — only the parts there are.
 export function describeCounts(counts: PoCounts): string {
   const parts = [
+    counts.bugs ? plural(counts.bugs, "bug", "bugs") : null,
     counts.epics ? plural(counts.epics, "epic", "epics") : null,
     counts.stories ? plural(counts.stories, "story", "stories") : null,
     counts.subtasks ? plural(counts.subtasks, "sub-task", "sub-tasks") : null,

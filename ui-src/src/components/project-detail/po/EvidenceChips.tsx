@@ -22,7 +22,7 @@ function Chip({ evidence, jiraBaseUrl, onRemove }: { evidence: PoEvidence; jiraB
     </>
   );
   const className = cn(
-    "border-border inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-xs",
+    "border-border text-foreground/80 inline-flex items-center gap-1 rounded-sm border px-1.5 py-0.5 text-xs",
     unverified && "border-warning/60",
     href && "hover:bg-accent",
   );
@@ -47,18 +47,24 @@ function Chip({ evidence, jiraBaseUrl, onRemove }: { evidence: PoEvidence; jiraB
   );
 }
 
+// With a `label` the chips sit on one wrapping line after it ("Evidence  [chip] [chip]"),
+// and a row with nothing cited says so; without one an empty list renders nothing.
 export function EvidenceChips({
   evidence,
   jiraBaseUrl,
   onRemove,
+  label,
 }: {
   evidence: PoEvidence[];
   jiraBaseUrl: string | null;
   onRemove?: (index: number) => void;
+  label?: string;
 }) {
-  if (evidence.length === 0) return null;
+  if (evidence.length === 0 && !label) return null;
   return (
-    <div className="flex flex-wrap gap-1.5">
+    <div className="flex flex-wrap items-center gap-1.5">
+      {label ? <span className="text-muted-foreground text-xs">{label}</span> : null}
+      {evidence.length === 0 ? <span className="text-muted-foreground text-xs">None cited</span> : null}
       {evidence.map((item, index) => (
         <Chip
           key={`${item.source}:${item.ref}:${index}`}

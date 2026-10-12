@@ -30,9 +30,9 @@ const BORDER: Record<StoryStatus, string> = {
   done: "border-success",
   failed: "border-destructive",
   awaiting_plan_approval: "border-warning",
-  ready_to_merge: "border-blue-500",
-  merging: "border-blue-500",
-  dispatched: "border-blue-500",
+  ready_to_merge: "border-info",
+  merging: "border-info",
+  dispatched: "border-info",
   pending: "border-border",
   skipped: "border-border opacity-60",
 };
@@ -49,7 +49,7 @@ const StoryNode = memo(function StoryNode({ data }: NodeProps<Node<StoryNodeData
       className={cn(
         "bg-card text-card-foreground w-[220px] cursor-pointer rounded-lg border-2 px-3 py-2 shadow-sm transition-shadow hover:shadow-md",
         BORDER[story.status] ?? "border-border",
-        running && "ring-blue-500/25 ring-4",
+        running && "ring-info/25 ring-4",
       )}
       title={story.summary ?? undefined}
     >

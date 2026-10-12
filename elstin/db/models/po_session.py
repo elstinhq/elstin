@@ -1,7 +1,8 @@
 """PO sessions — a person and the PO agent drafting a backlog together.
 
 A session is one piece of backlog planning: a brief, the mode elstin picked for
-it (brainstorm / split / gap — elstin/services/po_sessions.py's `select_mode`),
+it (brainstorm / split / gap — elstin/services/po_sessions.py's `select_mode`) or
+the one a person asked for (bug: one Bug ticket, its cause traced in the code),
 the agent's draft, the questions it asked, the conversation around the draft,
 and — once a person publishes it — which JIRA ticket each part became.
 
@@ -49,7 +50,10 @@ PO_STATUSES = (
 PO_MODE_BRAINSTORM = "brainstorm"
 PO_MODE_SPLIT = "split"
 PO_MODE_GAP = "gap"
-PO_MODES = (PO_MODE_BRAINSTORM, PO_MODE_SPLIT, PO_MODE_GAP)
+# One Bug ticket rather than a backlog: the agent traces a reported fault to its
+# cause in the code. Asked for by a person, never picked from the epic.
+PO_MODE_BUG = "bug"
+PO_MODES = (PO_MODE_BRAINSTORM, PO_MODE_SPLIT, PO_MODE_GAP, PO_MODE_BUG)
 
 ROLE_PERSON = "person"
 ROLE_AGENT = "agent"
@@ -71,6 +75,7 @@ class PoSession(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
     # The epic being split or checked; NULL for a brainstorm, which makes a new one.
+    # In bug mode, the epic the bug is filed under, if a person named one.
     epic_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Where the tickets are created. Resolved when the session starts (the
     # epic's own prefix, else the project's ticket filter, else what the

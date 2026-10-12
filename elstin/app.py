@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 
 from elstin.api.config_routes import router as config_router
 from elstin.api.epic_routes import router as epic_router
+from elstin.api.inbox_routes import router as inbox_router
 from elstin.api.po_routes import router as po_router
 from elstin.api.project_routes import router as project_router
 from elstin.api.run_routes import router as run_router
@@ -67,6 +68,7 @@ def create_app() -> FastAPI:
     app.include_router(epic_router)
     app.include_router(project_router)
     app.include_router(po_router)
+    app.include_router(inbox_router)
 
     @app.get("/healthz")
     def healthz() -> dict:
@@ -77,26 +79,17 @@ def create_app() -> FastAPI:
         # Browsers probe this path regardless of the <link rel="icon">.
         return FileResponse(_UI_DIR / "favicon.svg", media_type="image/svg+xml")
 
-    @app.get("/settings")
-    def settings_page() -> FileResponse:
-        return FileResponse(_UI_DIR / "index.html", headers=_REVALIDATE)
+    # The UI is one app (ui-src/src/App.tsx) with its own client-side routes,
+    # so every page URL serves the same shell and the bundle picks the view
+    # from the path. Only the URLs the app knows are served it — /api,
+    # /settings-ui, /healthz and /favicon.ico keep their own routes above and
+    # below, and an unknown path is a real 404 rather than an empty shell. The
+    # old /projects/<id>/po/... pages are among them; the app redirects them.
+    def app_shell() -> FileResponse:
+        return FileResponse(_UI_DIR / "app.html", headers=_REVALIDATE)
 
-    @app.get("/")
-    @app.get("/projects")
-    def projects_page() -> FileResponse:
-        return FileResponse(_UI_DIR / "dashboard.html", headers=_REVALIDATE)
-
-    @app.get("/projects/{project_id}")
-    def project_detail_page(project_id: int) -> FileResponse:
-        return FileResponse(_UI_DIR / "project.html", headers=_REVALIDATE)
-
-    @app.get("/projects/{project_id}/po/new")
-    def po_start_page(project_id: int) -> FileResponse:
-        return FileResponse(_UI_DIR / "po-start.html", headers=_REVALIDATE)
-
-    @app.get("/projects/{project_id}/po/{session_id}")
-    def po_session_page(project_id: int, session_id: int) -> FileResponse:
-        return FileResponse(_UI_DIR / "po-session.html", headers=_REVALIDATE)
+    for path in ("/", "/projects", "/settings", "/projects/{project_id}", "/projects/{project_id}/{rest:path}"):
+        app.add_api_route(path, app_shell, methods=["GET"], include_in_schema=False, response_class=FileResponse)
 
     app.mount("/settings-ui", _RevalidatedStaticFiles(directory=_UI_DIR), name="settings-ui")
 

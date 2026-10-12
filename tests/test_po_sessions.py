@@ -273,9 +273,9 @@ def test_what_publishing_would_create():
         _story("s1"), _story("s2", depends_on=["s1"], subtasks=[{"summary": "a", "description": ""}, {"summary": "b", "description": ""}]),
         _story("s3", depends_on=["s1", "s2", "PAY-9"]),
     ])
-    assert publish_counts(_session("brainstorm", draft)) == {"epics": 1, "stories": 3, "subtasks": 2, "links": 4}
+    assert publish_counts(_session("brainstorm", draft)) == {"epics": 1, "stories": 3, "subtasks": 2, "links": 4, "bugs": 0}
     assert publish_counts(_session("split", draft))["epics"] == 0
-    assert publish_counts(_session("split", None)) == {"epics": 0, "stories": 0, "subtasks": 0, "links": 0}
+    assert publish_counts(_session("split", None)) == {"epics": 0, "stories": 0, "subtasks": 0, "links": 0, "bugs": 0}
 
 
 def test_what_is_left_to_publish_leaves_out_what_is_already_in_jira():
@@ -286,10 +286,10 @@ def test_what_is_left_to_publish_leaves_out_what_is_already_in_jira():
     session = _session("brainstorm", draft, publish_result={
         "created": {"epic": "PAY-1", "s1": "PAY-2", "s1.1": "PAY-3", "s2.1": "PAY-4"}, "links": [],
     })
-    assert publish_counts(session) == {"epics": 0, "stories": 1, "subtasks": 1, "links": 1}
+    assert publish_counts(session) == {"epics": 0, "stories": 1, "subtasks": 1, "links": 1, "bugs": 0}
     # One story on its own: just it, and the link to what it depends on.
-    assert publish_counts(session, ["s2"]) == {"epics": 0, "stories": 1, "subtasks": 1, "links": 1}
-    assert publish_counts(session, ["s1"]) == {"epics": 0, "stories": 0, "subtasks": 0, "links": 0}
+    assert publish_counts(session, ["s2"]) == {"epics": 0, "stories": 1, "subtasks": 1, "links": 1, "bugs": 0}
+    assert publish_counts(session, ["s1"]) == {"epics": 0, "stories": 0, "subtasks": 0, "links": 0, "bugs": 0}
     # Once the link exists it is not counted again.
     session["publish_result"]["links"] = ["PAY-2>PAY-5"]
     session["publish_result"]["created"]["s2"] = "PAY-5"
@@ -360,3 +360,88 @@ def test_the_draft_exports_as_markdown_with_everything_a_person_would_want():
 def test_a_brainstorm_exports_its_epic_as_new():
     markdown = draft_to_markdown(_session("brainstorm", _stored_draft("brainstorm")))
     assert "## Epic\n" in markdown and "## Stories" in markdown and "for PAY-1" not in markdown
+
+
+# -- bug mode ----------------------------------------------------------------------------------
+
+
+def _bug(**overrides):
+    bug = {
+        "summary": "Report shows the list price", "observed": "List price shown.", "expected": "Sale price shown.",
+        "steps_to_reproduce": ["Sell a unit below list", "Open the report"], "root_cause": "It reads `list_price`.",
+        "confidence": "medium", "cause_in": "code", "fix_location": "report.py builds the row.",
+        "to_confirm": ["Compare sales.price with the report for unit X"],
+        "acceptance_criteria": ["The report shows the sale price", "A test covers a unit sold below list"],
+        "labels": ["pricing"], "evidence": [{"source": "code", "ref": "report.py:12", "quote": "row.price = unit.list_price"}],
+    }
+    bug.update(overrides)
+    return bug
+
+
+def _bug_session(draft=None, **overrides):
+    draft = draft if draft is not None else {"mode": "bug", "bug": _bug(), "assumptions": [], "out_of_scope": []}
+    return _session("bug", draft, epic_key=None, **overrides)
+
+
+def test_a_stored_bug_draft_is_acceptable_to_save_and_a_backlog_one_is_not():
+    session = _bug_session()
+    assert validate_draft_edit(session["draft"], session) == []
+    marked = copy.deepcopy(session["draft"])
+    marked["bug"]["evidence"][0]["verified"] = True
+    assert validate_draft_edit(marked, session) == []
+    assert validate_draft_edit(_stored_draft(), session)  # an epic-and-stories draft is not a bug's shape
+
+
+def test_what_a_person_changed_in_a_bug_is_named_by_field():
+    old = _bug_session()["draft"]
+    new = copy.deepcopy(old)
+    new["bug"]["root_cause"] = "It reads the list price when no sale is recorded."
+    new["bug"]["evidence"][0]["verified"] = True  # a mark is not an edit
+    new["assumptions"] = ["Production data"]
+    assert diff_paths(old, new) == ["bug.root_cause", "assumptions"]
+
+
+def test_a_bug_ticket_says_what_why_where_and_ends_with_criteria_jira_reads_back():
+    from elstin.services.po_sessions import bug_markdown
+
+    text = bug_markdown(_bug())
+    for heading in ("## Observed", "## Expected", "## Steps to reproduce", "## Root cause (confidence: medium",
+                    "## Where the fix lies", "## To confirm outside the code", "## Evidence"):
+        assert heading in text
+    assert "1. Sell a unit below list\n2. Open the report" in text
+    assert 'code `report.py:12`: "row.price = unit.list_price"' in text
+    assert text.rstrip().endswith("- A test covers a unit sold below list")
+    assert JiraService.parse_acceptance_criteria(text) == _bug()["acceptance_criteria"]
+    # Empty sections are left out; a cause outside the code says so up front.
+    sparse = bug_markdown(_bug(steps_to_reproduce=[], to_confirm=[], evidence=[], cause_in="data"))
+    assert "Steps to reproduce" not in sparse and "To confirm" not in sparse and "## Evidence" not in sparse
+    assert "_The cause lies in data._" in sparse
+
+
+def test_publishing_a_bug_makes_one_ticket_and_then_nothing():
+    session = _bug_session()
+    assert publish_counts(session) == {"epics": 0, "stories": 0, "subtasks": 0, "links": 0, "bugs": 1}
+    published = {**session, "publish_result": {"created": {"bug": "PAY-50"}}}
+    assert publish_counts(published)["bugs"] == 0
+    assert published_edit_conflicts(published, ["bug.summary"]) == [
+        "the bug is already in JIRA as PAY-50 — it can no longer be changed here. Change the ticket in JIRA."
+    ]
+    assert published_edit_conflicts(session, ["bug.summary"]) == []
+
+
+def test_a_revision_may_not_rewrite_a_bug_already_in_jira():
+    session = {**_bug_session(), "publish_result": {"created": {"bug": "PAY-50"}}}
+    revised = copy.deepcopy(session["draft"])
+    revised["bug"]["summary"] = "Something else"
+    revised["assumptions"] = ["new"]
+    kept = keep_published(revised, session["draft"], session)
+    assert kept["bug"]["summary"] == "Report shows the list price" and kept["assumptions"] == ["new"]
+    unpublished = _bug_session()
+    assert keep_published(revised, unpublished["draft"], unpublished)["bug"]["summary"] == "Something else"
+
+
+def test_a_bug_exports_as_its_ticket():
+    session = _bug_session(questions=[{"id": "q1", "question": "Which report?", "options": [{"label": "WBSP"}]}])
+    text = draft_to_markdown({**session, "draft": {**session["draft"], "assumptions": ["Prod"]}})
+    assert text.startswith("# Report shows the list price\n\n_Bug draft · version 3 · labels: pricing_")
+    assert "## Root cause" in text and "## Assumptions\n\n- Prod" in text and "## Open questions\n\n- Which report?" in text

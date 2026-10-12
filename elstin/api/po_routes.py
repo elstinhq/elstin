@@ -11,7 +11,9 @@ Routes (the project's own are under `/api/projects/{id}`):
 
 - `POST /projects/{id}/po-sessions` — start one from a brief, optionally on an
   existing epic. The *server* picks the mode (elstin/services/po_sessions.py's
-  `select_mode`) from what the epic already has.
+  `select_mode`) from what the epic already has — unless the person asks for
+  `mode: "bug"`: one Bug ticket, its cause traced in the code, filed under the
+  epic when one is given.
 - `GET /projects/{id}/po-mode` — the mode a given epic would get, for the start
   dialog's note, without starting anything.
 - `GET /projects/{id}/po-sessions` — the project's sessions.
@@ -36,7 +38,7 @@ from __future__ import annotations
 
 import asyncio
 from functools import partial
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
@@ -53,7 +55,8 @@ from elstin.services.po_sessions import (
 )
 from elstin.state.manager import StateManager
 from elstin.state.manager_po import (
-    PO_AWAITING_INPUT, PO_DISCARDED, PO_FAILED, PO_PUBLISHED, PO_PUBLISHING, PO_READY, PO_RUNNING, PoSessionConflict, po_run_id,
+    PO_AWAITING_INPUT, PO_DISCARDED, PO_FAILED, PO_MODE_BUG, PO_PUBLISHED, PO_PUBLISHING, PO_READY, PO_RUNNING,
+    PoSessionConflict, po_run_id,
 )
 
 router = APIRouter(prefix="/api", tags=["po"])
@@ -68,6 +71,9 @@ MAX_UNREAD_MESSAGES = 10
 class StartSessionRequest(BaseModel):
     brief: str
     epic_key: str | None = None
+    # "bug" asks for one Bug ticket rather than a backlog (`epic_key` is then the
+    # epic it is filed under). Left out, the server picks the mode from the epic.
+    mode: Literal["bug"] | None = None
     # Where tickets are created. Defaults from the epic's key, then the
     # project's ticket filter; a brainstorm with neither needs it typed.
     jira_project_key: str | None = None
@@ -131,6 +137,12 @@ def _view(session: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def draft_title(session: dict[str, Any]) -> str | None:
+    """What a session's draft is called: its bug's summary, else its epic's."""
+    draft = session.get("draft") or {}
+    return (draft.get("bug") or {}).get("summary") or (draft.get("epic") or {}).get("summary") or None
+
+
 def _summary(session: dict[str, Any]) -> dict[str, Any]:
     draft = session.get("draft") or {}
     brief = session["brief"].strip().replace("\n", " ")
@@ -138,7 +150,7 @@ def _summary(session: dict[str, Any]) -> dict[str, Any]:
         "id": session["id"], "project_id": session["project_id"], "epic_key": session["epic_key"],
         "mode": session["mode"], "status": session["status"], "error": session["error"],
         "brief": brief[:200] + ("…" if len(brief) > 200 else ""),
-        "title": (draft.get("epic") or {}).get("summary") or None,
+        "title": draft_title(session),
         "stories": len(draft.get("stories") or []), "cost_usd": session["cost_usd"],
         "created_at": session["created_at"], "updated_at": session["updated_at"],
     }
@@ -173,7 +185,10 @@ def start_po_session(project_id: int, body: StartSessionRequest) -> dict[str, An
         raise HTTPException(status_code=404, detail=f"No such project: {project_id}")
     brief = body.brief.strip()
     if not brief:
-        raise HTTPException(status_code=422, detail="Write a brief: what is this backlog for?")
+        raise HTTPException(
+            status_code=422,
+            detail="Describe the bug: what goes wrong, and where?" if body.mode == PO_MODE_BUG else "Write a brief: what is this backlog for?",
+        )
     if len(brief) > MAX_BRIEF_CHARS:
         raise HTTPException(status_code=422, detail=f"The brief is over {MAX_BRIEF_CHARS} characters; shorten it.")
 
@@ -190,6 +205,9 @@ def start_po_session(project_id: int, body: StartSessionRequest) -> dict[str, An
         on_board = sm.get_epic(epic_key)
         if on_board is not None and on_board.get("project_id") != project_id:
             raise HTTPException(status_code=409, detail=f"{epic_key} belongs to a different project on elstin's board.")
+    if body.mode == PO_MODE_BUG:
+        # The epic, if any, is only where the bug is filed: nothing about it picks the mode.
+        mode = PO_MODE_BUG
 
     jira_project_key = resolve_jira_project_key(body.jira_project_key, epic_key, sm.get_project_ticket_filter(project_id))
     session = sm.create_po_session(

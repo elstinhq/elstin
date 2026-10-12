@@ -3,6 +3,7 @@ import { EMPTY_REPO_SOURCE, RepoSourceInput, repoSourceBody, type RepoSource } f
 import { RepoPicker, initialSelection, selectionCount, type RepoSelection } from "../shared/RepoPicker";
 import { useCreateProject } from "../../hooks/useProjects";
 import { api } from "../../lib/api";
+import { navigate } from "../../lib/router";
 import type { ScanFolderResult } from "../../types/api";
 import { useToast } from "../../lib/toast";
 import { Button } from "../ui/button";
@@ -82,7 +83,8 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
       },
       {
         onSuccess: (project) => {
-          window.location.href = `/projects/${project.id}`;
+          navigate(`/projects/${project.id}/tasks`);
+          onClose();
         },
         onError: (err) => showToast(err.message || "Create failed", "error"),
       },

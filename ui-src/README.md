@@ -1,11 +1,10 @@
 # elstin UI build
 
-`src/` is a TypeScript + React app — five independent entry points
-(`src/entries/projects.tsx`, `settings.tsx`, `project-detail.tsx`,
-`po-start.tsx`, `po-session.tsx`), one per page under `../settings-ui/*.html`. There is no
-client-side router: each entry mounts its own React root into that page's
-`<div id="root">`, matching the routes FastAPI already serves
-(`../elstin/app.py`) — navigation between pages is still a plain page load.
+`src/` is a TypeScript + React app with one entry point
+(`src/entries/app.tsx`) mounted into the one shell, `../settings-ui/app.html`,
+which FastAPI serves for every page URL (`../elstin/app.py`). The app routes
+on the client: `src/components/App.tsx` is the route table and
+`src/lib/router.tsx` the router (history API, no dependency).
 
 ## Components
 
@@ -37,36 +36,38 @@ set, since adding a sibling node would break `Slot`.
 This replaced a private, registry-gated design system, then a hand-rolled
 one (`src/ds/`) built to get off it. **Every dependency is still public**
 — react, react-dom, TanStack Query, Radix UI, Tailwind, lucide-react,
-sonner, esbuild, typescript — which is what lets CI, a fresh clone, and
+sonner, `@yogesharc/thinking-orbs` (the PO agent's working orb, MIT, no
+dependencies of its own), `mermaid` (draws the flow charts in a plan; it is
+several MB, so `MermaidDiagram` imports it on first use and `build.mjs`
+splits it into `vendor/chunks/` rather than into `app.js`), esbuild,
+typescript — which is what lets CI, a fresh clone, and
 the Docker image all build the frontend. Keep it that way: a dependency
 that needs registry credentials, or a build step that fetches from one
 (like the shadcn CLI), takes the whole frontend build offline again.
 
 Theming is one attribute, not shadcn's default `.dark` class. `<html>`
 uses `data-theme="dark"|"light"` (set by `lib/theme.ts`, persisted under
-`elstin-theme`) because that is what the pre-paint inline script in each
-`../settings-ui/*.html` shell already sets from `localStorage` before
-first paint — `globals.css`'s `@custom-variant dark` selector points at
+`elstin-theme`) because that is what the pre-paint inline script in
+`../settings-ui/app.html` sets from `localStorage` before first paint — `globals.css`'s `@custom-variant dark` selector points at
 that attribute instead of the class shadcn scaffolds by default. Keep the
-storage key in sync between `lib/theme.ts` and those shells.
+storage key in sync between `lib/theme.ts` and that shell.
 
 ## Build
 
 ```bash
 cd ui-src
 npm install
-npm run build      # -> ../settings-ui/vendor/app-{projects,settings,project-detail}.js + app.css
+npm run build      # -> ../settings-ui/vendor/app.js + app.css
 npm run typecheck  # tsc --noEmit — not wired into any CI, run it by hand
 ```
 
 No registry configuration, no `~/.npmrc`, no credentials.
 
-`npm run build` bundles all three entry points with esbuild (built-in
-TSX/JSX support, no extra plugin), then runs the Tailwind CLI to compile
+`npm run build` bundles the entry point with esbuild (built-in TSX/JSX
+support, no extra plugin), then runs the Tailwind CLI to compile
 `src/styles/globals.css` into `../settings-ui/vendor/app.css`. The
-stylesheet is compiled standalone rather than imported from an entry so
-the HTML shells can `<link>` it once, instead of shipping three bundled
-copies and deferring first paint until JS parses.
+stylesheet is compiled standalone rather than imported from the entry so
+the shell can `<link>` it and paint before the JS parses.
 
 Rebuild after any change under `src/`. `../settings-ui/vendor/` is
 gitignored; `../Dockerfile`'s `ui-build` stage runs this same build, so

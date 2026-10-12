@@ -9,7 +9,7 @@
 // deliberate property: the design system this UI used to depend on was
 // gated behind a private registry, which meant neither CI nor the Docker
 // image nor a fresh clone could build the frontend at all.
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -19,31 +19,35 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const outDir = path.join(__dirname, "..", "settings-ui", "vendor");
 
 mkdirSync(outDir, { recursive: true });
+// Chunk names carry a content hash, so without this every build would leave
+// the previous build's chunks behind.
+rmSync(path.join(outDir, "chunks"), { recursive: true, force: true });
 
-// One entry per settings-ui/*.html page — see settings-ui/*.html's
-// `<script type="module" src="/settings-ui/vendor/app-*.js">` tags. Each
-// mounts its own React root; there is no client-side router (see AGENTS.md
-// on why this stayed multi-page).
+// One entry: the app (src/components/App.tsx), which routes on the client.
+// settings-ui/app.html loads it with
+// `<script type="module" src="/settings-ui/vendor/app.js">`, and FastAPI
+// serves that one shell for every page URL (elstin/app.py).
+//
+// `splitting` makes each dynamic import() its own file under chunks/, loaded
+// on demand: today that is mermaid (components/shared/MermaidDiagram.tsx),
+// which is far too large to ship to every page that never draws a diagram.
 await esbuild.build({
   entryPoints: {
-    "app-projects": path.join(__dirname, "src", "entries", "projects.tsx"),
-    "app-settings": path.join(__dirname, "src", "entries", "settings.tsx"),
-    "app-project-detail": path.join(__dirname, "src", "entries", "project-detail.tsx"),
-    "app-po-start": path.join(__dirname, "src", "entries", "po-start.tsx"),
-    "app-po-session": path.join(__dirname, "src", "entries", "po-session.tsx"),
+    app: path.join(__dirname, "src", "entries", "app.tsx"),
   },
   outdir: outDir,
   bundle: true,
   format: "esm",
+  splitting: true,
+  chunkNames: "chunks/[name]-[hash]",
   jsx: "automatic",
   minify: true,
   sourcemap: false,
 });
 
-// Compiled rather than imported from an entry: each HTML shell links it
-// once with a <link>, so bundling it into every JS entry would ship
-// a copy per page of the same stylesheet and delay first paint until JS
-// parses. The Tailwind CLI (not a bundler plugin) does the compiling —
+// Compiled rather than imported from the entry: the HTML shell links it with
+// a <link>, so it loads in parallel with the bundle instead of delaying first
+// paint until the JS parses. The Tailwind CLI (not a bundler plugin) does the compiling —
 // esbuild has no CSS-transform story of its own, and this is the one
 // piece of the build shadcn/ui actually needs Tailwind for.
 const tailwind = spawnSync(
