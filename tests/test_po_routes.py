@@ -73,7 +73,7 @@ def test_a_brainstorm_starts_queued_and_the_server_picked_the_mode(project_id):
     body = response.json()
     assert (body["mode"], body["status"], body["epic_key"], body["brief"]) == ("brainstorm", "queued", None, "Plan payment retries")
     assert body["jira_project_key"] == "PAY"  # from the project's ticket filter
-    assert body["draft"] is None and body["problems"] == [] and body["counts"] == {"epics": 1, "stories": 0, "subtasks": 0, "links": 0}
+    assert body["draft"] is None and body["problems"] == [] and body["counts"] == {"epics": 1, "stories": 0, "subtasks": 0, "links": 0, "bugs": 0}
     assert "context" not in body
 
 
@@ -170,7 +170,7 @@ def test_a_session_shows_its_draft_its_problems_and_its_conversation(project_id)
     assert [p["kind"] for p in body["problems"]] == ["no_criteria"]
     assert body["problems"][0]["where"] == "stories[0].acceptance_criteria"
     assert [w["kind"] for w in body["warnings"]] == ["kind_mismatch"]  # elstin would call the second one QA
-    assert body["counts"] == {"epics": 1, "stories": 2, "subtasks": 0, "links": 0}
+    assert body["counts"] == {"epics": 1, "stories": 2, "subtasks": 0, "links": 0, "bugs": 0}
     assert [(m["role"], m["text"]) for m in body["messages"]] == [("person", "Plan retries"), ("agent", "Here")]
     assert _client().get("/api/po-sessions/999999").status_code == 404
 
@@ -582,7 +582,7 @@ def test_each_story_says_whether_it_can_be_published_on_its_own_and_why_not(proj
     _jira_configured()
     session = _publishable(project_id)  # s2 depends on s1
     states = _story_publish(session["id"])
-    assert states["s1"] == {"key": None, "allowed": True, "reason": None, "counts": {"epics": 1, "stories": 1, "subtasks": 0, "links": 0}}
+    assert states["s1"] == {"key": None, "allowed": True, "reason": None, "counts": {"epics": 1, "stories": 1, "subtasks": 0, "links": 0, "bugs": 0}}
     assert states["s2"]["allowed"] is False and "depends on s1, which is not in JIRA yet" in states["s2"]["reason"]
 
     _jira_configured(create=False)
@@ -715,3 +715,72 @@ def test_suggestions_belong_to_gap_analysis_and_a_settled_session(project_id):
     queued = _client().post(f"/api/po-sessions/{brainstorm['id']}/suggestions/post", json={"key": "PAY-2"})
     assert queued.status_code == 409 and "queued" in queued.json()["detail"]
     assert _client().post("/api/po-sessions/999999/suggestions/post", json={"key": "x"}).status_code == 404
+
+
+# -- bug mode -----------------------------------------------------------------------------------------------------
+
+
+def _bug_draft(**overrides):
+    draft = {
+        "mode": "bug",
+        "bug": {
+            "summary": "Report shows the list price", "observed": "List price shown.", "expected": "Sale price shown.",
+            "steps_to_reproduce": [], "root_cause": "It reads `list_price`.", "confidence": "low", "cause_in": "code",
+            "fix_location": "report.py", "to_confirm": [], "acceptance_criteria": ["The report shows the sale price"],
+            "labels": [], "evidence": [],
+        },
+        "assumptions": [], "out_of_scope": [],
+    }
+    draft.update(overrides)
+    return draft
+
+
+def test_a_bug_is_asked_for_and_never_picked_from_the_epic(project_id, monkeypatch):
+    StateManager().set_project_ticket_filter(project_id, enabled=False, jira_project_key="pay")
+    response = _client().post(f"/api/projects/{project_id}/po-sessions", json={"brief": "Price is inflated", "mode": "bug"})
+    assert response.status_code == 201
+    assert (response.json()["mode"], response.json()["epic_key"], response.json()["jira_project_key"]) == ("bug", None, "PAY")
+
+    # An epic is where the bug is filed: its stories do not make it a gap analysis.
+    tree = [_ticket("PAY-1", "Epic", "Pricing"), _ticket("PAY-2", summary="Backoff")]
+    monkeypatch.setattr(po_routes, "inspect_epic", lambda pid, raw: ("PAY-1", "gap", tree, "jira"))
+    body = _client().post(
+        f"/api/projects/{project_id}/po-sessions", json={"brief": "Price is inflated", "mode": "bug", "epic_key": "PAY-1"},
+    ).json()
+    assert (body["mode"], body["epic_key"], body["epic_summary"]) == ("bug", "PAY-1", "Pricing")
+
+
+def test_only_bug_can_be_asked_for_and_a_bug_needs_a_description(project_id):
+    client = _client()
+    assert client.post(f"/api/projects/{project_id}/po-sessions", json={"brief": "x", "mode": "gap"}).status_code == 422
+    response = client.post(f"/api/projects/{project_id}/po-sessions", json={"brief": "  ", "mode": "bug"})
+    assert response.status_code == 422 and "Describe the bug" in response.json()["detail"]
+
+
+def test_a_bug_session_is_listed_by_its_summary_and_can_be_edited_and_published(project_id):
+    _jira_configured()
+    session = _publishable(project_id, mode="bug", draft=_bug_draft())
+    client = _client()
+    [row] = client.get(f"/api/projects/{project_id}/po-sessions").json()
+    assert row["title"] == "Report shows the list price"
+
+    view = client.get(f"/api/po-sessions/{session['id']}").json()
+    assert view["problems"] == [] and view["counts"]["bugs"] == 1
+    assert view["publish"] == {"allowed": True, "reason": None, "jira_project_key": "PAY", "comments_allowed": False}
+
+    edited = _bug_draft()
+    edited["bug"]["root_cause"] = "It reads `list_price` when no sale is recorded."
+    saved = client.put(f"/api/po-sessions/{session['id']}/draft", json={"draft": edited, "version": view["draft_version"]})
+    assert saved.status_code == 200 and saved.json()["person_edits"] == ["bug.root_cause"]
+
+    # A bug's shape is held to its own schema, and its own checks.
+    stub = _bug_draft()
+    stub["bug"]["acceptance_criteria"] = []
+    saved = client.put(f"/api/po-sessions/{session['id']}/draft", json={"draft": stub, "version": saved.json()["draft_version"]})
+    assert saved.status_code == 200 and saved.json()["publish"]["allowed"] is False
+    assert "acceptance criteria" in saved.json()["publish"]["reason"]
+    bad = client.put(f"/api/po-sessions/{session['id']}/draft", json={"draft": _stored_draft(), "version": saved.json()["draft_version"]})
+    assert bad.status_code == 422
+
+    markdown = client.get(f"/api/po-sessions/{session['id']}/export").text
+    assert markdown.startswith("# Report shows the list price")

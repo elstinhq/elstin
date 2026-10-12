@@ -1,15 +1,26 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft } from "lucide-react";
 import { useProject } from "../../../hooks/useProjects";
 import { usePoModePreview, useStartPoSession } from "../../../hooks/usePoSessions";
 import { useToast } from "../../../lib/toast";
 import type { PoMode } from "../../../types/api";
-import { AppShell } from "../../shared/AppShell";
+import { Link, navigate, useLocation, withSearch } from "../../../lib/router";
+import { cn } from "../../../lib/utils";
+import { Page } from "../../shell/Page";
 import { Alert, AlertDescription } from "../../ui/alert";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
 import { Label } from "../../ui/label";
 import { Textarea } from "../../ui/textarea";
+
+// What the session is for: a backlog (the mode then follows from the epic) or one bug.
+// Which one is the person's call — nothing about a brief says it reports a fault — and
+// it is kept in the address (?kind=bug) so "Report a bug" can link straight here.
+type Kind = "backlog" | "bug";
+
+const KINDS: { kind: Kind; label: string; note: string }[] = [
+  { kind: "backlog", label: "Backlog", note: "Epics, stories and tasks" },
+  { kind: "bug", label: "Bug", note: "One ticket, its cause traced in the code" },
+];
 
 // What the agent will do, in words, for the mode elstin picked. The mode is
 // chosen by the server from what the epic already has — never by the model, and
@@ -35,60 +46,85 @@ function useDebounced(value: string, ms: number): string {
   return debounced;
 }
 
-// Starting a PO session, on its own page (/projects/<id>/po/new). It ends on the
-// new session's page, where the draft and its chat are worked.
+// Starting a PO session (/projects/<id>/backlog/new, ?kind=bug for a bug). It ends on
+// the new session's page, where the draft and its chat are worked.
 export function PoStartPage({ projectId }: { projectId: number }) {
   const projectQuery = useProject(projectId);
   const [epicKey, setEpicKey] = useState("");
   const [jiraProject, setJiraProject] = useState("");
   const [brief, setBrief] = useState("");
   const [leaving, setLeaving] = useState(false);
+  const kind: Kind = useLocation().search.get("kind") === "bug" ? "bug" : "backlog";
+  const bug = kind === "bug";
   const start = useStartPoSession(projectId);
   const { showToast } = useToast();
 
   const projectHref = `/projects/${projectId}`;
+  const backlogHref = `${projectHref}/backlog`;
   const typedKey = useDebounced(epicKey.trim(), 500);
-  const preview = usePoModePreview(projectId, typedKey);
+  // A bug's epic is only where it is filed, so there is no mode to preview for it.
+  const preview = usePoModePreview(projectId, bug ? "" : typedKey);
   const waiting = epicKey.trim() !== typedKey;
 
   function submit() {
     if (!brief.trim()) {
-      showToast("Write a brief — what is this backlog for?", "error");
+      showToast(bug ? "Describe the bug — what goes wrong, and where?" : "Write a brief — what is this backlog for?", "error");
       return;
     }
     start.mutate(
-      { brief: brief.trim(), epic_key: epicKey.trim() || null, jira_project_key: jiraProject.trim() || null },
+      {
+        brief: brief.trim(),
+        epic_key: epicKey.trim() || null,
+        jira_project_key: jiraProject.trim() || null,
+        mode: bug ? "bug" : null,
+      },
       {
         onSuccess: (session) => {
-          // Keep the button busy through the page load, so a second click cannot start a second session.
+          // Keep the button busy until the session's page replaces this one, so a
+          // second click cannot start a second session.
           setLeaving(true);
-          window.location.assign(`${projectHref}/po/${session.id}`);
+          navigate(`${backlogHref}/${session.id}`);
         },
         onError: (err) => showToast(err.message || "Could not start the session", "error"),
       },
     );
   }
 
-  if (projectQuery.isSuccess && !projectQuery.data) {
-    return (
-      <AppShell rightLinkHref="/settings" rightLinkLabel="Global settings">
-        <h1 className="text-xl font-semibold">Project not found</h1>
-      </AppShell>
-    );
-  }
-
   return (
-    <AppShell rightLinkHref="/settings" rightLinkLabel="Global settings">
+    <Page
+      crumbs={[
+        { label: projectQuery.data?.name ?? "Project", href: `${projectHref}/tasks` },
+        { label: "Backlog drafts", href: backlogHref },
+        { label: bug ? "Report a bug" : "Plan backlog" },
+      ]}
+    >
       <div className="mx-auto flex max-w-2xl flex-col gap-6">
-        <div className="flex flex-col gap-3">
-          <a href={projectHref} className="text-muted-foreground hover:text-foreground inline-flex w-fit items-center gap-1 text-sm">
-            <ArrowLeft className="size-4" />
-            {projectQuery.data?.name ?? "Project"}
-          </a>
-          <h1 className="text-xl font-semibold">Plan backlog</h1>
+        <div className="flex flex-col gap-2">
+          <h1 className="text-xl font-semibold tracking-tight">{bug ? "Report a bug" : "Plan backlog"}</h1>
           <p className="text-muted-foreground text-sm">
-            The PO agent researches the code, Confluence and JIRA and drafts epics, stories and tasks. You edit the draft, talk it over with the agent, and publish it when it is right.
+            {bug
+              ? "The agent follows the report through the code to where it goes wrong, and drafts one Bug ticket: what happens, why, how sure it is, where the fix lies and what would confirm it. You edit it, talk it over, and publish it when it is right."
+              : "The PO agent researches the code, Confluence and JIRA and drafts epics, stories and tasks. You edit the draft, talk it over with the agent, and publish it when it is right."}
           </p>
+        </div>
+
+        <div role="radiogroup" aria-label="What to draft" className="bg-muted grid grid-cols-2 gap-1 rounded-lg p-1">
+          {KINDS.map((option) => (
+            <button
+              key={option.kind}
+              type="button"
+              role="radio"
+              aria-checked={kind === option.kind}
+              className={cn(
+                "flex flex-col items-start rounded-md px-3 py-2 text-left transition-colors",
+                kind === option.kind ? "bg-background shadow-xs" : "text-muted-foreground hover:text-foreground",
+              )}
+              onClick={() => navigate(withSearch({ kind: option.kind === "bug" ? "bug" : null }), { replace: true })}
+            >
+              <span className="text-sm font-medium">{option.label}</span>
+              <span className="text-xs">{option.note}</span>
+            </button>
+          ))}
         </div>
 
         <form
@@ -99,22 +135,34 @@ export function PoStartPage({ projectId }: { projectId: number }) {
           }}
         >
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="po-epic-key">Epic (optional)</Label>
+            <Label htmlFor="po-epic-key">{bug ? "File it under an epic (optional)" : "Epic (optional)"}</Label>
             <Input
               id="po-epic-key"
-              placeholder="PROJ-123 — leave blank to draft a new epic"
+              placeholder={bug ? "PROJ-123 — leave blank for a bug on its own" : "PROJ-123 — leave blank to draft a new epic"}
               value={epicKey}
               onChange={(e) => setEpicKey(e.target.value)}
             />
-            <ModeNote epicKey={epicKey.trim()} waiting={waiting} preview={preview} />
+            {bug ? (
+              <p className="text-muted-foreground text-xs">
+                {epicKey.trim()
+                  ? `The bug is created under ${epicKey.trim()}, and its stories are read for context.`
+                  : "The bug becomes a ticket of its own, which Elstin can pick up and fix once you resume it."}
+              </p>
+            ) : (
+              <ModeNote epicKey={epicKey.trim()} waiting={waiting} preview={preview} />
+            )}
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="po-brief">Brief</Label>
+            <Label htmlFor="po-brief">{bug ? "What goes wrong" : "Brief"}</Label>
             <Textarea
               id="po-brief"
               className="min-h-48"
-              placeholder="What should be built, for whom, and why? Link any Confluence pages that matter."
+              placeholder={
+                bug
+                  ? "What happens, where (screen, report, endpoint), and what should happen instead. Paste the report, with an example if there is one."
+                  : "What should be built, for whom, and why? Link any Confluence pages that matter."
+              }
               value={brief}
               onChange={(e) => setBrief(e.target.value)}
             />
@@ -122,7 +170,7 @@ export function PoStartPage({ projectId }: { projectId: number }) {
 
           {!epicKey.trim() ? (
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="po-jira-project">JIRA project for the new epic (optional)</Label>
+              <Label htmlFor="po-jira-project">{bug ? "JIRA project for the bug (optional)" : "JIRA project for the new epic (optional)"}</Label>
               <Input
                 id="po-jira-project"
                 placeholder="PROJ — defaults to the project's ticket filter"
@@ -135,15 +183,15 @@ export function PoStartPage({ projectId }: { projectId: number }) {
 
           <div className="flex justify-end gap-2">
             <Button type="button" variant="outline" asChild>
-              <a href={projectHref}>Cancel</a>
+              <Link href={backlogHref}>Cancel</Link>
             </Button>
             <Button type="submit" loading={start.isPending || leaving}>
-              Start drafting
+              {bug ? "Start investigating" : "Start drafting"}
             </Button>
           </div>
         </form>
       </div>
-    </AppShell>
+    </Page>
   );
 }
 

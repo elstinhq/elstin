@@ -24,7 +24,7 @@ from elstin.db.models import ActivityEvent, PoMessage, PoSession, StoryRunOutcom
 # statuses, its modes, its run id) through here, because only state/ may import
 # elstin.db.models (AGENTS.md hard constraint #1).
 from elstin.db.models.po_session import (  # noqa: F401
-    PO_AWAITING_INPUT, PO_DISCARDED, PO_FAILED, PO_MODE_BRAINSTORM, PO_MODE_GAP, PO_MODE_SPLIT, PO_MODES, PO_PUBLISHED,
+    PO_AWAITING_INPUT, PO_DISCARDED, PO_FAILED, PO_MODE_BRAINSTORM, PO_MODE_BUG, PO_MODE_GAP, PO_MODE_SPLIT, PO_MODES, PO_PUBLISHED,
     PO_PUBLISHING, PO_QUEUED, PO_READY, PO_RUNNING, PO_STATUSES, ROLE_AGENT, ROLE_PERSON, po_run_id,
 )
 
@@ -40,9 +40,12 @@ def _now() -> datetime:
 
 def every_ticket_created(draft: Any, mode: str, created: dict[str, str]) -> bool:
     """Whether everything the draft proposes is in JIRA by now: every story, and
-    the epic of a brainstorm. `created` is the checkpoint's {ref -> key}."""
+    the epic of a brainstorm — or a bug draft's one ticket. `created` is the
+    checkpoint's {ref -> key}."""
     if not isinstance(draft, dict):
         return False
+    if mode == PO_MODE_BUG:
+        return "bug" in created
     if mode == PO_MODE_BRAINSTORM and "epic" not in created:
         return False
     refs = [s.get("ref") for s in draft.get("stories") or [] if isinstance(s, dict)]

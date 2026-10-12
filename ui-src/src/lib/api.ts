@@ -5,7 +5,7 @@ import type {
   Epic,
   EpicUsage,
   ExternalChangeAction,
-  PoDraft,
+  PoAnyDraft,
   PoModePreview,
   PoSession,
   PoSessionSummary,
@@ -15,6 +15,7 @@ import type {
   LessonStatus,
   DeleteProjectReport,
   FolderListing,
+  Inbox,
   ScanFolderResult,
   RemoveTicketReport,
   RepoGuide,
@@ -121,6 +122,8 @@ export const api = {
   // -- lessons elstin proposed from its runs -------------------------------
   // Only "accepted" ones are shown to the planner and dev. `text` is a
   // person's edit before accepting; both fields are optional but not both absent.
+  inbox: () => request<Inbox>("/api/inbox"),
+  projectInbox: (projectId: number) => request<Inbox>(`/api/projects/${projectId}/inbox`),
   listLessons: (projectId: number) => request<ProjectLesson[]>(`/api/projects/${projectId}/lessons`),
   updateLesson: (projectId: number, lessonId: number, body: { text?: string; status?: LessonStatus }) =>
     request<ProjectLesson>(`/api/projects/${projectId}/lessons/${lessonId}`, put(body)),
@@ -225,12 +228,13 @@ export const api = {
   // source; nothing is started.
   previewPoMode: (projectId: number, epicKey: string) =>
     request<PoModePreview>(`/api/projects/${projectId}/po-mode?epic_key=${encodeURIComponent(epicKey)}`),
-  startPoSession: (projectId: number, body: { brief: string; epic_key?: string | null; jira_project_key?: string | null }) =>
+  // `mode: "bug"` asks for one Bug ticket; left out, the server picks the mode from the epic.
+  startPoSession: (projectId: number, body: { brief: string; epic_key?: string | null; jira_project_key?: string | null; mode?: "bug" | null }) =>
     request<PoSession>(`/api/projects/${projectId}/po-sessions`, json(body)),
   listPoSessions: (projectId: number) => request<PoSessionSummary[]>(`/api/projects/${projectId}/po-sessions`),
   getPoSession: (sessionId: number) => request<PoSession>(`/api/po-sessions/${sessionId}`),
   // `version` is the draft version the edit was made over; the server refuses (409) one made over a stale draft.
-  savePoDraft: (sessionId: number, draft: PoDraft, version: number) =>
+  savePoDraft: (sessionId: number, draft: PoAnyDraft, version: number) =>
     request<PoSession>(`/api/po-sessions/${sessionId}/draft`, put({ draft, version })),
   sendPoMessage: (sessionId: number, message: string) =>
     request<PoSession & { delivery: "live" | "queued" }>(`/api/po-sessions/${sessionId}/messages`, json({ message })),

@@ -439,3 +439,57 @@ def test_a_suggestion_needs_a_ticket_with_one_and_the_comment_switch(project, so
     with pytest.raises(PublishError, match="po_jira_comment_enabled"):
         post_suggestion(sm, session, "PAY-2")
     assert sm.get_po_session(session["id"])["publish_result"] is None  # nothing recorded for a post that did not happen
+
+
+# -- bug mode -----------------------------------------------------------------------------------------------
+
+
+def _bug_draft(**bug_overrides):
+    bug = {
+        "summary": "Report shows the list price", "observed": "List price shown.", "expected": "Sale price shown.",
+        "steps_to_reproduce": [], "root_cause": "It reads `list_price`.", "confidence": "high", "cause_in": "code",
+        "fix_location": "report.py", "to_confirm": [], "acceptance_criteria": ["The report shows the sale price"],
+        "labels": ["pricing"], "evidence": [],
+    }
+    bug.update(bug_overrides)
+    return {"mode": "bug", "bug": bug, "assumptions": [], "out_of_scope": []}
+
+
+def test_a_bug_with_no_epic_is_one_bug_ticket_brought_onto_the_board_as_its_own_work(project, source):
+    sm = StateManager()
+    session = _session(sm, project, _bug_draft())
+
+    def sync(key, *, project_id):
+        # A lone ticket with no children is its own sole work unit (epic_sync), paused like any new one.
+        sm.create_epic(key, project_id=project_id, levels=[[key]])
+        sm.create_story(key, epic_key=key, wave=0, summary="s", kind="dev", kind_reason="x")
+
+    result, _ = _publish(sm, session["id"], source, sync=sync)
+    [bug] = source.created
+    assert (bug["type"], bug["summary"], bug["parent"]) == ("Bug", "Report shows the list price", None)
+    assert bug["labels"] == ["pricing", marker_label(session["id"], "bug")]
+    assert bug["description"].startswith("## Observed\nList price shown.") and "## Acceptance Criteria" in bug["description"]
+    assert result["created"] == {"bug": bug["key"]} and result["epic_key"] == bug["key"]
+    assert result["synced"] is True and result["synced_stories"] == 1
+    assert sm.get_epic(bug["key"])["manual_gate"] is True
+    finished = sm.finish_po_publish(session["id"])
+    assert finished["status"] == "published"
+
+
+def test_a_bug_under_an_epic_is_filed_there_and_the_epic_is_synced(project, source):
+    sm = StateManager()
+    session = _session(sm, project, _bug_draft(), epic_key="PAY-1")
+    result, synced = _publish(sm, session["id"], source)
+    [bug] = source.created
+    assert bug["type"] == "Bug" and bug["parent"] == "PAY-1"
+    assert result["epic_key"] == "PAY-1" and set(synced) == {("PAY-1", project)}
+
+
+def test_a_bug_is_published_whole_and_never_twice(project, source):
+    sm = StateManager()
+    session = _session(sm, project, _bug_draft())
+    with pytest.raises(PublishError, match="published whole"):
+        _publish(sm, session["id"], source, refs=["bug"])
+    _publish(sm, session["id"], source)
+    _publish(sm, session["id"], source)
+    assert len(source.created) == 1

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useCancelStory } from "../../hooks/useStories";
 import { useToast } from "../../lib/toast";
 import { Button } from "../ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
+import { ConfirmDialog } from "../ui/confirm-dialog";
 
 // Stops a story's run in flight. There used to be no way to: Pause only
 // stops the next dispatch, so the only way to end a run that had gone wrong was
@@ -29,9 +29,9 @@ export function CancelRunButton({ projectId, storyKey, label }: { projectId: num
   return (
     <>
       <Button
-        variant="outline"
+        variant="link"
         size="sm"
-        className="shrink-0"
+        className="text-foreground h-auto shrink-0 px-0 underline"
         title="Stop this run now"
         onClick={(e) => {
           e.stopPropagation();
@@ -40,26 +40,20 @@ export function CancelRunButton({ projectId, storyKey, label }: { projectId: num
       >
         Cancel run
       </Button>
-      <Dialog open={open} onOpenChange={(next) => !cancelStory.isPending && setOpen(next)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Cancel the run for {label}?</DialogTitle>
-            <DialogDescription>The agents stop now and the story is marked failed (cancelled).</DialogDescription>
-          </DialogHeader>
-          <p className="text-muted-foreground text-sm">
-            Work in its worktree is kept until you retry, and Retry starts over from planning. Model calls already made are still billed. Once
-            it is cancelled you can also remove the ticket.
-          </p>
-          <DialogFooter>
-            <Button variant="outline" disabled={cancelStory.isPending} onClick={() => setOpen(false)}>
-              Keep running
-            </Button>
-            <Button variant="destructive" loading={cancelStory.isPending} onClick={handleCancel}>
-              Cancel run
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        open={open}
+        onOpenChange={setOpen}
+        title={`Cancel the run for ${label}?`}
+        description="The agents stop now and the story is marked failed (cancelled)."
+        confirmLabel="Cancel run"
+        onConfirm={handleCancel}
+        pending={cancelStory.isPending}
+      >
+        <p className="text-muted-foreground">
+          Work in its worktree is kept until you retry, and Retry starts over from planning. Model calls already made are still billed. Once
+          it is cancelled you can also remove the ticket.
+        </p>
+      </ConfirmDialog>
     </>
   );
 }

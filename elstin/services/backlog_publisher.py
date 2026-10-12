@@ -19,6 +19,12 @@ transitions to creating tickets.
    it) and nothing starts without a person resuming it; an epic already on the
    board gains the new stories under its own gate.
 
+**A bug draft** (bug mode) is one ticket: a `Bug`, under the session's epic when
+a person named one, else on its own. It goes onto the board the same way — the
+epic it is under is synced (gaining the bug), or, with no epic, the bug itself,
+which `sync_epic_from_jira` makes its own sole work unit, paused like any new
+ticket. It is published whole; `refs` does not apply.
+
 **One story at a time, or all.** `refs` narrows a publish to some of the draft's
 stories (a person's Publish button on one story): the same steps, for those
 stories only. A brainstorm's epic is made first, by whichever publish comes first,
@@ -52,11 +58,11 @@ from collections.abc import Callable
 from typing import Any
 
 from elstin.services.epic_sync import levels_from_dependencies, sync_epic_from_jira
-from elstin.services.po_sessions import PO_COMMENT_GUARD, PO_CREATE_GUARD, epic_markdown, story_markdown
+from elstin.services.po_sessions import PO_COMMENT_GUARD, PO_CREATE_GUARD, bug_markdown, epic_markdown, story_markdown
 from elstin.services.run_activity import append_activity
 from elstin.services.ticket_source import TicketWriteDisabled, TicketWriteError, get_ticket_source
 from elstin.state.manager import StateManager
-from elstin.state.manager_po import PO_MODE_BRAINSTORM, po_run_id
+from elstin.state.manager_po import PO_MODE_BRAINSTORM, PO_MODE_BUG, po_run_id
 
 logger = logging.getLogger("elstin.backlog_publisher")
 
@@ -162,6 +168,21 @@ def publish_backlog(
         detail=f"project {project_key}" + (f"; {len(created)} ticket(s) already created" if created else ""),
     )
     mode = session["mode"]
+    if mode == PO_MODE_BUG:
+        if refs is not None:
+            raise PublishError("A bug draft is one ticket and is published whole.")
+        bug = draft.get("bug") or {}
+        parent = session.get("epic_key") or None
+        bug_key = ensure(
+            "bug", "Bug", bug.get("summary") or "", bug_markdown(bug), parent,
+            _qa_labelled(bug.get("labels") or [], "dev"), f"Creating the bug {str(bug.get('summary') or '')[:50]!r}",
+        )
+        # With no epic the bug is its own root on the board (its board epic row has its key).
+        sm.record_po_publish(session_id, epic_key=parent or bug_key)
+        _sync_to_board(sm, session_id, project_id, parent or bug_key, [bug_key], sync, settle_seconds)
+        final = sm.get_po_session(session_id) or {}
+        return final.get("publish_result") or {}
+
     epic = draft.get("epic") or {}
     stories = [s for s in draft.get("stories") or [] if isinstance(s, dict)]
     if refs is not None:

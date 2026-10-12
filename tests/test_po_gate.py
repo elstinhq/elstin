@@ -449,3 +449,122 @@ def test_the_gate_leaves_the_callers_draft_alone(workspace):
     before = copy.deepcopy(draft)
     check_draft(draft, _ctx(), PoResearch(), workspace)
     assert draft == before
+
+
+# -- bug mode --------------------------------------------------------------------------------
+
+
+def _bug(**overrides):
+    bug = {
+        "summary": "Report shows the list price, not the sale price", "observed": "List price shown.",
+        "expected": "Sale price shown.", "steps_to_reproduce": ["Sell a unit below list"],
+        "root_cause": "The report reads the list price.", "confidence": "high", "cause_in": "code",
+        "fix_location": "src/retry.py — read the sale price.", "to_confirm": [],
+        "acceptance_criteria": ["The report shows the sale price; a test covers a unit sold below list"],
+        "labels": [], "evidence": [{"source": "code", "ref": "src/retry.py:3", "quote": "return attempts(payment, 3)"}],
+    }
+    bug.update(overrides)
+    return bug
+
+
+def _bug_draft(**overrides):
+    draft = {"mode": "bug", "bug": _bug(), "assumptions": [], "out_of_scope": [], "questions": [], "reply": "Found it"}
+    draft.update(overrides)
+    return draft
+
+
+def test_the_bug_schema_satisfies_strict_structured_output_rules():
+    from elstin.agents.roles.product_owner import BUG_DRAFT_SCHEMA, draft_schema
+
+    def check(node, path="root"):
+        if not isinstance(node, dict):
+            return
+        if node.get("type") == "object":
+            assert node.get("additionalProperties") is False, f"{path}: additionalProperties must be false"
+            assert set(node["properties"]) == set(node["required"]), f"{path}: required != properties"
+            for key, value in node["properties"].items():
+                check(value, f"{path}.{key}")
+        elif node.get("type") == "array":
+            check(node.get("items", {}), f"{path}[]")
+
+    check(BUG_DRAFT_SCHEMA)
+    assert draft_schema("bug") is BUG_DRAFT_SCHEMA and draft_schema("gap") is PO_DRAFT_SCHEMA
+
+
+def test_a_bug_draft_is_judged_as_a_bug_not_as_a_backlog():
+    """No epic, no stories — and neither is asked for."""
+    assert check_draft_integrity(_bug_draft(), mode="bug") == []
+    assert check_structure(_bug_draft(), _ctx("bug", epic_key=None)) == []
+
+
+def test_a_bug_draft_must_be_one_and_in_the_sessions_mode():
+    assert _kinds(check_draft_integrity(_bug_draft(bug="a string"), mode="bug")) == {KIND_MALFORMED_OUTPUT}
+    assert KIND_MALFORMED_OUTPUT in _kinds(check_draft_integrity(_bug_draft(bug=_bug(evidence="[]")), mode="bug"))
+    assert _kinds(check_draft_integrity(_draft("split"), mode="bug")) == {KIND_MALFORMED_OUTPUT, KIND_WRONG_MODE}
+
+
+def test_a_bug_needs_what_goes_wrong_why_where_and_criteria():
+    from elstin.agents.roles.po_gate import KIND_STUB_DRAFT, KIND_STUB_FIELD
+
+    draft = _bug_draft(bug=_bug(summary="", observed=" ", root_cause="TODO", fix_location="", acceptance_criteria=[], confidence="sure"))
+    defects = check_structure(draft, _ctx("bug"))
+    where = {d["where"] for d in blocking(defects)}
+    assert {"bug.summary", "bug.observed", "bug.root_cause", "bug.fix_location", "bug.acceptance_criteria", "bug.confidence"} <= where
+    assert {KIND_STUB_DRAFT, KIND_STUB_FIELD, KIND_NO_CRITERIA} <= _kinds(defects)
+
+
+def test_a_confident_cause_in_the_code_must_cite_the_code():
+    from elstin.agents.roles.po_gate import KIND_UNSUPPORTED_CAUSE
+
+    jira_only = [{"source": "jira", "ref": "PAY-9", "quote": "price is wrong"}]
+    for confidence in ("high", "medium"):
+        defects = check_structure(_bug_draft(bug=_bug(confidence=confidence, evidence=jira_only)), _ctx("bug"))
+        assert KIND_UNSUPPORTED_CAUSE in _kinds(defects, only_blocking=True)
+    # A low-confidence cause is a pointer, not a claim; a cause outside the code has no code to cite.
+    assert check_structure(_bug_draft(bug=_bug(confidence="low", evidence=[])), _ctx("bug")) == []
+    assert blocking(check_structure(_bug_draft(bug=_bug(cause_in="data", evidence=[])), _ctx("bug"))) == []
+
+
+def test_a_cause_outside_the_code_is_a_warning_since_elstin_can_only_change_code():
+    from elstin.agents.roles.po_gate import KIND_CAUSE_NOT_IN_CODE
+
+    for place in ("data", "configuration"):
+        defects = check_structure(_bug_draft(bug=_bug(cause_in=place)), _ctx("bug"))
+        assert _kinds(defects) == {KIND_CAUSE_NOT_IN_CODE} and blocking(defects) == []
+    assert check_structure(_bug_draft(bug=_bug(cause_in="unknown", confidence="low")), _ctx("bug")) == []
+
+
+def test_a_bugs_evidence_is_verified_like_a_storys(workspace):
+    bad = {"source": "code", "ref": "src/retry.py", "quote": "return the sale price"}
+    annotated, defects = verify_evidence(_bug_draft(bug=_bug(evidence=[_bug()["evidence"][0], bad])), PoResearch(), workspace)
+    assert [e["verified"] for e in annotated["bug"]["evidence"]] == [True, False]
+    assert [(d["kind"], d["where"]) for d in defects] == [(KIND_EVIDENCE_QUOTE, "bug.evidence[1]")]
+    assert defects[0]["reason"].startswith("the bug: evidence src/retry.py")
+
+
+def test_a_bug_draft_passes_the_whole_gate(workspace):
+    annotated, defects = check_draft(_bug_draft(), _ctx("bug"), PoResearch(), workspace)
+    assert defects == [] and annotated["bug"]["evidence"][0]["verified"] is True
+
+
+def test_an_edited_bug_keeps_the_marks_on_evidence_it_did_not_touch():
+    old = _bug_draft(bug=_bug(evidence=[{**_bug()["evidence"][0], "verified": True}]))
+    new = copy.deepcopy(_bug_draft())
+    new["bug"]["evidence"].append({"source": "code", "ref": "src/x.py", "quote": "new", "verified": True})
+    merged = carry_verification(new, old)
+    assert merged["bug"]["evidence"][0]["verified"] is True and "verified" not in merged["bug"]["evidence"][1]
+
+
+def test_a_bug_labelled_as_qa_would_be_reviewed_not_fixed_and_says_so():
+    assert kind_warnings(_bug_draft()) == []
+    warnings = kind_warnings(_bug_draft(bug=_bug(labels=["qa"])))
+    assert _kinds(warnings) == {KIND_KIND_MISMATCH} and warnings[0]["where"] == "bug.labels"
+
+
+def test_the_feedback_for_an_unsupported_cause_says_what_to_do():
+    from elstin.agents.roles.po_gate import KIND_UNSUPPORTED_CAUSE
+
+    defects = check_structure(_bug_draft(bug=_bug(evidence=[])), _ctx("bug"))
+    text = format_po_feedback(defects, attempt=1, max_attempts=3)
+    assert "without the code that shows it" in text and "quote the lines" in text
+    assert _kinds(defects) == {KIND_UNSUPPORTED_CAUSE}

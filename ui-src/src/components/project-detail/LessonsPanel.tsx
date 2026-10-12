@@ -6,7 +6,6 @@ import { useProjectConfig } from "../../hooks/useProjectConfig";
 import { useToast } from "../../lib/toast";
 import type { LessonStatus, ProjectLesson } from "../../types/api";
 import { Button } from "../ui/button";
-import { Card } from "../ui/card";
 import { Textarea } from "../ui/textarea";
 
 // Mirrors elstin/services/lessons.py's MAX_LESSON_CHARS; the API enforces it.
@@ -55,7 +54,7 @@ function LessonRow({ projectId, lesson }: { projectId: number; lesson: ProjectLe
   }
 
   return (
-    <div className="border-border flex flex-col gap-1.5 rounded-md border p-2.5">
+    <div className="bg-card border-border flex flex-col gap-2 rounded-lg border p-4 shadow-xs">
       {editing ? (
         <div className="flex flex-col gap-1.5">
           <Textarea value={draft} onChange={(e) => setDraft(e.target.value)} className="min-h-20 text-sm" aria-label="Lesson text" />
@@ -188,17 +187,14 @@ export function LessonsPanel({ projectId }: { projectId: number }) {
   const captureOn = captureField ? String(captureField.value).toLowerCase() === "true" : false;
 
   return (
-    <Card className="p-4">
-      <div className="flex flex-col gap-3">
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-sm font-medium">Lessons</span>
-          {proposed.length ? <Tag label={`${proposed.length} to review`} appearance="warning" /> : null}
-        </div>
-        <p className="text-muted-foreground text-xs">
+    <section className="flex flex-col gap-6">
+      <div className="flex flex-col gap-1">
+        <p className="text-muted-foreground max-w-3xl text-sm">
           What Elstin learned from stories that needed retries. Accept a lesson and the planner and dev read it as
           authoritative on later stories — fix anything wrong first. The repo itself is never changed.
         </p>
-
+      </div>
+      <div className="flex flex-col gap-3">
         {lessonsQuery.isError ? (
           <p className="text-destructive text-sm">Could not load lessons.</p>
         ) : lessons.length === 0 ? (
@@ -222,6 +218,6 @@ export function LessonsPanel({ projectId }: { projectId: number }) {
           </div>
         )}
       </div>
-    </Card>
+    </section>
   );
 }

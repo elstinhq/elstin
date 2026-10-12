@@ -19,6 +19,15 @@ elstin/services/po_sessions.py), and this module only words it:
 - gap — an epic with stories: assess each, find what nothing covers, propose
   only what is new, never rewrite an existing ticket.
 
+**Bug mode is the one a person picks** (the start page's "Bug"): a reported
+fault is not a backlog, and drafting an epic for it — what a brainstorm does
+with any brief — files one bug as a feature. In it the agent is a debugger, not
+a product owner: it follows the report through the code to where the behaviour
+goes wrong and drafts ONE Bug ticket (`BUG_DRAFT_SCHEMA`) — observed and
+expected, the cause with how sure it is and where it lies, checks a person can
+make outside the code to confirm it, and acceptance criteria. Same session, same
+tools, same evidence gate; its own prompt, schema and explorer wording.
+
 **Whose acceptance criteria these become.** Each story the draft produces is
 planned and built later by elstin's own agents, which read its acceptance
 criteria as the bar a reviewer holds the diff to. That reviewer can see the
@@ -149,6 +158,49 @@ PO_DRAFT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+_BUG_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "observed": {"type": "string", "description": "What goes wrong, as reported and as the code explains it"},
+        "expected": {"type": "string"},
+        "steps_to_reproduce": _STRINGS,
+        "root_cause": {"type": "string", "description": "Why it happens, traced through the code; markdown"},
+        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+        "cause_in": {"type": "string", "enum": ["code", "data", "configuration", "unknown"]},
+        "fix_location": {"type": "string", "description": "Where the fix most likely lies and what must change there — not a plan"},
+        "to_confirm": {**_STRINGS, "description": "Checks a person can make outside the code (a query, a log, a record) that would confirm or refute the cause"},
+        "acceptance_criteria": _STRINGS,
+        "labels": _STRINGS,
+        "evidence": {"type": "array", "items": _EVIDENCE_SCHEMA},
+    },
+    "required": [
+        "summary", "observed", "expected", "steps_to_reproduce", "root_cause", "confidence", "cause_in",
+        "fix_location", "to_confirm", "acceptance_criteria", "labels", "evidence",
+    ],
+    "additionalProperties": False,
+}
+
+BUG_DRAFT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "mode": {"type": "string", "enum": ["bug"]},
+        "bug": _BUG_SCHEMA,
+        "assumptions": _STRINGS,
+        "out_of_scope": _STRINGS,
+        "questions": {"type": "array", "items": _QUESTION_SCHEMA},
+        "reply": {"type": "string"},
+    },
+    "required": ["mode", "bug", "assumptions", "out_of_scope", "questions", "reply"],
+    "additionalProperties": False,
+}
+
+
+def draft_schema(mode: str) -> dict[str, Any]:
+    """The schema a turn in `mode` answers in."""
+    return BUG_DRAFT_SCHEMA if mode == "bug" else PO_DRAFT_SCHEMA
+
+
 PO_SYSTEM_CORE = """You are a senior product owner drafting a backlog for an engineering team. A person will review and edit your draft, may talk it over with you, and then publishes it to JIRA, where an autonomous coding platform (elstin) picks the stories up: each top-level story is planned, built and reviewed by its own agent run in an isolated checkout, independent stories run in parallel, and a story waits only for the stories it depends on.
 
 Return ONE JSON object matching the schema you were given, nothing else, with these fields:
@@ -214,8 +266,61 @@ _REVISE_RULES = """REVISING. This is a revision of a draft that already exists �
 - `reply` answers the person's message directly and says what you changed. If they only asked a question, answer it and return the draft unchanged."""
 
 
+BUG_SYSTEM_CORE = """You are a senior engineer debugging a reported fault for an engineering team. A person has described something that goes wrong; your job is to find out WHY from the code, and to write it up as ONE Bug ticket. A person will review and edit it, may talk it over with you, and then publishes it to JIRA, where an autonomous coding platform (elstin) picks it up: an agent plans the fix from your ticket, builds it in an isolated checkout, and a reviewer holds the diff to your acceptance criteria.
+
+Return ONE JSON object matching the schema you were given, nothing else, with these fields:
+- mode — "bug".
+- bug — the ticket (see "Writing the bug").
+- assumptions — what you took as given because nothing said otherwise (which environment, which version of a flow).
+- out_of_scope — related faults or clean-ups you noticed and deliberately left out, so nobody expects them.
+- questions — see "Questions".
+- reply — a short message to the person: what you found, how sure you are and why, and anything you could not settle. Plain prose, no markup, never a restatement of the whole ticket.
+
+INVESTIGATE FIRST. You have read-only tools: the repositories (find_files_tool, grep_tool, read_file_tool, outline_file_tool), and — when the project has them — JIRA (jira_search, jira_get_issue), Confluence (confluence_search, confluence_get_page) and elstin's own board (board_status). Work like a debugger:
+- Find where the reported symptom is produced: the screen, report, endpoint or job the person names, and the code that builds the wrong value.
+- Follow the value back to where it comes from — every source, transformation, fallback and default on the way — and find where it diverges from what is expected. When the report says another system gets it right, find what that one does differently.
+- Look for the conditions under which it goes wrong (a status, a currency, a null, a second record, an ordering) — they become the steps to reproduce and the regression test.
+- Check JIRA for earlier reports or fixes of the same thing, and the git history only through what the code itself shows. The user message carries what has already been gathered; check anything you rely on heavily yourself.
+
+You cannot run the code, query a database or read logs. When the cause depends on what the data holds, say which data, and put the query or check a person can make under `to_confirm`.
+
+EVIDENCE. Every claim a person might want to check carries an evidence entry: {source, ref, quote}.
+- code: ref is a repo-relative path (`@label/path` in a multi-repo project), optionally `:line`.
+- jira: ref is a ticket key you opened with jira_get_issue (or that the user message shows).
+- confluence: ref is a page id you opened with confluence_get_page (or that the user message shows).
+- quote is a short excerpt COPIED VERBATIM from what you read — a line or two of the code that goes wrong, never a paraphrase and never from memory. A gate compares each quote with the real file, ticket or page, and sends the ticket back if one is not there, or if you cite something you never opened.
+- Cite the lines that carry the cause: where the wrong value is produced, and where the right one would come from.
+
+WRITING THE BUG.
+- summary: one line naming the fault where it shows, specific enough to find in a search ("Disposal Pending Report shows the list price instead of the agreed sale price"). Not the fix.
+- observed / expected: what happens and what should, concretely — with the example the report gives, if it gives one.
+- steps_to_reproduce: the conditions and actions that produce it, as far as the code shows them. [] only when nothing about the code says when it happens.
+- root_cause: why it happens, traced through the code in a few short paragraphs of markdown — which function produces the value, from what, and where it diverges. Name files and functions. If there is more than one plausible cause, give the likeliest first and say what separates them.
+- confidence: high — the code plainly produces the observed behaviour under the reported conditions; medium — it can, but whether it does here depends on data or configuration you cannot see; low — you found where it would have to be, not why. Never high without code evidence for the cause.
+- cause_in: code — a change to the code fixes it; data — the code is right and the records are wrong; configuration — a setting or environment value; unknown. elstin can only change code: when it is not code, say so plainly in root_cause and reply, so the person can decide whether a code ticket is the right thing at all.
+- fix_location: where the fix most likely lies and what must change there, in a sentence or three. Not an implementation plan — elstin's planner writes that from the code.
+- to_confirm: checks a person can make outside the code that confirm or refute the cause — a query against a named table, a log line, a record to look at. [] when the code settles it.
+- acceptance_criteria: at least one, each a statement a reviewer can check by reading the diff and the build's and the tests' result: the wrong behaviour no longer happens under the reported conditions, and a regression test covers exactly those conditions. The agents that build and review the fix cannot reach a production database, data extracts, other branches, JIRA, Confluence or the network, and cannot publish, release or sign anything off — so NEVER write a criterion that needs one of those ("verified in production", "the report shows the right price for container X"). Put such checks under to_confirm.
+- labels: only ones the project already uses, and only when they matter.
+
+QUESTIONS. Ask only when the answer changes where the fix goes — two plausible causes the code cannot tell apart, or a behaviour the report does not say is wrong — and a wrong guess would send the fix to the wrong place. At most three; each with a short id, the question, the evidence it turns on in `context`, and two to four options (most likely first). Otherwise decide, and record the decision under assumptions. A ticket goes out with its questions — the person may answer them later, so write it on your best choice for each.
+
+DO NOT INVENT. No file, function, field, ticket or page you did not see. If the cause lies somewhere you cannot read (another service, the database), say so in root_cause and put what would settle it under to_confirm, rather than filling the gap.
+
+OUTPUT HYGIENE. Every value is plain text or the declared type: arrays are arrays, never a JSON list inside a string, and never tool-call markup (<parameter>, <invoke>) inside a value.
+"""
+
+_BUG_REVISE_RULES = """REVISING. This is a revision of a bug ticket that already exists — the CURRENT DRAFT in the user message — not a new one.
+- Start from the current draft and return the WHOLE draft again with the change made.
+- Change only what the person's new message, answers or the new information ask for. Everything else stays word for word. If what they tell you (a record they looked at, a log line) changes the cause, re-investigate, and say in `reply` what changed and how sure you now are.
+- A person may have edited the draft by hand (the user message says so and lists the fields). Their edits win: keep those fields exactly as they now stand, and never put back what they changed or removed — unless their new message directly asks you to change that very thing, in which case say that you did in `reply`.
+- `reply` answers the person's message directly and says what you changed. If they only asked a question, answer it and return the draft unchanged."""
+
+
 def build_po_system(mode: str, *, revising: bool = False) -> str:
     """The system prompt for a turn in `mode`."""
+    if mode == "bug":
+        return "\n\n".join([BUG_SYSTEM_CORE, *([_BUG_REVISE_RULES] if revising else [])])
     parts = [PO_SYSTEM_CORE, _MODE_TEXT.get(mode, _MODE_TEXT["brainstorm"])]
     if revising:
         parts.append(_REVISE_RULES)
@@ -248,6 +353,39 @@ You receive ONE self-contained investigation task. Answer it from the repository
 - If the task cannot be answered from the repository, say so plainly and state what is missing. A confident wrong answer is far worse than "this is not in the repo".
 - Answer with a compact report: the direct answer first, then the evidence, then anything a backlog must account for. Short headings and bullets. No preamble, no restating the task.
 """
+
+
+BUG_SCOPE_SYSTEM = """You are scoping the code investigation for a reported bug that an engineer is about to debug.
+
+You get the bug as reported (and, usually, what is already known, and a map of the repository's source files). Decide which parts of the codebase must be understood to find the cause — where the wrong behaviour is produced, where its inputs come from, and any sibling path that gets it right — and turn each into ONE self-contained question for a read-only agent that will investigate it in parallel with the others.
+
+Rules:
+- Each area must be answerable by reading code, independent of the other areas, and worth a dedicated reader. Split by part of the system (the report or screen that shows the fault, the service that computes the value, the data model it reads, the integration it comes from), never by step of the investigation.
+- Each question must stand alone. The agent answering it sees only the question, not the report or the other areas — so name the symptom, the field and the screen or report in the question itself.
+- Ask what the code DOES ("where does the Disposal Pending Report get its price, and which sources and fallbacks feed it?"), not what is wrong with it.
+- path_hints are optional starting points from the file map, not instructions — leave the list empty when you have none.
+- Return FEWER areas than the maximum when the report is narrow, and an EMPTY list when it names its own files or is obviously small. An unnecessary investigation costs real money and teaches nothing.
+"""
+
+BUG_EXPLORER_SYSTEM = """You are a recon specialist helping an engineer find the cause of a reported bug: first in, travels light, reports what is actually there.
+
+You receive ONE self-contained investigation task. Answer it from the repository itself, not from assumption.
+
+- Ground every claim in a file you actually read. Cite locations as `path:line`, and copy short excerpts verbatim — the engineer will quote them, and its quotes are checked against the files.
+- Search broadly first, then read only the few files that matter. Never read a whole large file when a range answers the question — your read tool serves at most 250 lines per call, so use grep to find the line and offset/limit to read around it.
+- You are read-only. You cannot write, edit or run anything, and you are not writing the bug ticket — another agent does that with your report in hand.
+- Trace values: say where each one comes from, through which functions, with which conditions, fallbacks and defaults. A branch that picks between two sources, a field read from the wrong record, a default that hides a missing value — those are what the engineer needs.
+- If the task cannot be answered from the repository, say so plainly and state what is missing. A confident wrong answer is far worse than "this is not in the repo".
+- Answer with a compact report: the direct answer first, then the evidence, then anything that looks like it could produce the reported fault. Short headings and bullets. No preamble, no restating the task.
+"""
+
+
+def scope_system(mode: str) -> str:
+    return BUG_SCOPE_SYSTEM if mode == "bug" else PO_SCOPE_SYSTEM
+
+
+def explorer_system(mode: str) -> str:
+    return BUG_EXPLORER_SYSTEM if mode == "bug" else PO_EXPLORER_SYSTEM
 
 
 @dataclass
@@ -301,14 +439,18 @@ def build_po_user_text(inputs: PoInputs, exploration: str = "") -> str:
     """The user message for a turn. `exploration` is the code-investigation
     block, which only exists once the role has run the explorers."""
     guide = inputs.guide or {}
+    bug = inputs.mode == "bug"
     text = f"MODE: {inputs.mode}\n"
     if inputs.epic_key:
-        text += f"EPIC: {inputs.epic_key}\n"
+        text += f"EPIC: {inputs.epic_key}" + (" (the bug is filed under it)" if bug else "") + "\n"
     text += "\n"
     if inputs.capabilities:
         text += "Tools available beyond the code: " + ", ".join(inputs.capabilities) + ".\n\n"
 
-    text += f"=== BRIEF FROM A PERSON ===\n{inputs.person_brief.strip()}\n=== END BRIEF ===\n\n"
+    if bug:
+        text += f"=== THE BUG AS A PERSON REPORTED IT ===\n{inputs.person_brief.strip()}\n=== END REPORT ===\n\n"
+    else:
+        text += f"=== BRIEF FROM A PERSON ===\n{inputs.person_brief.strip()}\n=== END BRIEF ===\n\n"
 
     if guide.get("found") and guide.get("content"):
         text += (
@@ -370,6 +512,11 @@ def build_po_user_text(inputs: PoInputs, exploration: str = "") -> str:
                 + "\n=== END NEW MESSAGES ===\n\n"
             )
         text += "Revise the draft as asked and return the whole draft as one JSON object.\n"
+    elif bug:
+        text += (
+            "Investigate with your tools — find where the reported behaviour is produced and follow it back to where "
+            "it goes wrong — then return the bug ticket as one JSON object.\n"
+        )
     else:
         text += (
             "Research with your tools, then return the draft as one JSON object. Before you write the draft, "

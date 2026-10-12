@@ -34,6 +34,14 @@ export DATABASE_URL=postgresql+psycopg://elstin:elstin@localhost:5433/elstin
 alembic upgrade head
 ```
 
+`scripts/start-local.sh` does all of that and then runs the server in the
+foreground — against the existing `code_forge-forge-postgres` container
+(the real database; `ELSTIN_PG_CONTAINER` overrides), not the compose one:
+
+```bash
+scripts/start-local.sh   # uvicorn from .venv on http://localhost:8000/
+```
+
 Run the full stack instead:
 
 ```bash
@@ -72,20 +80,23 @@ New DB column/table: add an Alembic migration under
 `alembic/versions/YYYYMMDD_NNNN_description.py` (docstring must explain
 backfill/default semantics for existing rows), then `alembic upgrade head`.
 
-UI changes: the settings UI is a TypeScript/React app under `ui-src/src/`
-(five independent React roots — projects list, settings, project detail, PO
-start page, PO draft page — mounted into the five thin HTML shells at
-`settings-ui/*.html`; no
-client-side router, matching FastAPI's existing one-route-per-page setup
-in `elstin/app.py`). After editing anything under `ui-src/src/`, rebuild:
+UI changes: the UI is one TypeScript/React app under `ui-src/src/`
+with its own client-side routes (`components/App.tsx`, router in
+`lib/router.tsx` — no dependency), mounted into the one thin HTML shell
+`settings-ui/app.html`, which `elstin/app.py` serves for every page URL. A
+new view is an entry in the route table; the server needs nothing.
+After editing anything under `ui-src/src/`, rebuild:
 
 ```bash
-cd ui-src && npm install && npm run build   # -> settings-ui/vendor/app-*.js
+cd ui-src && npm install && npm run build   # -> settings-ui/vendor/app.js
 npm run typecheck                           # tsc --noEmit, not wired into CI
 ```
 
 Every frontend dependency is public (react, react-dom,
 `@tanstack/react-query`, Radix UI, Tailwind, lucide-react, sonner,
+`@yogesharc/thinking-orbs` for the PO agent's working indicator,
+`mermaid` for the diagrams in a story's plan — loaded on demand, so it is a
+separate chunk under `settings-ui/vendor/chunks/`, not part of `app.js` —
 esbuild, typescript) — no registry credentials, and the Dockerfile's
 `ui-build` stage runs this same build, so `docker compose up --build`
 needs no prior local build. Keep it that way: a dependency requiring
@@ -96,11 +107,11 @@ UI primitives are shadcn/ui — vendored source (not the shadcn CLI, which
 fetches components from an external registry at add-time) under
 `ui-src/src/components/ui/`, styled with Tailwind v4 utility classes over
 the CSS variables in `ui-src/src/styles/globals.css`. Nothing under
-`components/{projects,project-detail,settings,shared}/` imports a Radix
+`components/` outside `components/ui/` imports a Radix
 package directly — only `components/ui/*` does. `build.mjs` shells out to
 the Tailwind CLI to compile `globals.css` into `settings-ui/vendor/app.css`
 (esbuild bundles the JS; it has no CSS-transform story of its own).
-`settings-ui/*.html` stay plain HTML: a pre-paint theme script and one
+`settings-ui/app.html` stays plain HTML: a pre-paint theme script and one
 stylesheet `<link>`, both of which must run before the JS bundle.
 
 ## Testing conventions specific to this repo

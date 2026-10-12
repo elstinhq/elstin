@@ -252,15 +252,21 @@ async def _draft(sm: StateManager, session: dict[str, Any]) -> None:
         logger.info("PO session %s is no longer running — its result is dropped", session_id)
         return
     stories = len(result.draft.get("stories") or [])
+    bug = result.draft.get("bug") if isinstance(result.draft.get("bug"), dict) else None
     append_activity(
         run_id, type="status", phase="po",
         title="Draft ready" if not result.questions else "Draft ready — the agent has questions",
-        detail=f"{stories} proposed stor{'y' if stories == 1 else 'ies'}"
+        detail=(
+            f"one bug, cause in {bug.get('cause_in')} at {bug.get('confidence')} confidence" if bug is not None
+            else f"{stories} proposed stor{'y' if stories == 1 else 'ies'}"
+        )
         + (f"; {len([d for d in result.defects if d.get('blocking', True)])} problem(s) the gate could not clear" if any(d.get("blocking", True) for d in result.defects) else ""),
     )
 
 
 def _default_reply(draft: dict[str, Any]) -> str:
+    if isinstance(draft.get("bug"), dict):
+        return "Here is the bug as I traced it. Edit it, or tell me what you know that changes the picture."
     stories = len(draft.get("stories") or [])
     return f"Here is the draft: {stories} proposed stor{'y' if stories == 1 else 'ies'}. Edit it, or tell me what to change."
 

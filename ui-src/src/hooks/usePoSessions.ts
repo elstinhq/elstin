@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, type PoAnswerInput } from "../lib/api";
 import { queryKeys } from "../lib/queryClient";
-import type { PoDraft, PoSession, PoStatus } from "../types/api";
+import type { PoAnyDraft, PoSession, PoStatus } from "../types/api";
 
 // The agent works in the daemon, so a session moves on its own; the page finds
 // out by polling. Quickly while something is happening, slowly once it is waiting
@@ -43,7 +43,7 @@ export function usePoModePreview(projectId: number, epicKey: string) {
 export function useStartPoSession(projectId: number) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (body: { brief: string; epic_key?: string | null; jira_project_key?: string | null }) =>
+    mutationFn: (body: { brief: string; epic_key?: string | null; jira_project_key?: string | null; mode?: "bug" | null }) =>
       api.startPoSession(projectId, body),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.poSessions(projectId) }),
   });
@@ -68,7 +68,7 @@ function useSessionMutation<TVars, TData extends PoSession = PoSession>(
 }
 
 export function useSavePoDraft(projectId: number, sessionId: number) {
-  return useSessionMutation(projectId, sessionId, ({ draft, version }: { draft: PoDraft; version: number }) =>
+  return useSessionMutation(projectId, sessionId, ({ draft, version }: { draft: PoAnyDraft; version: number }) =>
     api.savePoDraft(sessionId, draft, version),
   );
 }

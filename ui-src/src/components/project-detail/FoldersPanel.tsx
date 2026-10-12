@@ -198,30 +198,30 @@ export function FoldersPanel({ projectId }: { projectId: number }) {
 
   return (
     <>
-      <Card className="p-4">
-        <div className="flex flex-col gap-3">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-sm font-medium">Folders</span>
-            <Button variant="ghost" size="icon" className="size-7" aria-label="Add folder" onClick={openDialog}>
-              <Plus />
-            </Button>
-          </div>
-          <p className="text-muted-foreground text-xs">
+      <section className="flex flex-col gap-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <p className="text-muted-foreground max-w-3xl text-sm">
             Git repos this project can run against. Every repo is readable and — unless marked read-only — writable by
             the plan: a ticket spanning several repos just works, nothing to pick per ticket. The first writable repo
             added here is the default for unprefixed paths. A reference folder is read for context, never written.
           </p>
-          <div className="flex flex-col gap-2">
-            {repos.length === 0 ? (
-              <p className="text-muted-foreground text-sm">No folders attached yet — use + to add a git repo.</p>
-            ) : (
-              repos.map((repo) => (
-                <FolderRow key={repo.id} projectId={projectId} repo={repo} others={repos.filter((r) => r.id !== repo.id)} />
-              ))
-            )}
-          </div>
+          <Button onClick={openDialog}>
+            <Plus />
+            Add folder
+          </Button>
         </div>
-      </Card>
+        <Card className="gap-0 p-0">
+          {repos.length === 0 ? (
+            <p className="text-muted-foreground p-6 text-sm">No folders attached yet — add a git repo to start.</p>
+          ) : (
+            <div className="divide-border flex flex-col divide-y [&>*]:rounded-none [&>*]:border-0 [&>*]:px-4 [&>*]:py-3">
+              {repos.map((repo) => (
+                <FolderRow key={repo.id} projectId={projectId} repo={repo} others={repos.filter((r) => r.id !== repo.id)} />
+              ))}
+            </div>
+          )}
+        </Card>
+      </section>
 
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent>

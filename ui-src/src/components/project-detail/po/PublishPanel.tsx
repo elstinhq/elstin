@@ -1,11 +1,11 @@
-import { CircleCheck, ExternalLink } from "lucide-react";
-import { useDismissPoQuestions, usePublishPoSession } from "../../../hooks/usePoSessions";
+import { CircleCheck, CloudUpload, ExternalLink } from "lucide-react";
+import { usePublishPoSession } from "../../../hooks/usePoSessions";
 import { useToast } from "../../../lib/toast";
 import type { PoSession } from "../../../types/api";
 import { Alert, AlertDescription } from "../../ui/alert";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
-import { describeCounts, jiraUrl, NEEDS_PROJECT_KEY_REASON, plural } from "./draftOps";
+import { backlogDraft, defectsForStory, describeCounts, jiraUrl, NEEDS_PROJECT_KEY_REASON, plural } from "./draftOps";
 
 function TicketLink({ base, label, ticketKey }: { base: string | null; label: string; ticketKey: string }) {
   const href = jiraUrl(base, ticketKey);
@@ -43,13 +43,13 @@ interface PublishPanelProps {
 // (po_jira_create_enabled).
 export function PublishPanel({ projectId, session, jiraBaseUrl, onClose, hasUnsavedEdits, typedKey, onTypedKeyChange }: PublishPanelProps) {
   const publish = usePublishPoSession(projectId, session.id);
-  const dismiss = useDismissPoQuestions(projectId, session.id);
   const { showToast } = useToast();
   const result = session.publish_result;
   const created = result?.created ?? {};
   const createdCount = Object.keys(created).length;
   const state = session.publish;
   const projectKey = state.jira_project_key ?? typedKey.trim().toUpperCase();
+  const bug = session.mode === "bug";
 
   if (session.status === "discarded") return null;
 
@@ -57,7 +57,7 @@ export function PublishPanel({ projectId, session, jiraBaseUrl, onClose, hasUnsa
     publish.mutate(
       { jiraProjectKey: state.jira_project_key ? null : projectKey || null },
       {
-        onSuccess: () => showToast("Publishing — tickets appear in JIRA as they are made", "success"),
+        onSuccess: () => showToast(bug ? "Publishing — the bug appears in JIRA in a moment" : "Publishing — tickets appear in JIRA as they are made", "success"),
         onError: (err) => showToast(err.message || "Could not publish", "error"),
       },
     );
@@ -80,7 +80,11 @@ export function PublishPanel({ projectId, session, jiraBaseUrl, onClose, hasUnsa
           </div>
           {result?.synced ? (
             <p className="text-muted-foreground text-xs">
-              {epicKey} is on Elstin's board now, paused — resume it when you want the stories run.
+              {bug && epicKey === created.bug
+                ? `${epicKey} is on Elstin's board now, paused — resume it when you want the fix built.`
+                : bug
+                  ? `${epicKey} is on Elstin's board with the bug under it — resume it when you want the fix built.`
+                  : `${epicKey} is on Elstin's board now, paused — resume it when you want the stories run.`}
             </p>
           ) : (
             <p className="text-warning-foreground text-xs">
@@ -127,16 +131,21 @@ export function PublishPanel({ projectId, session, jiraBaseUrl, onClose, hasUnsa
   // Some stories (and, in a brainstorm, the epic) were published one at a time already.
   const partial = createdCount > 0;
   const inJira = Object.entries(created).filter(([ref]) => !ref.includes("."));
+  // Stories the server found a blocking problem in, as it stands in the saved draft — with
+  // edits pending those findings may point at the wrong story, so none are counted.
+  const withProblems = hasUnsavedEdits ? 0 : (backlogDraft(session.draft)?.stories ?? []).filter((_, i) => defectsForStory(session.problems, i).length > 0).length;
   return (
-    <div className="bg-card flex flex-col gap-2.5 rounded-xl border p-3" data-testid="po-publish-panel">
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-        <div className="min-w-0 flex-1">
-          <h2 className="text-sm font-medium">{partial ? "Publish the rest to JIRA" : "Publish to JIRA"}</h2>
+    <div className="bg-card flex flex-col gap-2.5 rounded-xl border px-4 py-3.5 shadow-xs" data-testid="po-publish-panel">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <CloudUpload className="text-muted-foreground size-5 shrink-0" aria-hidden="true" />
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <h2 className="text-sm font-medium">
+            {partial ? "Publish the rest to JIRA" : "Publish to JIRA"}
+            {projectKey ? ` project ${projectKey}` : ""}
+          </h2>
           <p className="text-muted-foreground text-xs">
-            Will create {describeCounts(session.counts)}
-            {projectKey ? ` in ${projectKey}` : ""}
-            {session.mode === "brainstorm" && !created.epic ? "; the epic lands on Elstin's board paused." : "; new stories join the epic under its own gate."}{" "}
-            Or publish a story on its own from its row.
+            Creates {describeCounts(session.counts)}.
+            {withProblems > 0 ? ` ${withProblems === 1 ? "1 story has a problem" : `${withProblems} stories have problems`} to fix first.` : ""}
           </p>
         </div>
         {needsKey ? (
@@ -150,11 +159,11 @@ export function PublishPanel({ projectId, session, jiraBaseUrl, onClose, hasUnsa
         ) : null}
         <Button
           size="sm"
-          disabled={!canPress || hasUnsavedEdits || session.counts.stories + session.counts.epics === 0}
+          disabled={!canPress || hasUnsavedEdits || session.counts.stories + session.counts.epics + session.counts.bugs === 0}
           loading={publish.isPending}
           onClick={press}
         >
-          {partial ? "Publish the rest" : "Publish all"}
+          {partial ? "Publish the rest" : bug ? "Publish" : "Publish all"}
         </Button>
       </div>
       {partial ? (
@@ -175,24 +184,6 @@ export function PublishPanel({ projectId, session, jiraBaseUrl, onClose, hasUnsa
       {!state.allowed && state.reason && !(needsKey && canPress) ? (
         <p className="text-muted-foreground text-xs" data-testid="po-publish-reason">
           {state.reason}
-          {session.status === "awaiting_input" ? (
-            <>
-              {" "}
-              <button
-                type="button"
-                className="underline"
-                disabled={dismiss.isPending}
-                onClick={() =>
-                  dismiss.mutate(undefined, {
-                    onSuccess: () => showToast("Questions dismissed — the draft stands on the agent's guesses", "success"),
-                    onError: (err) => showToast(err.message || "Could not dismiss the questions", "error"),
-                  })
-                }
-              >
-                Dismiss the questions
-              </button>
-            </>
-          ) : null}
         </p>
       ) : null}
       {stopped ? (

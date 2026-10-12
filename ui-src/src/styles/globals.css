@@ -1,9 +1,9 @@
 /* Elstin UI — shadcn/ui over Tailwind v4.
  *
  * Compiled by the Tailwind CLI (see ../../build.mjs) into
- * settings-ui/vendor/app.css and linked once from each settings-ui/*.html
- * shell, the same way elstin-ui.css used to be: not imported from a TS
- * entry, so the three per-page JS bundles don't each ship their own copy.
+ * settings-ui/vendor/app.css and linked once from settings-ui/app.html
+ * shell, the same way elstin-ui.css used to be: not imported from the TS
+ * entry, so the stylesheet loads before the bundle parses.
  *
  * Dark mode keys off `[data-theme="dark"]` on <html>, not the `.dark`
  * class shadcn scaffolds by default — that attribute is what the
@@ -40,6 +40,9 @@
   --color-success-foreground: var(--success-foreground);
   --color-warning: var(--warning);
   --color-warning-foreground: var(--warning-foreground);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+  --color-sidebar: var(--sidebar);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
@@ -47,11 +50,15 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+  /* No web font is downloaded: the app runs on a laptop that may be offline,
+   * and these stacks resolve to Inter-like system faces everywhere. */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 :root {
   --radius: 0.625rem;
-  --background: oklch(1 0 0);
+  --background: oklch(0.985 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.145 0 0);
@@ -71,6 +78,9 @@
   --success-foreground: oklch(0.985 0 0);
   --warning: oklch(0.75 0.15 75);
   --warning-foreground: oklch(0.145 0 0);
+  --info: oklch(0.55 0.19 255);
+  --info-foreground: oklch(0.985 0 0);
+  --sidebar: oklch(1 0 0);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
@@ -99,6 +109,9 @@
     --success-foreground: oklch(0.145 0 0);
     --warning: oklch(0.8 0.16 75);
     --warning-foreground: oklch(0.145 0 0);
+    --info: oklch(0.7 0.15 250);
+    --info-foreground: oklch(0.145 0 0);
+    --sidebar: oklch(0.175 0 0);
     --border: oklch(1 0 0 / 10%);
     --input: oklch(1 0 0 / 15%);
     --ring: oklch(0.556 0 0);
@@ -127,6 +140,9 @@
   --success-foreground: oklch(0.145 0 0);
   --warning: oklch(0.8 0.16 75);
   --warning-foreground: oklch(0.145 0 0);
+  --info: oklch(0.7 0.15 250);
+  --info-foreground: oklch(0.145 0 0);
+  --sidebar: oklch(0.175 0 0);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.556 0 0);
@@ -138,7 +154,7 @@
     @apply border-border outline-ring/50;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground font-sans antialiased;
   }
 }
 

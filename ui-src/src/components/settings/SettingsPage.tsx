@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Search } from "lucide-react";
-import { AppShell } from "../shared/AppShell";
+import { Page } from "../shell/Page";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -104,10 +104,9 @@ export function SettingsPage() {
   }, [sections]);
 
   return (
-    <AppShell rightLinkHref="/projects" rightLinkLabel="Projects">
+    <Page crumbs={[{ label: "Global settings" }]}>
       <div className="mx-auto w-full max-w-3xl">
-        <h1 className="text-xl font-semibold">Settings</h1>
-        <p className="text-muted-foreground mt-1 text-sm">
+        <p className="text-muted-foreground text-sm">
           Stored in Postgres, not a file. Changes save as you leave a field and take effect without a restart.
         </p>
 
@@ -165,6 +164,6 @@ export function SettingsPage() {
           </form>
         )}
       </div>
-    </AppShell>
+    </Page>
   );
 }

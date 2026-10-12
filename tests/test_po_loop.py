@@ -445,3 +445,56 @@ def test_the_inputs_are_not_mutated_by_building_the_text():
     before = copy.deepcopy(inputs.revise)
     build_po_user_text(inputs)
     assert inputs.revise == before
+
+
+# -- bug mode ---------------------------------------------------------------------------------------
+
+
+def _bug_draft(**bug_overrides):
+    bug = {
+        "summary": "Report shows the list price", "observed": "List price shown.", "expected": "Sale price shown.",
+        "steps_to_reproduce": [], "root_cause": "It reads the list price.", "confidence": "low", "cause_in": "code",
+        "fix_location": "report.py", "to_confirm": ["Look at unit X's sale record"],
+        "acceptance_criteria": ["The report shows the sale price"], "labels": [], "evidence": [],
+    }
+    bug.update(bug_overrides)
+    return {"mode": "bug", "bug": bug, "assumptions": [], "out_of_scope": [], "questions": [], "reply": "Traced it."}
+
+
+async def test_a_bug_turn_answers_in_the_bug_schema_under_the_debuggers_prompt(monkeypatch, git_repo):
+    from elstin.agents.roles.product_owner import BUG_DRAFT_SCHEMA
+
+    provider = FakeProvider(script=[_answer(_bug_draft())])
+    _configure(monkeypatch, provider)
+
+    result = await _run(git_repo, mode="bug", ctx=_ctx("bug", epic_key=None))
+
+    assert result.draft["bug"]["summary"] == "Report shows the list price" and result.reply == "Traced it."
+    request = provider.calls[0]
+    assert request.response_format.schema == BUG_DRAFT_SCHEMA
+    assert request.system == build_po_system("bug") and "debugging a reported fault" in request.system
+    assert "=== THE BUG AS A PERSON REPORTED IT ===" in request.messages[0].content[0].text
+    assert _events("Investigating the bug")
+
+
+async def test_a_confident_bug_with_no_code_cited_is_sent_back(monkeypatch, git_repo):
+    provider = FakeProvider(script=[
+        _answer(_bug_draft(confidence="high")),
+        _answer(_bug_draft(confidence="low")),
+    ])
+    _configure(monkeypatch, provider)
+
+    result = await _run(git_repo, mode="bug", ctx=_ctx("bug", epic_key=None))
+
+    assert result.attempts == 2 and result.draft["bug"]["confidence"] == "low"
+    assert "without the code that shows it" in provider.calls[1].messages[-1].content[0].text
+
+
+def test_the_bug_prompt_is_a_debuggers_and_keeps_the_reviewers_limits():
+    system = build_po_system("bug")
+    assert "find out WHY from the code" in system and "to_confirm" in system and "cause_in" in system
+    assert "NEVER write a criterion that needs one of those" in system
+    assert "MODE:" not in system and "Writing a story" not in system
+    assert "REVISING" in build_po_system("bug", revising=True) and "bug ticket" in build_po_system("bug", revising=True)
+    text = build_po_user_text(PoInputs(mode="bug", person_brief="Price inflated", epic_key="PAY-1"))
+    assert "EPIC: PAY-1 (the bug is filed under it)" in text and "return the bug ticket as one JSON object" in text

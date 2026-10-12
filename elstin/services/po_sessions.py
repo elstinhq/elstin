@@ -15,6 +15,12 @@ any model call — from the one fact that decides it, what the epic already has:
 (elstin/services/epic_sync.py's `_resolve_work_units`), so a PO session and the
 board agree about what an epic's stories are.
 
+**Bug mode is the exception: a person asks for it** (the start page's "Bug"),
+since nothing about the epic says whether a brief reports a fault. Its draft is
+one Bug ticket (`{"bug": {...}}`, product_owner.py's `BUG_DRAFT_SCHEMA`), not an
+epic and stories, and everything below that reads a draft — the edit schema,
+what changed, what publishing makes, the markdown — has a bug branch.
+
 **A draft is checked against more than itself.** Duplicates, the epic never
 being proposed as new, every existing story being assessed — those need to know
 the epic. That is captured into the session's `context` when it starts and on
@@ -35,12 +41,12 @@ from typing import Any
 from elstin.agents.roles.po_gate import (
     DraftContext, check_draft_integrity, check_structure, kind_warnings,
 )
-from elstin.agents.roles.product_owner import PO_DRAFT_SCHEMA
+from elstin.agents.roles.product_owner import BUG_DRAFT_SCHEMA, PO_DRAFT_SCHEMA
 from elstin.agents.tool_arguments import argument_errors
 from elstin.config.store import get_int_config, resolve_bool_config
 from elstin.services.epic_sync import _is_epic_issue_type, _resolve_work_units
 from elstin.services.ticket_source import Ticket, get_ticket_source, project_source_name, ticket_source_configured
-from elstin.state.manager_po import PO_AWAITING_INPUT, PO_MODE_BRAINSTORM, PO_MODE_GAP, PO_MODE_SPLIT, PO_READY
+from elstin.state.manager_po import PO_AWAITING_INPUT, PO_MODE_BRAINSTORM, PO_MODE_BUG, PO_MODE_GAP, PO_MODE_SPLIT, PO_READY
 from elstin.tools.po_tools import render_ticket
 
 DEFAULT_MAX_STORIES = 15
@@ -159,21 +165,25 @@ def draft_for_storage(draft: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in draft.items() if key not in ("reply", "questions")}
 
 
-def _edit_schema() -> dict[str, Any]:
-    schema = copy.deepcopy(PO_DRAFT_SCHEMA)
+def _edit_schema(draft_schema: dict[str, Any]) -> dict[str, Any]:
+    schema = copy.deepcopy(draft_schema)
     for key in ("reply", "questions"):
         schema["properties"].pop(key, None)
         schema["required"].remove(key)
     # The checks that need a run's reads mark each evidence item `verified`;
     # a saved edit sends that back, so the schema must allow it.
-    story_evidence = schema["properties"]["stories"]["items"]["properties"]["evidence"]["items"]["properties"]
-    existing_evidence = schema["properties"]["existing"]["items"]["properties"]["evidence"]["items"]["properties"]
-    for properties in (story_evidence, existing_evidence):
-        properties["verified"] = {"type": "boolean"}
+    props = schema["properties"]
+    evidence_holders = (
+        [props["bug"]["properties"]] if "bug" in props
+        else [props["stories"]["items"]["properties"], props["existing"]["items"]["properties"]]
+    )
+    for holder in evidence_holders:
+        holder["evidence"]["items"]["properties"]["verified"] = {"type": "boolean"}
     return schema
 
 
-EDIT_SCHEMA: dict[str, Any] = _edit_schema()
+EDIT_SCHEMA: dict[str, Any] = _edit_schema(PO_DRAFT_SCHEMA)
+BUG_EDIT_SCHEMA: dict[str, Any] = _edit_schema(BUG_DRAFT_SCHEMA)
 
 
 def validate_draft_edit(draft: Any, session: dict[str, Any]) -> list[str]:
@@ -185,7 +195,7 @@ def validate_draft_edit(draft: Any, session: dict[str, Any]) -> list[str]:
     refuses on it."""
     if not isinstance(draft, dict):
         return ["The draft must be a JSON object."]
-    errors = argument_errors(draft, EDIT_SCHEMA)
+    errors = argument_errors(draft, BUG_EDIT_SCHEMA if session["mode"] == PO_MODE_BUG else EDIT_SCHEMA)
     if errors:
         return errors[:10]
     integrity = check_draft_integrity({**draft, "questions": []}, mode=session["mode"])
@@ -216,6 +226,17 @@ def diff_paths(old: dict[str, Any] | None, new: dict[str, Any]) -> list[str]:
         if before != after:
             paths.append(prefix)
 
+    # `verified` marks are server-written, not an edit.
+    strip = lambda items: [{k: v for k, v in e.items() if k != "verified"} for e in items or [] if isinstance(e, dict)]
+
+    if isinstance(new.get("bug"), dict) or isinstance(old.get("bug"), dict):
+        before_bug, after_bug = old.get("bug") or {}, new.get("bug") or {}
+        for field in sorted(set(before_bug) | set(after_bug)):
+            if field == "evidence":
+                compare("bug.evidence", strip(before_bug.get(field)), strip(after_bug.get(field)))
+            else:
+                compare(f"bug.{field}", before_bug.get(field), after_bug.get(field))
+
     for field in sorted(set((old.get("epic") or {}).keys()) | set((new.get("epic") or {}).keys())):
         compare(f"epic.{field}", (old.get("epic") or {}).get(field), (new.get("epic") or {}).get(field))
 
@@ -230,8 +251,6 @@ def diff_paths(old: dict[str, Any] | None, new: dict[str, Any]) -> list[str]:
                 continue
             for field in sorted(set(before[ident]) | set(row)):
                 if field == "evidence":
-                    # `verified` marks are server-written, not an edit.
-                    strip = lambda items: [{k: v for k, v in e.items() if k != "verified"} for e in items or [] if isinstance(e, dict)]
                     compare(f"{group}.{ident}.evidence", strip(before[ident].get(field)), strip(row.get(field)))
                 else:
                     compare(f"{group}.{ident}.{field}", before[ident].get(field), row.get(field))
@@ -283,6 +302,42 @@ def story_markdown(story: dict[str, Any]) -> str:
     return "\n\n".join(part for part in parts if part)
 
 
+_CONFIDENCE_WORDS = {"high": "high", "medium": "medium — depends on data or configuration", "low": "low — where, not yet why"}
+
+
+def bug_markdown(bug: dict[str, Any]) -> str:
+    """A bug's description — what its ticket will say, and what elstin's planner
+    reads when it plans the fix. The acceptance criteria come last, in the form
+    `JiraService.parse_acceptance_criteria` reads back."""
+
+    def section(heading: str, body: str) -> str:
+        body = body.strip()
+        return f"## {heading}\n{body}" if body else ""
+
+    def bullets(items: Any, numbered: bool = False) -> str:
+        clean = [str(item).strip() for item in items or [] if isinstance(item, str) and item.strip()]
+        return "\n".join(f"{index}. {item}" if numbered else f"- {item}" for index, item in enumerate(clean, start=1))
+
+    cause_heading = "Root cause"
+    if bug.get("confidence") in _CONFIDENCE_WORDS:
+        cause_heading += f" (confidence: {_CONFIDENCE_WORDS[bug['confidence']]})"
+    cause = str(bug.get("root_cause") or "")
+    if bug.get("cause_in") in ("data", "configuration", "unknown"):
+        cause = f"_The cause lies in {bug['cause_in']}{'' if bug['cause_in'] != 'unknown' else ' — it could not be placed'}._\n\n{cause}"
+    evidence = "\n".join(f"- {_evidence_line(ev)}" for ev in bug.get("evidence") or [])
+    parts = [
+        section("Observed", str(bug.get("observed") or "")),
+        section("Expected", str(bug.get("expected") or "")),
+        section("Steps to reproduce", bullets(bug.get("steps_to_reproduce"), numbered=True)),
+        section(cause_heading, cause),
+        section("Where the fix lies", str(bug.get("fix_location") or "")),
+        section("To confirm outside the code", bullets(bug.get("to_confirm"))),
+        section("Evidence", evidence),
+        acceptance_section(bug.get("acceptance_criteria") or []),
+    ]
+    return "\n\n".join(part for part in parts if part)
+
+
 def epic_markdown(epic: dict[str, Any]) -> str:
     parts = [str(epic.get("description") or "").strip(), acceptance_section(epic.get("acceptance_criteria") or [])]
     return "\n\n".join(part for part in parts if part)
@@ -302,6 +357,8 @@ def publish_counts(session: dict[str, Any], refs: list[str] | None = None) -> di
     draft = session.get("draft") or {}
     result = session.get("publish_result") or {}
     created = created_tickets(session)
+    if session["mode"] == PO_MODE_BUG:
+        return {"epics": 0, "stories": 0, "subtasks": 0, "links": 0, "bugs": 0 if "bug" in created or not isinstance(draft.get("bug"), dict) else 1}
     made_links = set(result.get("links") or [])
     stories = [s for s in draft.get("stories") or [] if isinstance(s, dict) and (refs is None or s.get("ref") in refs)]
     subtasks = links = 0
@@ -319,6 +376,7 @@ def publish_counts(session: dict[str, Any], refs: list[str] | None = None) -> di
         "stories": sum(1 for story in stories if story.get("ref") not in created),
         "subtasks": subtasks,
         "links": links,
+        "bugs": 0,
     }
 
 
@@ -339,6 +397,8 @@ def published_edit_conflicts(session: dict[str, Any], paths: list[str]) -> list[
             found[ref] = f"{ref} is already in JIRA as {created[ref]}"
         elif head == "epic" and session["mode"] == PO_MODE_BRAINSTORM and "epic" in created:
             found["epic"] = f"the epic is already in JIRA as {created['epic']}"
+        elif head == "bug" and "bug" in created:
+            found["bug"] = f"the bug is already in JIRA as {created['bug']}"
     if not found:
         return []
     return [f"{'; '.join(found.values())} — it can no longer be changed here. Change the ticket in JIRA."]
@@ -353,6 +413,10 @@ def keep_published(new: dict[str, Any], old: dict[str, Any] | None, session: dic
     if not old or not created:
         return new
     kept = copy.deepcopy(new)
+    if session["mode"] == PO_MODE_BUG:
+        if "bug" in created and isinstance(old.get("bug"), dict):
+            kept["bug"] = copy.deepcopy(old["bug"])
+        return kept
     if session["mode"] == PO_MODE_BRAINSTORM and "epic" in created and isinstance(old.get("epic"), dict):
         kept["epic"] = copy.deepcopy(old["epic"])
     published = {
@@ -454,7 +518,7 @@ def _publish_reason(
         what = "in the draft first" if refs is None else f"in {', '.join(refs)} first"
         return f"Fix {len(blocking)} problem{'s' if len(blocking) != 1 else ''} {what} — {blocking[0]['reason']}"
     counts = publish_counts(session, refs)
-    if not (counts["epics"] or counts["stories"]):
+    if not (counts["epics"] or counts["stories"] or counts["bugs"]):
         if created:
             return "Everything in this draft is already in JIRA."
         return "The draft proposes nothing to create. Existing tickets are never rewritten; post a suggestion as a comment instead."
@@ -502,6 +566,8 @@ def draft_to_markdown(session: dict[str, Any]) -> str:
     """The draft as a markdown document — "Copy as markdown", which works
     whether or not elstin may write to JIRA."""
     draft = session.get("draft") or {}
+    if session["mode"] == PO_MODE_BUG:
+        return _bug_draft_markdown(session, draft)
     epic = draft.get("epic") or {}
     mode = session["mode"]
     lines: list[str] = []
@@ -561,14 +627,39 @@ def draft_to_markdown(session: dict[str, Any]) -> str:
         if items:
             lines += ["", f"## {heading}", ""] + [f"- {item}" for item in items]
 
-    questions = [q for q in session.get("questions") or [] if isinstance(q, dict)]
-    if questions:
-        lines += ["", "## Open questions", ""]
-        for question in questions:
-            lines.append(f"- {question.get('question')}")
-            for option in question.get("options") or []:
-                lines.append(f"  - {option.get('label')}" + (f" — {option['description']}" if option.get("description") else ""))
+    lines += _open_questions_lines(session)
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _bug_draft_markdown(session: dict[str, Any], draft: dict[str, Any]) -> str:
+    bug = draft.get("bug") or {}
+    lines = [
+        f"# {bug.get('summary') or 'Bug draft'}",
+        "",
+        "_Bug draft" + (f" under {session.get('epic_key')}" if session.get("epic_key") else "")
+        + f" · version {session.get('draft_version')}"
+        + (f" · labels: {', '.join(bug.get('labels') or [])}" if bug.get("labels") else "") + "_",
+        "",
+        bug_markdown(bug),
+    ]
+    for heading, key in (("Assumptions", "assumptions"), ("Out of scope", "out_of_scope")):
+        items = [i for i in draft.get(key) or [] if isinstance(i, str) and i.strip()]
+        if items:
+            lines += ["", f"## {heading}", ""] + [f"- {item}" for item in items]
+    lines += _open_questions_lines(session)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _open_questions_lines(session: dict[str, Any]) -> list[str]:
+    questions = [q for q in session.get("questions") or [] if isinstance(q, dict)]
+    if not questions:
+        return []
+    lines = ["", "## Open questions", ""]
+    for question in questions:
+        lines.append(f"- {question.get('question')}")
+        for option in question.get("options") or []:
+            lines.append(f"  - {option.get('label')}" + (f" — {option['description']}" if option.get("description") else ""))
+    return lines
 
 
 def _evidence_line(evidence: Any) -> str:

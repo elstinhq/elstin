@@ -29,6 +29,10 @@ would go wrong (a loop of dependencies, a story with no acceptance criteria);
 it warns when it only casts doubt (elstin would classify a story's kind another
 way). Only blockers spend a retry.
 
+A bug draft (bug mode) is one ticket, not a backlog, and is checked as one: it
+has its fields, its criteria, and — when it claims to know the cause — code
+evidence for it (`_check_bug`). Its evidence is verified exactly like a story's.
+
 Deliberately NOT checked: whether the stories *cover* the brief, or whether the
 split is a good one. That is judgement; a gate that guesses at it rejects good
 drafts and teaches the agent to pad.
@@ -66,11 +70,17 @@ KIND_EVIDENCE_MISSING = "evidence_missing"
 KIND_EVIDENCE_UNREAD = "evidence_unread"
 KIND_EVIDENCE_QUOTE = "evidence_quote"
 KIND_KIND_MISMATCH = "kind_mismatch"
+KIND_UNSUPPORTED_CAUSE = "unsupported_cause"
+KIND_CAUSE_NOT_IN_CODE = "cause_not_in_code"
 
 STORY_ARRAY_FIELDS = ("acceptance_criteria", "labels", "depends_on", "subtasks", "evidence")
 DRAFT_ARRAY_FIELDS = ("stories", "existing", "gaps", "assumptions", "out_of_scope", "questions")
 EVIDENCE_SOURCES = ("code", "jira", "confluence")
 ASSESSMENTS = ("done", "partial", "not_started", "obsolete", "unclear")
+BUG_ARRAY_FIELDS = ("steps_to_reproduce", "to_confirm", "acceptance_criteria", "labels", "evidence")
+BUG_DRAFT_ARRAY_FIELDS = ("assumptions", "out_of_scope", "questions")
+CONFIDENCES = ("high", "medium", "low")
+CAUSE_PLACES = ("code", "data", "configuration", "unknown")
 
 _REF_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
 _JIRA_KEY_RE = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
@@ -129,6 +139,17 @@ def _stories(draft: dict[str, Any]) -> list[dict[str, Any]]:
     return [story for story in _list(draft.get("stories")) if isinstance(story, dict)]
 
 
+def _evidence_rows(draft: dict[str, Any]) -> list[tuple[str, int, dict[str, Any]]]:
+    """(group, index, row) for every part of a draft that carries evidence: its
+    stories and existing assessments, or a bug draft's one ticket."""
+    rows: list[tuple[str, int, dict[str, Any]]] = []
+    for group in ("stories", "existing"):
+        rows += [(group, index, row) for index, row in enumerate(_list(draft.get(group))) if isinstance(row, dict)]
+    if isinstance(draft.get("bug"), dict):
+        rows.append(("bug", 0, draft["bug"]))
+    return rows
+
+
 # -- integrity -------------------------------------------------------------------
 
 
@@ -140,6 +161,8 @@ def check_draft_integrity(draft: Any, *, mode: str | None = None) -> list[dict[s
     finds anything it stands in for them (plan_gate.check_plan_integrity)."""
     if not isinstance(draft, dict):
         return [_defect(KIND_MALFORMED_OUTPUT, "the answer is not a JSON object")]
+    if (mode or draft.get("mode")) == "bug":
+        return _bug_integrity(draft, mode)
     defects = markup_defects(draft, noun="draft")
     defects.extend(array_defects(draft, DRAFT_ARRAY_FIELDS))
     for index, story in enumerate(_list(draft.get("stories"))):
@@ -151,6 +174,20 @@ def check_draft_integrity(draft: Any, *, mode: str | None = None) -> list[dict[s
         )
     if not isinstance(draft.get("epic"), dict):
         defects.append(_defect(KIND_MALFORMED_OUTPUT, '"epic" must be an object', where="epic"))
+    if mode and draft.get("mode") != mode:
+        defects.append(_defect(
+            KIND_WRONG_MODE, f'"mode" is {draft.get("mode")!r} but this session is in {mode!r} mode', where="mode",
+        ))
+    return defects
+
+
+def _bug_integrity(draft: dict[str, Any], mode: str | None) -> list[dict[str, Any]]:
+    defects = markup_defects(draft, noun="draft")
+    defects.extend(array_defects(draft, BUG_DRAFT_ARRAY_FIELDS))
+    if isinstance(draft.get("bug"), dict):
+        defects.extend({**d, "where": "bug"} for d in array_defects(draft["bug"], BUG_ARRAY_FIELDS))
+    else:
+        defects.append(_defect(KIND_MALFORMED_OUTPUT, '"bug" must be an object', where="bug"))
     if mode and draft.get("mode") != mode:
         defects.append(_defect(
             KIND_WRONG_MODE, f'"mode" is {draft.get("mode")!r} but this session is in {mode!r} mode', where="mode",
@@ -197,6 +234,8 @@ def check_structure(draft: dict[str, Any], ctx: DraftContext) -> list[dict[str, 
     """Everything about a draft that needs nothing fetched. Assumes the draft
     passed `check_draft_integrity`; tolerates a missing field rather than
     raising, since a person's edit may leave one out."""
+    if ctx.mode == "bug":
+        return _check_bug(draft)
     defects: list[dict[str, Any]] = []
     epic = draft.get("epic") if isinstance(draft.get("epic"), dict) else {}
     stories = _stories(draft)
@@ -370,6 +409,56 @@ def check_structure(draft: dict[str, Any], ctx: DraftContext) -> list[dict[str, 
     return defects
 
 
+def _check_bug(draft: dict[str, Any]) -> list[dict[str, Any]]:
+    """A bug draft's structure: one ticket a fix can be planned from and a
+    reviewer can hold the fix to."""
+    defects: list[dict[str, Any]] = []
+    bug = draft.get("bug") if isinstance(draft.get("bug"), dict) else {}
+    for name, what in (
+        ("summary", "no summary"),
+        ("observed", "nothing under observed — what goes wrong"),
+        ("expected", "nothing under expected — what should happen instead"),
+        ("root_cause", "no root cause — say what the code does, or where you looked and could not tell"),
+        ("fix_location", "no fix location — say where the fix most likely lies"),
+    ):
+        if not _text(bug.get(name)) or looks_like_placeholder(bug.get(name)):
+            defects.append(_defect(KIND_STUB_DRAFT if name == "summary" else KIND_STUB_FIELD, f"the bug has {what}", where=f"bug.{name}"))
+    criteria = _criteria(bug.get("acceptance_criteria"))
+    if not criteria or all(looks_like_placeholder(item) for item in criteria):
+        defects.append(_defect(
+            KIND_NO_CRITERIA,
+            "the bug has no acceptance criteria — at least one checkable statement that the fault is gone under the "
+            "reported conditions, and a regression test covering them",
+            where="bug.acceptance_criteria",
+        ))
+    confidence, cause_in = bug.get("confidence"), bug.get("cause_in")
+    if confidence not in CONFIDENCES:
+        defects.append(_defect(KIND_STUB_FIELD, f"bug.confidence must be one of {', '.join(CONFIDENCES)}, not {confidence!r}", where="bug.confidence"))
+    if cause_in not in CAUSE_PLACES:
+        defects.append(_defect(KIND_STUB_FIELD, f"bug.cause_in must be one of {', '.join(CAUSE_PLACES)}, not {cause_in!r}", where="bug.cause_in"))
+    code_evidence = [e for e in _list(bug.get("evidence")) if isinstance(e, dict) and e.get("source") == "code"]
+    if cause_in == "code" and confidence in ("high", "medium") and not code_evidence:
+        defects.append(_defect(
+            KIND_UNSUPPORTED_CAUSE,
+            f"the cause is in the code at {confidence} confidence, but no code is cited — quote the lines that "
+            "produce the wrong behaviour, or lower the confidence to low",
+            where="bug.evidence",
+        ))
+    if cause_in in ("data", "configuration"):
+        defects.append(_defect(
+            KIND_CAUSE_NOT_IN_CODE,
+            f"the cause is in {cause_in}, not in the code — elstin can only change code, so a fix run would have "
+            "nothing to do. Correct the data or setting by hand, or make the ticket about guarding against it in code",
+            where="bug.cause_in", is_blocking=False,
+        ))
+    questions = [q for q in _list(draft.get("questions")) if isinstance(q, dict)]
+    defects.extend(check_questions(questions))
+    ids = [_text(q.get("id")) for q in questions]
+    if len(set(ids)) != len(ids) or "" in ids:
+        defects.append(_defect(KIND_STUB_FIELD, "every question needs its own non-empty id", where="questions"))
+    return defects
+
+
 def kind_warnings(draft: dict[str, Any]) -> list[dict[str, Any]]:
     """Stories whose `kind` elstin would classify the other way when the ticket
     is synced back (elstin/services/story_kind.py). Advisory: the heuristic
@@ -377,6 +466,19 @@ def kind_warnings(draft: dict[str, Any]) -> list[dict[str, Any]]:
     still be changed. A QA story is labelled `qa` at publish, so it is judged
     as it will be written."""
     warnings: list[dict[str, Any]] = []
+    if isinstance(draft.get("bug"), dict):
+        bug = draft["bug"]
+        classified, reason = classify_story_kind(
+            summary=_text(bug.get("summary")), description=_text(bug.get("observed")), issue_type="Bug",
+            labels=[label for label in _list(bug.get("labels")) if isinstance(label, str)],
+        )
+        if classified != "dev":
+            warnings.append(_defect(
+                KIND_KIND_MISMATCH,
+                f"elstin would classify this bug as {classified} work ({reason}) when the ticket is synced, and only "
+                "review it rather than fix it — drop the label or reword it",
+                where="bug.labels", is_blocking=False,
+            ))
     for index, story in enumerate(_stories(draft)):
         stated = story.get("kind")
         if stated not in ("dev", "qa"):
@@ -505,23 +607,21 @@ def verify_evidence(
     to see; they decide what to do with a claim nobody could confirm."""
     annotated = copy.deepcopy(draft)
     defects: list[dict[str, Any]] = []
-    groups = [("stories", _stories(annotated)), ("existing", [r for r in _list(annotated.get("existing")) if isinstance(r, dict)])]
-    for name, rows in groups:
-        for index, row in enumerate(rows):
-            label = _text(row.get("ref")) or _text(row.get("key")) or str(index + 1)
-            for ev_index, item in enumerate(_list(row.get("evidence"))):
-                ok, why, kind, fixed_ref = _check_one_evidence(item, research, workspace)
-                if isinstance(item, dict):
-                    item["verified"] = ok
-                    if fixed_ref:
-                        item["ref"] = fixed_ref
-                if not ok:
-                    ref = _text(item.get("ref")) if isinstance(item, dict) else ""
-                    noun = "story" if name == "stories" else "existing story"
-                    defects.append(_defect(
-                        kind, f"{noun} {label}: evidence {ref or ev_index + 1} {why}",
-                        where=f"{name}[{index}].evidence[{ev_index}]",
-                    ))
+    for name, index, row in _evidence_rows(annotated):
+        label = _text(row.get("ref")) or _text(row.get("key")) or str(index + 1)
+        for ev_index, item in enumerate(_list(row.get("evidence"))):
+            ok, why, kind, fixed_ref = _check_one_evidence(item, research, workspace)
+            if isinstance(item, dict):
+                item["verified"] = ok
+                if fixed_ref:
+                    item["ref"] = fixed_ref
+            if not ok:
+                ref = _text(item.get("ref")) if isinstance(item, dict) else ""
+                owner = "the bug" if name == "bug" else f"{'story' if name == 'stories' else 'existing story'} {label}"
+                defects.append(_defect(
+                    kind, f"{owner}: evidence {ref or ev_index + 1} {why}",
+                    where=f"bug.evidence[{ev_index}]" if name == "bug" else f"{name}[{index}].evidence[{ev_index}]",
+                ))
     return annotated, defects
 
 
@@ -531,22 +631,20 @@ def carry_verification(new_draft: dict[str, Any], old_draft: dict[str, Any] | No
     re-run the checks that need a run's reads, and an item they did not touch
     should not lose its tick for it; one they changed has not been checked."""
     known: dict[tuple[str, str, str], bool] = {}
-    for group in ("stories", "existing"):
-        for row in _list((old_draft or {}).get(group)):
-            for item in _list(row.get("evidence")) if isinstance(row, dict) else []:
-                if isinstance(item, dict) and isinstance(item.get("verified"), bool):
-                    known[(str(item.get("source")), str(item.get("ref")), str(item.get("quote")))] = item["verified"]
+    for _group, _index, row in _evidence_rows(old_draft or {}):
+        for item in _list(row.get("evidence")):
+            if isinstance(item, dict) and isinstance(item.get("verified"), bool):
+                known[(str(item.get("source")), str(item.get("ref")), str(item.get("quote")))] = item["verified"]
     merged = copy.deepcopy(new_draft)
-    for group in ("stories", "existing"):
-        for row in _list(merged.get(group)):
-            for item in _list(row.get("evidence")) if isinstance(row, dict) else []:
-                if not isinstance(item, dict):
-                    continue
-                key = (str(item.get("source")), str(item.get("ref")), str(item.get("quote")))
-                if key in known:
-                    item["verified"] = known[key]
-                else:
-                    item.pop("verified", None)
+    for _group, _index, row in _evidence_rows(merged):
+        for item in _list(row.get("evidence")):
+            if not isinstance(item, dict):
+                continue
+            key = (str(item.get("source")), str(item.get("ref")), str(item.get("quote")))
+            if key in known:
+                item["verified"] = known[key]
+            else:
+                item.pop("verified", None)
     return merged
 
 
@@ -580,11 +678,13 @@ _KIND_HEADINGS = (
     (KIND_UNKNOWN_DEPENDENCY, "These dependencies point at nothing:"),
     (KIND_DEPENDENCY_CYCLE, "These dependencies cannot be satisfied:"),
     (KIND_EXISTING_COVERAGE, "The assessment of the existing stories is wrong:"),
+    (KIND_UNSUPPORTED_CAUSE, "The cause is claimed without the code that shows it:"),
     (KIND_EVIDENCE_MISSING, "These evidence references do not resolve — a claim must come from a file, ticket or page you actually opened, so look again before you re-state it:"),
     (KIND_EVIDENCE_UNREAD, "These evidence references name a ticket or page you never opened. Open it with jira_get_issue / confluence_get_page, read it, then quote it — or drop the claim:"),
     (KIND_EVIDENCE_QUOTE, "These evidence quotes are not in the source. A quote is a verbatim excerpt (a sentence or a line), copied from what you read — not a paraphrase:"),
     (KIND_DEPENDS_ON_QA, "Worth fixing:"),
     (KIND_KIND_MISMATCH, "Worth fixing:"),
+    (KIND_CAUSE_NOT_IN_CODE, "Worth fixing:"),
 )
 
 

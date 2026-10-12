@@ -6,6 +6,7 @@ import { cn } from "../../../lib/utils";
 import type { PoSession } from "../../../types/api";
 import { Button } from "../../ui/button";
 import { Textarea } from "../../ui/textarea";
+import { AgentOrb } from "./AgentOrb";
 
 const MAX_CHARS = 4000;
 const CLOSED = new Set(["discarded", "publishing", "published"]);
@@ -77,7 +78,7 @@ export function PoChat({ projectId, session }: { projectId: number; session: PoS
         ))}
         {working ? (
           <div className="bg-muted text-muted-foreground flex items-center gap-2 self-start rounded-2xl rounded-bl-md px-3 py-2 text-sm">
-            <span className="bg-blue-500 size-1.5 animate-pulse rounded-full motion-reduce:animate-none" aria-hidden="true" />
+            <AgentOrb status={session.status} className="text-info" />
             {session.status === "queued" ? "Waiting for the daemon to pick this up (up to 15s)…" : "The agent is working…"}
           </div>
         ) : null}
@@ -92,9 +93,13 @@ export function PoChat({ projectId, session }: { projectId: number; session: PoS
           placeholder={
             closed
               ? "This session is closed."
-              : session.draft
-                ? "Ask for a change — e.g. split s2 in two, or add a story for notifications"
-                : "Add to the brief, or ask a question"
+              : session.mode === "bug"
+                ? session.draft
+                  ? "Tell it what you know — e.g. a record you checked, or another place to look"
+                  : "Add to the report, or ask a question"
+                : session.draft
+                  ? "Ask for a change — e.g. split s2 in two, or add a story for notifications"
+                  : "Add to the brief, or ask a question"
           }
           value={message}
           onChange={(e) => setMessage(e.target.value)}
@@ -102,9 +107,8 @@ export function PoChat({ projectId, session }: { projectId: number; session: PoS
             if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submit();
           }}
         />
-        <div className="flex items-center justify-between gap-3">
-          <span className="text-muted-foreground text-xs">⌘/Ctrl+Enter sends</span>
-          <Button size="sm" disabled={!text || closed} loading={send.isPending} onClick={submit}>
+        <div className="flex justify-end">
+          <Button size="xs" title="Send (⌘/Ctrl+Enter)" disabled={!text || closed} loading={send.isPending} onClick={submit}>
             Send
           </Button>
         </div>
