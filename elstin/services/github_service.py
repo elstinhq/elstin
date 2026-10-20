@@ -101,7 +101,7 @@ def push_branch(project_path: str, branch: str) -> tuple[bool, str | None]:
 
 class GitHubService:
     """Thin wrapper around PyGithub. Requires a GitHub token to be set via
-    the settings UI (stored in Postgres, read through elstin.config.store)."""
+    the settings UI (stored in the database, read through elstin.config.store)."""
 
     def __init__(self) -> None:
         if not self.is_configured():

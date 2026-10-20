@@ -1,11 +1,12 @@
 """PO sessions and their conversation — see elstin/db/models/po_session.py.
 
 Every transition is guarded by the status the row is in *inside the same
-transaction that changes it* (row-locked), because three things move a session
-at once: the API (a person's edit, message, answer, publish or cancel), the
-daemon's runner (a turn starting and finishing) and its publisher. A guard that
-read the status first and wrote after would let a person's message land in the
-gap between "the turn is finishing" and "the turn is finished" and be lost.
+transaction that changes it* (a transaction is exclusive — elstin/db/engine.py),
+because three things move a session at once: the API (a person's edit,
+message, answer, publish or cancel), the daemon's runner (a turn starting and
+finishing) and its publisher. A guard that read the status first and wrote
+after would let a person's message land in the gap between "the turn is
+finishing" and "the turn is finished" and be lost.
 
 Kept apart from manager_lesson.py / manager_project.py: a session has its own
 lifecycle (queued → running → ready → published) and its own telemetry to
@@ -175,12 +176,12 @@ class _PoMixin:
     # -- the runner's side -------------------------------------------------------
 
     def claim_next_po_session(self) -> dict[str, Any] | None:
-        """The oldest queued session, now `running`, or None. Row-locked and
-        skipping a locked row, so two claimers can never take the same one."""
+        """The oldest queued session, now `running`, or None. The claim is one
+        exclusive transaction, so two claimers can never take the same one."""
         with session_scope() as session:
             row = session.execute(
                 select(PoSession).where(PoSession.status == PO_QUEUED).order_by(PoSession.id)
-                .limit(1).with_for_update(skip_locked=True)
+                .limit(1)
             ).scalar_one_or_none()
             if row is None:
                 return None
@@ -198,7 +199,7 @@ class _PoMixin:
         requeued: list[int] = []
         with session_scope() as session:
             rows = session.execute(
-                select(PoSession).where(PoSession.status == PO_RUNNING).with_for_update()
+                select(PoSession).where(PoSession.status == PO_RUNNING)
             ).scalars().all()
             for row in rows:
                 if row.id in live_ids:
@@ -222,12 +223,12 @@ class _PoMixin:
 
     def take_po_messages(self, session_id: int) -> list[dict[str, Any]]:
         """Every message of a person's the agent has not read yet, now read.
-        Row-locked, so a message is delivered once and never lost."""
+        One exclusive transaction, so a message is delivered once and never lost."""
         with session_scope() as session:
             rows = session.execute(
                 select(PoMessage).where(
                     PoMessage.session_id == session_id, PoMessage.role == ROLE_PERSON, PoMessage.delivered_at.is_(None),
-                ).order_by(PoMessage.id).with_for_update()
+                ).order_by(PoMessage.id)
             ).scalars().all()
             for row in rows:
                 row.delivered_at = _now()
@@ -258,7 +259,7 @@ class _PoMixin:
         ended before reading it. None when the session is no longer running
         (cancelled or deleted mid-turn): the result is dropped."""
         with session_scope() as session:
-            row = session.execute(select(PoSession).where(PoSession.id == session_id).with_for_update()).scalar_one_or_none()
+            row = session.execute(select(PoSession).where(PoSession.id == session_id)).scalar_one_or_none()
             if row is None or row.status != PO_RUNNING:
                 return None
             row.draft = draft
@@ -283,7 +284,7 @@ class _PoMixin:
         """A turn that produced nothing usable. The draft it started from, if
         any, is kept: what a person could already see does not vanish."""
         with session_scope() as session:
-            row = session.execute(select(PoSession).where(PoSession.id == session_id).with_for_update()).scalar_one_or_none()
+            row = session.execute(select(PoSession).where(PoSession.id == session_id)).scalar_one_or_none()
             if row is None or row.status != PO_RUNNING:
                 return None
             row.status = PO_FAILED
@@ -309,7 +310,7 @@ class _PoMixin:
         the draft's current one — the edit was made over a draft that has since
         changed, and saving it would silently throw the newer one away."""
         with session_scope() as session:
-            row = session.execute(select(PoSession).where(PoSession.id == session_id).with_for_update()).scalar_one_or_none()
+            row = session.execute(select(PoSession).where(PoSession.id == session_id)).scalar_one_or_none()
             if row is None:
                 raise PoSessionConflict("No such session.")
             if row.status in (PO_RUNNING, PO_PUBLISHING, PO_PUBLISHED, PO_DISCARDED):
@@ -344,7 +345,7 @@ class _PoMixin:
         session as it is now either way, None for an unknown one. The caller
         looks at `status` to see whether it took."""
         with session_scope() as session:
-            row = session.execute(select(PoSession).where(PoSession.id == session_id).with_for_update()).scalar_one_or_none()
+            row = session.execute(select(PoSession).where(PoSession.id == session_id)).scalar_one_or_none()
             if row is None:
                 return None
             if row.status in from_statuses:
@@ -358,7 +359,7 @@ class _PoMixin:
         use them. Only while the agent is waiting on them (or has a finished
         draft it asked something about)."""
         with session_scope() as session:
-            row = session.execute(select(PoSession).where(PoSession.id == session_id).with_for_update()).scalar_one_or_none()
+            row = session.execute(select(PoSession).where(PoSession.id == session_id)).scalar_one_or_none()
             if row is None:
                 raise PoSessionConflict("No such session.")
             if row.status not in (PO_AWAITING_INPUT, PO_READY):
@@ -376,7 +377,7 @@ class _PoMixin:
         flight (it would leave tickets half made with nothing recording which),
         and not once published — that is a record of what was created."""
         with session_scope() as session:
-            row = session.execute(select(PoSession).where(PoSession.id == session_id).with_for_update()).scalar_one_or_none()
+            row = session.execute(select(PoSession).where(PoSession.id == session_id)).scalar_one_or_none()
             if row is None:
                 raise PoSessionConflict("No such session.")
             if row.status in (PO_PUBLISHING, PO_PUBLISHED):
@@ -389,7 +390,7 @@ class _PoMixin:
         """Remove the session, its conversation and its telemetry. None for an
         unknown one. A publish in flight refuses it, for the reason above."""
         with session_scope() as session:
-            row = session.execute(select(PoSession).where(PoSession.id == session_id).with_for_update()).scalar_one_or_none()
+            row = session.execute(select(PoSession).where(PoSession.id == session_id)).scalar_one_or_none()
             if row is None:
                 return None
             if row.status == PO_PUBLISHING:
@@ -406,7 +407,7 @@ class _PoMixin:
         """`ready` → `publishing`, once. The draft is frozen from here (a save is
         refused while the status is `publishing`)."""
         with session_scope() as session:
-            row = session.execute(select(PoSession).where(PoSession.id == session_id).with_for_update()).scalar_one_or_none()
+            row = session.execute(select(PoSession).where(PoSession.id == session_id)).scalar_one_or_none()
             if row is None:
                 raise PoSessionConflict("No such session.")
             if row.status != PO_READY:
@@ -423,10 +424,10 @@ class _PoMixin:
         self, session_id: int, *, created: dict[str, str] | None = None, link: str | None = None,
         comment: str | None = None, **fields: Any,
     ) -> dict[str, Any] | None:
-        """Add to the checkpoint. Row-locked and merged, never replaced, so the
-        publisher and a person posting a suggestion cannot overwrite each other."""
+        """Add to the checkpoint. Merged inside one exclusive transaction, never
+        replaced, so the publisher and a person posting a suggestion cannot overwrite each other."""
         with session_scope() as session:
-            row = session.execute(select(PoSession).where(PoSession.id == session_id).with_for_update()).scalar_one_or_none()
+            row = session.execute(select(PoSession).where(PoSession.id == session_id)).scalar_one_or_none()
             if row is None:
                 return None
             result = dict(row.publish_result or {})
@@ -446,7 +447,7 @@ class _PoMixin:
         and frozen — unless it was `scoped` to some stories and others are still
         not in JIRA: then the session is `ready` again, for the next story."""
         with session_scope() as session:
-            row = session.execute(select(PoSession).where(PoSession.id == session_id).with_for_update()).scalar_one_or_none()
+            row = session.execute(select(PoSession).where(PoSession.id == session_id)).scalar_one_or_none()
             if row is None or row.status != PO_PUBLISHING:
                 return None
             created = (row.publish_result or {}).get("created") or {}
@@ -459,7 +460,7 @@ class _PoMixin:
         """A publish that stopped. Back to `ready` — what was created is in the
         checkpoint, so pressing Publish again continues rather than repeats."""
         with session_scope() as session:
-            row = session.execute(select(PoSession).where(PoSession.id == session_id).with_for_update()).scalar_one_or_none()
+            row = session.execute(select(PoSession).where(PoSession.id == session_id)).scalar_one_or_none()
             if row is None or row.status != PO_PUBLISHING:
                 return None
             row.status = PO_READY
@@ -473,7 +474,7 @@ class _PoMixin:
         Publish once, and pressing it again is how it continues."""
         recovered: list[int] = []
         with session_scope() as session:
-            rows = session.execute(select(PoSession).where(PoSession.status == PO_PUBLISHING).with_for_update()).scalars().all()
+            rows = session.execute(select(PoSession).where(PoSession.status == PO_PUBLISHING)).scalars().all()
             for row in rows:
                 if row.id in live_ids:
                     continue
@@ -490,7 +491,7 @@ class _PoMixin:
         are dropped and the session is `ready`. Without this a draft the agent
         asked something about could never be published unless it were answered."""
         with session_scope() as session:
-            row = session.execute(select(PoSession).where(PoSession.id == session_id).with_for_update()).scalar_one_or_none()
+            row = session.execute(select(PoSession).where(PoSession.id == session_id)).scalar_one_or_none()
             if row is None:
                 raise PoSessionConflict("No such session.")
             if row.status != PO_AWAITING_INPUT:

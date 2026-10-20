@@ -285,7 +285,7 @@ async def test_a_resumed_run_carries_its_project_too(project_id, git_repo, tmp_p
     assert graph.patch["project_id"] == project_id  # also for a run checkpointed before it was carried
 
 
-async def _run_graph_capturing_roles(postgres_url: str, monkeypatch, **state_fields) -> dict[str, dict]:
+async def _run_graph_capturing_roles(database_url: str, monkeypatch, **state_fields) -> dict[str, dict]:
     """Runs the real graph with the roles replaced by recorders; returns the
     keyword arguments each one was called with."""
     captured: dict[str, dict] = {}
@@ -309,7 +309,7 @@ async def _run_graph_capturing_roles(postgres_url: str, monkeypatch, **state_fie
     state = initial_state("ENG-2", "Add a widget", "/repo")
     state["worktree_path"] = "/wt"
     state.update(state_fields)
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         await graph.ainvoke(state, {"configurable": {"thread_id": "ENG-2"}})
     return captured
@@ -317,8 +317,8 @@ async def _run_graph_capturing_roles(postgres_url: str, monkeypatch, **state_fie
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_agents")
-async def test_every_role_is_told_which_project_it_works_for(postgres_url, monkeypatch):
-    roles = await _run_graph_capturing_roles(postgres_url, monkeypatch, project_id=7)
+async def test_every_role_is_told_which_project_it_works_for(database_url, monkeypatch):
+    roles = await _run_graph_capturing_roles(database_url, monkeypatch, project_id=7)
 
     assert {name: roles[name]["project_id"] for name in ("planner", "dev", "verifier")} == {
         "planner": 7, "dev": 7, "verifier": 7,
@@ -327,16 +327,16 @@ async def test_every_role_is_told_which_project_it_works_for(postgres_url, monke
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_agents")
-async def test_a_run_checkpointed_before_projects_could_choose_uses_the_global_settings(postgres_url, monkeypatch):
-    roles = await _run_graph_capturing_roles(postgres_url, monkeypatch)
+async def test_a_run_checkpointed_before_projects_could_choose_uses_the_global_settings(database_url, monkeypatch):
+    roles = await _run_graph_capturing_roles(database_url, monkeypatch)
 
     assert all(roles[name]["project_id"] is None for name in ("planner", "dev", "verifier"))
 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_agents")
-async def test_the_older_shared_model_override_still_reaches_planner_and_dev(postgres_url, monkeypatch):
-    roles = await _run_graph_capturing_roles(postgres_url, monkeypatch, sdk_model="shared")
+async def test_the_older_shared_model_override_still_reaches_planner_and_dev(database_url, monkeypatch):
+    roles = await _run_graph_capturing_roles(database_url, monkeypatch, sdk_model="shared")
 
     assert roles["planner"]["sdk_model"] == roles["dev"]["sdk_model"] == "shared"
 

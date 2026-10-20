@@ -1,7 +1,7 @@
 """Removing a ticket from elstin: everything it left behind goes, nothing
 else does, and it refuses while a run is in flight.
 
-Driven against real Postgres and real git. Two tickets are taken through the
+Driven against a real SQLite database and real git. Two tickets are taken through the
 daemon (fake agents, so no model is called) as far as a merge into their epic
 integration branches, which leaves every kind of trace: rows in each table,
 worktrees and branches, an integration worktree and branch, baseline and
@@ -11,17 +11,19 @@ come through untouched.
 from __future__ import annotations
 
 import os
+import sqlite3
 import subprocess
+from contextlib import closing
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 
 from elstin.config.store import set_config, set_project_config
 from elstin.daemon import ticket_removal
 from elstin.daemon.main import claim_run, handle_intent, live_run_keys, poll_once, release_run
 from elstin.daemon.ticket_removal import TicketBusy, TicketNotFound, TicketRemovalError, remove_epic
-from elstin.db.engine import session_scope
+from elstin.db.engine import checkpoints_path, session_scope
 from elstin.db.models import (
     ActivityEvent, Epic, JiraWatermark, PullRequest, Story, StoryRunOutcome, StoryUsage, StoryWorktree,
 )
@@ -53,7 +55,17 @@ def _rows(keys: tuple[str, ...]) -> dict[str, int]:
             return s.scalar(select(func.count()).select_from(model).where(column.in_(values))) or 0
 
         def checkpoint_rows(table: str) -> int:
-            return s.execute(text(f"select count(*) from {table} where thread_id = any(:keys)"), {"keys": list(keys)}).scalar()
+            # The checkpointer keeps its own file (elstin/db/engine.py's
+            # checkpoints_path); its tables do not exist until a run first opens it.
+            path = checkpoints_path()
+            if not path.exists():
+                return 0
+            with closing(sqlite3.connect(path)) as conn:
+                try:
+                    marks = ",".join("?" * len(keys))
+                    return conn.execute(f"select count(*) from {table} where thread_id in ({marks})", list(keys)).fetchone()[0]
+                except sqlite3.OperationalError:
+                    return 0
 
         return {
             "epics": count(Epic, Epic.jira_key, keys),
@@ -65,8 +77,7 @@ def _rows(keys: tuple[str, ...]) -> dict[str, int]:
             "run_outcomes": count(StoryRunOutcome, StoryRunOutcome.run_id, keys),
             "watermarks": count(JiraWatermark, JiraWatermark.jira_key, keys),
             "checkpoints": checkpoint_rows("checkpoints"),
-            "checkpoint_writes": checkpoint_rows("checkpoint_writes"),
-            "checkpoint_blobs": checkpoint_rows("checkpoint_blobs"),
+            "checkpoint_writes": checkpoint_rows("writes"),
         }
 
 
@@ -245,8 +256,8 @@ async def test_a_checkpoint_failure_stops_before_any_row_is_deleted_and_can_be_r
     monkeypatch.setattr(ticket_removal, "_delete_checkpoints", broken)
     with pytest.raises(TicketRemovalError, match="unreachable"):
         await remove_epic(sm, "ENG-1")
-    assert {k: v for k, v in _rows(GONE).items() if k not in ("checkpoints", "checkpoint_writes", "checkpoint_blobs")} == {
-        k: v for k, v in before.items() if k not in ("checkpoints", "checkpoint_writes", "checkpoint_blobs")
+    assert {k: v for k, v in _rows(GONE).items() if k not in ("checkpoints", "checkpoint_writes")} == {
+        k: v for k, v in before.items() if k not in ("checkpoints", "checkpoint_writes")
     }
     assert live_run_keys() == frozenset()
 

@@ -1,6 +1,6 @@
 """Retry for a run that failed in dev: pick up at dev with the plan already made.
 
-The real graph, the real Postgres checkpointer and real worktrees; only the
+The real graph, the real SQLite checkpointer and real worktrees; only the
 agents behind the graph's entry points are fakes (`fake_agents`). What matters
 is what the checkpoint says afterwards — whether the planner is called again —
 so each test fails a run at some node, calls `arm_resume_at_dev`, and reads
@@ -43,8 +43,8 @@ STORY = "ENG-2"
 class Run:
     """One story with a real worktree, and helpers to fail and re-enter its run."""
 
-    def __init__(self, postgres_url: str, sm: StateManager, worktree: dict) -> None:
-        self.postgres_url = postgres_url
+    def __init__(self, database_url: str, sm: StateManager, worktree: dict) -> None:
+        self.database_url = database_url
         self.sm = sm
         self.worktree_path = worktree["worktree_path"]
         self.config = {"configurable": {"thread_id": STORY}}
@@ -55,7 +55,7 @@ class Run:
         state = initial_state(STORY, "Add a widget to the cart", "/repo")
         state["worktree_path"] = self.worktree_path
         state.update(state_overrides)
-        async with checkpointer_from_url(self.postgres_url) as checkpointer:
+        async with checkpointer_from_url(self.database_url) as checkpointer:
             graph = compile_graph(checkpointer, require_plan_approval=False)
             return await graph.ainvoke(state, self.config)
 
@@ -63,19 +63,19 @@ class Run:
         return await arm_resume_at_dev(self.sm, self.sm.get_epic("ENG-1"), self.sm.get_story(STORY))
 
     async def snapshot(self):
-        async with checkpointer_from_url(self.postgres_url) as checkpointer:
+        async with checkpointer_from_url(self.database_url) as checkpointer:
             return await compile_graph(checkpointer, require_plan_approval=False).aget_state(self.config)
 
     async def resume(self) -> dict:
         """What the daemon's resume does: re-supply the worktree, then continue."""
-        async with checkpointer_from_url(self.postgres_url) as checkpointer:
+        async with checkpointer_from_url(self.database_url) as checkpointer:
             graph = compile_graph(checkpointer, require_plan_approval=False)
             await _apply_resume_patch(graph, self.config, {"worktree_path": self.worktree_path})
             return await graph.ainvoke(None, self.config)
 
 
 @pytest.fixture()
-def run(postgres_url: str, project_id: int, git_repo: str, tmp_path, fake_agents, monkeypatch: pytest.MonkeyPatch) -> Run:
+def run(database_url: str, project_id: int, git_repo: str, tmp_path, fake_agents, monkeypatch: pytest.MonkeyPatch) -> Run:
     sm = StateManager()
     sm.create_epic("ENG-1", project_id=project_id)
     sm.create_story(STORY, epic_key="ENG-1", wave=0, summary="Add a widget", kind="dev")
@@ -84,7 +84,7 @@ def run(postgres_url: str, project_id: int, git_repo: str, tmp_path, fake_agents
         STORY, repo_label="widgets", repo_path=git_repo,
         worktree_path=worktree["worktree_path"], branch=worktree["branch"], is_default=True,
     )
-    the_run = Run(postgres_url, sm, worktree)
+    the_run = Run(database_url, sm, worktree)
 
     fake_planner, fake_dev = graph_module.run_planner, graph_module.run_dev
 
@@ -143,7 +143,7 @@ async def test_the_resume_patch_does_not_skip_dev_on_a_re_armed_run(run: Run, mo
     await run.start()
     assert await run.arm() is True
 
-    async with checkpointer_from_url(run.postgres_url) as checkpointer:
+    async with checkpointer_from_url(run.database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         await _apply_resume_patch(graph, run.config, {"worktree_path": run.worktree_path})
 
@@ -152,7 +152,7 @@ async def test_the_resume_patch_does_not_skip_dev_on_a_re_armed_run(run: Run, mo
 
 async def test_the_resume_patch_leaves_a_run_parked_at_plan_approval_at_dev(run: Run):
     state = initial_state(STORY, "Add a widget to the cart", "/repo")
-    async with checkpointer_from_url(run.postgres_url) as checkpointer:
+    async with checkpointer_from_url(run.database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=True)
         assert (await graph.ainvoke(state, run.config))["status"] == "awaiting_approval"
 
@@ -164,7 +164,7 @@ async def test_the_resume_patch_leaves_a_run_parked_at_plan_approval_at_dev(run:
 async def test_the_resume_patch_leaves_a_landing_send_back_at_dev(run: Run):
     """The merge queue re-opens a finished run at dev the same way."""
     await run.start(worktree_path=run.worktree_path)
-    async with checkpointer_from_url(run.postgres_url) as checkpointer:
+    async with checkpointer_from_url(run.database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         await graph.aupdate_state(
             run.config, {"status": "developing", "gate_feedback": "conflicts", "gate_attempts": 0}, as_node="gate",
@@ -355,7 +355,7 @@ async def test_the_resume_patch_keeps_a_run_re_armed_at_review_waiting_at_the_ga
     await run.start()
     assert await arm_resume_after_failure(run.sm, run.sm.get_epic("ENG-1"), run.sm.get_story(STORY)) == "review"
 
-    async with checkpointer_from_url(run.postgres_url) as checkpointer:
+    async with checkpointer_from_url(run.database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         await _apply_resume_patch(graph, run.config, {"worktree_path": run.worktree_path})
 
@@ -405,7 +405,7 @@ async def test_the_resume_patch_leaves_a_run_waiting_on_the_competing_attempts_w
     entered from the gate like dev. Patched with no writer named, LangGraph would
     guess a node and could move past it."""
     await run.start(worktree_path=run.worktree_path)
-    async with checkpointer_from_url(run.postgres_url) as checkpointer:
+    async with checkpointer_from_url(run.database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         await graph.aupdate_state(
             run.config, {"status": "developing", "variants_pending": True, "gate_attempts": 2}, as_node="gate",

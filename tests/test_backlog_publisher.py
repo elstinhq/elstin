@@ -1,4 +1,4 @@
-"""The PO publisher (elstin/services/backlog_publisher.py) against a real Postgres
+"""The PO publisher (elstin/services/backlog_publisher.py) against a real SQLite database
 and a fake ticket source: what it creates and in what order, the checkpoint that
 makes a stopped publish resumable, and that a retry never makes a duplicate.
 No live JIRA — the source is faked at the TicketSource boundary."""

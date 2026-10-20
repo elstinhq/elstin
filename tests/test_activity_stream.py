@@ -8,7 +8,7 @@ show as an activity feed that has silently stopped updating:
 - an event published from a verifier tool thread rather than the loop,
 - an event dropped because the subscriber's buffer was full.
 
-Each has a test below. Postgres stays the source of truth throughout, so
+Each has a test below. The database stays the source of truth throughout, so
 the assertions are always "the stream agrees with the table".
 """
 from __future__ import annotations
@@ -133,7 +133,7 @@ async def test_events_published_from_a_worker_thread_reach_the_stream(project_id
         await gen.aclose()
 
 
-async def test_a_subscriber_that_overflows_catches_up_from_postgres(project_id, monkeypatch):
+async def test_a_subscriber_that_overflows_catches_up_from_the_table(project_id, monkeypatch):
     """A browser that stops reading must not create a hole in the feed: the
     events it couldn't be handed are re-read from the table on the next
     wakeup, in order and without duplicates."""

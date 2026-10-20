@@ -1,6 +1,6 @@
 """elstin's only configuration store. No `.env` file — every setting
 except the bootstrap `DATABASE_URL` (see elstin/db/engine.py) lives in the
-`app_config` Postgres table and is edited through the settings UI/API.
+`app_config` table and is edited through the settings UI/API.
 
 `CONFIG_FIELDS` is the schema: it lets the settings UI render every known
 field (with its label/type/secret flag) even before a value has ever been
@@ -10,12 +10,13 @@ when a row doesn't exist yet.
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
 from sqlalchemy import select
 
-from elstin.db.engine import session_scope
+from elstin.db.engine import database_path, session_scope
 from elstin.db.models import AppConfig, ProjectConfig
 
 
@@ -24,10 +25,25 @@ class ConfigField:
     key: str
     label: str
     secret: bool
-    default: str | None
+    # What an unset setting reads as. A callable is resolved each time it is read, for
+    # a default that depends on where the database is (the storage directories).
+    default: str | Callable[[], str] | None
     # "model" is a string the settings screens offer the provider's models for
     # (GET /api/config/models) and that a project may override.
     type: Literal["string", "bool", "model"]
+
+    @property
+    def resolved_default(self) -> str | None:
+        return self.default() if callable(self.default) else self.default
+
+
+def _storage_default(name: str = "") -> Callable[[], str]:
+    """Default location for one of elstin's bulk directories: beside the database
+    file, so everything elstin owns lives in one place — `~/Library/Application
+    Support/Elstin` for the Mac app, `/data` in the Docker image (whose
+    DATABASE_URL is `/data/elstin.db`, so these come out as the volume paths it has
+    always used)."""
+    return lambda: str(database_path().parent / name) if name else str(database_path().parent)
 
 
 CONFIG_FIELDS: tuple[ConfigField, ...] = (
@@ -35,7 +51,7 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
     ConfigField("jira_email", "JIRA account email", False, None, "string"),
     ConfigField("jira_api_token", "JIRA API token", True, None, "string"),
     ConfigField("jira_write_enabled", "Allow the framework to write to JIRA (transitions)", False, "false", "bool"),
-    ConfigField("jira_attachments_dir", "JIRA attachment download directory", False, "/data/jira-attachments", "string"),
+    ConfigField("jira_attachments_dir", "JIRA attachment download directory", False, _storage_default("jira-attachments"), "string"),
     # elstin/services/confluence_service.py — read only, and reached with the
     # JIRA connection above (Atlassian Cloud's one account covers both), so
     # there is no second credential to store. Off unless turned on: the PO
@@ -141,9 +157,9 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         "(0 = keep them all). Only the directory goes; the story's branch is always kept",
         False, "10", "string",
     ),
-    ConfigField("worktrees_base_dir", "Worktrees base directory", False, "/data/repos", "string"),
-    ConfigField("cloned_repos_base_dir", "Cloned project repos base directory", False, "/data/cloned-repos", "string"),
-    ConfigField("data_dir", "Data directory (dev-loop baseline snapshots, etc.)", False, "/data", "string"),
+    ConfigField("worktrees_base_dir", "Worktrees base directory", False, _storage_default("repos"), "string"),
+    ConfigField("cloned_repos_base_dir", "Cloned project repos base directory", False, _storage_default("cloned-repos"), "string"),
+    ConfigField("data_dir", "Data directory (dev-loop baseline snapshots, etc.)", False, _storage_default(), "string"),
     ConfigField(
         "auto_run_enabled",
         "Automatically dispatch and progress ready stories (off = wait for a manual Start)",
@@ -469,7 +485,14 @@ def get_config(key: str) -> str | None:
     if key in values and values[key] is not None:
         return values[key]
     field = _FIELDS_BY_KEY.get(key)
-    return field.default if field else None
+    return field.resolved_default if field else None
+
+
+def storage_dir(key: str) -> str:
+    """One of the storage directories (`worktrees_base_dir`, `data_dir`,
+    `cloned_repos_base_dir`, `jira_attachments_dir`): what the settings say, or —
+    unset or blank — the default beside the database. Never empty."""
+    return get_config(key) or _FIELDS_BY_KEY[key].resolved_default
 
 
 def get_bool_config(key: str) -> bool:
@@ -530,7 +553,7 @@ def list_config_for_display() -> list[dict]:
                 "label": field.label,
                 "type": field.type,
                 "secret": field.secret,
-                "value": "••••••••" if (field.secret and set_flag) else (raw if raw is not None else field.default),
+                "value": "••••••••" if (field.secret and set_flag) else (raw if raw is not None else field.resolved_default),
                 "is_set": set_flag,
             }
         )
@@ -648,7 +671,7 @@ def list_project_config_for_display(project_id: int) -> list[dict]:
                 "label": field.label,
                 "type": field.type,
                 "secret": field.secret,
-                "value": "••••••••" if (field.secret and set_flag) else (raw if raw is not None else field.default),
+                "value": "••••••••" if (field.secret and set_flag) else (raw if raw is not None else field.resolved_default),
                 "is_set": set_flag,
                 "overridden": overridden,
             }

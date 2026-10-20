@@ -1,8 +1,8 @@
 """GET /api/stories/{key}/plan — the only way to read a story's planner
 output back once the plan-approval gate has cleared, since the plan itself
-is never duplicated out of the LangGraph checkpoint into Postgres (see
+is never duplicated out of the LangGraph checkpoint into the board (see
 elstin/db/models/gameplan.py's docstring). Runs the real checkpointer
-against testcontainers Postgres, same as tests/test_graph.py, so this
+against a SQLite file, same as tests/test_graph.py, so this
 proves the route reads the same state a resume would.
 """
 from __future__ import annotations
@@ -39,12 +39,12 @@ async def test_plan_is_null_before_the_story_has_ever_been_dispatched(epic):
     assert response.json() == {"story_key": "ENG-2", "plan": None}
 
 
-async def test_plan_route_reads_the_planner_output_back_from_the_checkpoint(epic, postgres_url):
+async def test_plan_route_reads_the_planner_output_back_from_the_checkpoint(epic, database_url):
     thread_id = "ENG-2"
     config = {"configurable": {"thread_id": thread_id}}
     state = initial_state(thread_id, "Add a widget to the cart", "/repo")
 
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=True)
         await graph.ainvoke(state, config)
 

@@ -2,7 +2,7 @@
 plan-approval gate, resumes once approved, finishes, and is merged into the
 epic branch locally by the merge queue — no per-story pull request, no PR
 gates. Only then does the story that depends on one of them start, from the
-epic branch. Run for real against Postgres and a real git repo — worktree
+epic branch. Run for real against SQLite and a real git repo — worktree
 creation and the epic-branch merges are genuine git operations. Only the LLM
 calls inside elstin/agents/roles/*_loop.py are replaced by the `fake_agents`
 fixture (conftest.py), so this needs no network access or API key.

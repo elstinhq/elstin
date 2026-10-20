@@ -50,7 +50,7 @@ from typing import Any
 from elstin.agents.roles.po_gate import DraftContext
 from elstin.agents.roles.po_loop import PoLoopError, render_person_message, run_product_owner
 from elstin.agents.roles.product_owner import PoInputs
-from elstin.config.store import get_config
+from elstin.config.store import storage_dir
 from elstin.services.confluence_service import ConfluenceService, page_ids_in
 from elstin.services.backlog_publisher import PublishError, publish_backlog
 from elstin.services.po_sessions import (
@@ -365,7 +365,7 @@ async def _gather(sm: StateManager, session: dict[str, Any]) -> _Gathered:
             "This project has no folders yet, so there is no code to read. Add a repo or a reference folder to the "
             "project, then send a message to try again."
         )
-    base = get_config("worktrees_base_dir") or "/data/repos"
+    base = storage_dir("worktrees_base_dir")
     # The epic branch where the epic is on the board: that is where its merged stories' code is.
     out.read_roots = _read_roots(epic_row, roots, {}, base) if epic_row is not None else dict(roots)
     out.default_label = default_label

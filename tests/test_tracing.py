@@ -254,10 +254,10 @@ EPIC = {"jira_key": "ENG-1"}
 STORY = {"jira_key": "ENG-2", "kind": "dev", "summary": "Add a widget", "retry_count": 1}
 
 
-async def _run_graph(postgres_url: str, project_id: int, *, resume: bool = False) -> dict:
+async def _run_graph(database_url: str, project_id: int, *, resume: bool = False) -> dict:
     state = initial_state("ENG-2", "Add a widget", "/repo")
     state["worktree_path"] = "/wt"
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         return await _invoke_graph(
             graph, state, {"configurable": {"thread_id": "ENG-2"}},
@@ -267,8 +267,8 @@ async def _run_graph(postgres_url: str, project_id: int, *, resume: bool = False
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_agents")
-async def test_a_story_run_is_one_trace_with_a_child_per_node(langsmith, postgres_url, project_id):
-    result = await _run_graph(postgres_url, project_id)
+async def test_a_story_run_is_one_trace_with_a_child_per_node(langsmith, database_url, project_id):
+    result = await _run_graph(database_url, project_id)
 
     assert result["status"] == "completed"  # tracing does not change what the run does
     [root] = langsmith.named("elstin:ENG-2")
@@ -289,8 +289,8 @@ async def test_a_story_run_is_one_trace_with_a_child_per_node(langsmith, postgre
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_agents")
-async def test_a_resumed_run_is_labelled_as_one(langsmith, postgres_url, project_id):
-    await _run_graph(postgres_url, project_id, resume=True)
+async def test_a_resumed_run_is_labelled_as_one(langsmith, database_url, project_id):
+    await _run_graph(database_url, project_id, resume=True)
 
     [root] = langsmith.named("elstin:ENG-2")
     assert root["metadata"]["resume"] is True
@@ -299,18 +299,18 @@ async def test_a_resumed_run_is_labelled_as_one(langsmith, postgres_url, project
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_agents")
-async def test_a_project_named_in_settings_receives_the_trace(langsmith, postgres_url, project_id):
+async def test_a_project_named_in_settings_receives_the_trace(langsmith, database_url, project_id):
     set_project_config(project_id, "langsmith_project", "fitpal")
 
-    await _run_graph(postgres_url, project_id)
+    await _run_graph(database_url, project_id)
 
     assert {run["project"] for run in langsmith.created.values()} == {"fitpal"}
 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_agents")
-async def test_with_tracing_off_nothing_is_created_and_the_run_is_the_same(recorder_while_off, postgres_url, project_id):
-    result = await _run_graph(postgres_url, project_id)
+async def test_with_tracing_off_nothing_is_created_and_the_run_is_the_same(recorder_while_off, database_url, project_id):
+    result = await _run_graph(database_url, project_id)
 
     assert result["status"] == "completed"
     assert recorder_while_off.created == {}
@@ -334,7 +334,7 @@ def _request() -> LlmRequest:
 
 
 @pytest.mark.asyncio
-async def test_a_model_call_is_recorded_under_the_node_that_made_it(langsmith, postgres_url, project_id, monkeypatch):
+async def test_a_model_call_is_recorded_under_the_node_that_made_it(langsmith, database_url, project_id, monkeypatch):
     provider = _provider(monkeypatch, lambda request: httpx.Response(200, json=COMPLETION))
     replies = []
 
@@ -356,7 +356,7 @@ async def test_a_model_call_is_recorded_under_the_node_that_made_it(langsmith, p
     monkeypatch.setattr(graph_module, "run_deterministic_gate", gate)
     monkeypatch.setattr(graph_module, "run_verifier", verifier)
 
-    await _run_graph(postgres_url, project_id)
+    await _run_graph(database_url, project_id)
 
     # what the caller gets is what it always got
     assert replies[0].text() == "hello"

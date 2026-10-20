@@ -20,8 +20,9 @@ it ("The PR gate"), and a project with automatic runs off waits for a
 person to press Start ("Manual-run projects"). Every newly added epic starts
 paused until a person resumes it.
 
-Designed for a laptop: `docker compose up`, one process, Postgres-backed
-state, no Kubernetes, no multi-tenancy.
+Designed for a laptop: `docker compose up`, one process, SQLite-backed
+state (one file the app creates and migrates itself), no Kubernetes, no
+multi-tenancy.
 
 ## Quick start
 
@@ -34,29 +35,42 @@ scripts/elstin.sh
 `scripts/elstin.sh` is a wrapper over `docker compose` (or `podman
 compose`): it rebuilds the image on every `up` so the container runs the
 working tree rather than a stale copy of `elstin/` and `alembic/`, waits
-for `/healthz`, and adds `stop`/`down`/`logs`/`status`/`rebuild`/`psql`/
+for `/healthz`, and adds `stop`/`down`/`logs`/`status`/`rebuild`/`shell`/
 `reset`. `scripts/stop.sh` stops the stack (`--keep` to leave the
 containers in place); only `reset` deletes data, and it asks first. Plain
 `docker compose up` still works and nothing in `elstin/` depends on either
 script. `scripts/clear_db.py` (local dev) empties every elstin table *and*
-LangGraph's checkpoint tables — without those a "cleared" story would
-resume mid-run — and keeps both schema-version tables, so nothing needs
-migrating afterwards; it asks first unless given `--yes`.
+LangGraph's checkpoint tables (in the separate checkpoint file) — without
+those a "cleared" story would resume mid-run — and keeps `alembic_version`,
+so nothing needs migrating afterwards; it asks first unless given `--yes`.
+`scripts/migrate_postgres_to_sqlite.py` is the one-off bridge from the old
+Postgres-backed database: it refuses a source that is not at the Postgres-era
+chain's last revision (`20261005_0037`) or whose columns differ, copies every
+table with its ids in one SQLite transaction (counted and foreign-key-checked
+before it commits), and converts each story's *latest* LangGraph checkpoint
+between the two savers — a story's plan and run state live only there. It only
+reads Postgres (a read-only repeatable-read transaction) and refuses a
+non-empty target. Its Postgres driver is installed by hand, not a dependency;
+`tests/test_migrate_from_postgres.py` covers it against a SQLite "source".
 
 Local develop without the full stack:
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-docker compose up postgres -d
-export DATABASE_URL=postgresql+psycopg://elstin:elstin@localhost:5433/elstin
-alembic upgrade head
 pytest
 ```
 
-**Only process env var:** `DATABASE_URL`. Everything else (JIRA, GitHub,
-the LLM provider/key, gates, models) lives in Postgres and is edited live
-at `/settings` — no `.env` file.
+The database is one SQLite file (`~/Library/Application Support/Elstin/elstin.db`
+on macOS, `~/.local/share/elstin/` elsewhere), plus `elstin.checkpoints.db`
+beside it for LangGraph. The app creates it and runs `alembic upgrade head`
+itself before it serves (`elstin/db/migrate.py`), so there is nothing to start
+first; the tests need nothing running either.
+
+**Only process env var:** `DATABASE_URL`, and it is optional — a
+`sqlite:////path/to/elstin.db` URL that moves the file (any other database is
+refused). Everything else (JIRA, GitHub, the LLM provider/key, gates, models)
+lives in that database and is edited live at `/settings` — no `.env` file.
 
 ## Architecture at a glance
 
@@ -67,7 +81,7 @@ Settings UI ──HTTP──► FastAPI (elstin/app.py)
                          ├── lifespan → ticket-filter sweep (5m by default, per project)
                          └── lifespan → daemon poll loop (15s)
                                │
-                               ├── StateManager (Postgres)
+                               ├── StateManager (SQLite)
                                ├── retry stories whose provider limit has lifted
                                ├── per epic: prior-work lookup; done tickets' work → epic branch
                                ├── reconciler.plan_orchestration()  [pure]
@@ -85,7 +99,7 @@ Settings UI ──HTTP──► FastAPI (elstin/app.py)
 
 Agent activity flows the other way, same process:
 
-  roles/*, daemon ──append_activity──► redact ──► activity_events (Postgres)
+  roles/*, daemon ──append_activity──► redact ──► activity_events (SQLite)
                                                         │
                                                         └── activity_stream.publish
                                                               └── SSE /api/stories/{key}/stream
@@ -93,7 +107,7 @@ Agent activity flows the other way, same process:
 ```
 
 The ticket source — JIRA or GitHub Issues, chosen per project — owns what
-a ticket *says*; elstin's Postgres board mirrors that text (a change under a
+a ticket *says*; elstin's local board mirrors that text (a change under a
 plan is held for a person — see "The board vs. its source") and owns all
 orchestration state: status, kind, dependencies and levels, gates,
 worktrees, prior work. The daemon's only write back to the source is epic
@@ -118,12 +132,13 @@ moves at all.
 | `orchestration/` | LangGraph graph, pure reconciler, run state (`FeatureRunState`), the git side of landing a story (`integration.py`) | Put I/O in the reconciler |
 | `daemon/` | Poll loop, ticket-filter sweep, worktree create, intent handling, merge queue, the epic's PR and its CI, QA brief assembly, prior-work lookup, provider-limit retries, worktree retention, ticket and project removal | Call agents without going through the graph |
 | `state/` | **Only** DB access for epics/stories/PRs/projects/lessons/watermarks — one `manager_*.py` mixin per concern, composed into `StateManager` in `manager.py` | Import `elstin.db.models` outside the allow-list in hard constraint #1 |
-| `db/` | SQLAlchemy models + engine | Business logic here |
+| `db/` | SQLAlchemy models, the SQLite engine (`engine.py`: write-lock transactions, WAL, owner-only files, `close_engine`), column types (`types.py`: `UtcDateTime`), the startup migration (`migrate.py`) and the one-elstin-per-database lock (`lock.py`) | Business logic here |
 | `services/` | JIRA/GitHub clients and the per-project ticket source (`ticket_source.py`, `github_issues.py`), epic sync and reconciling with the source (`external_sync.py`), ticket filters, story_kind, generation (verifier/QA's single-shot LLM call), repo clone / attach, project guide, lessons, prior work, guidance, provider limits, run activity + its live fan-out, run telemetry (cost, run shape, peak memory), redaction, LangSmith tracing (`tracing.py`), model options | Bypass StateManager for persistence |
 | `tools/` | Dev-agent tools (web search/fetch included), planner's read-only tools, language profiles (+ `jdk.py`), worktree, path guard, the allowlisted shell, the agent environment, the process monitor, workspace (multi-repo read roots), reference folders, codebase skeleton | Hardcode language names — use `language_hooks`; give a reference repo a write path |
 | `mcp/` | MCP servers (jira/github standalone) | Assume agents already use JIRA/GitHub MCP — daemon calls services directly today |
-| `api/` | FastAPI routers: `config_routes`, `project_routes`, `epic_routes`, `run_routes` (stories) | Long-running work — daemon owns that |
-| `config/` | Postgres config store | Read secrets from env (except `DATABASE_URL`) |
+| `api/` | FastAPI routers: `config_routes`, `project_routes`, `epic_routes`, `run_routes` (stories), `status_routes.py` (`GET /api/status`: what this process is running, for the Mac app's window), and `access_guard.py` — the ASGI middleware that makes the Mac app's server answer only to its own window (per-launch token cookie + Host check) | Long-running work — daemon owns that |
+| `config/` | Database-backed config store | Read secrets from env (except `DATABASE_URL`) |
+| `launcher.py`, `selftest.py`, `resources.py` | `launcher.py` is the Mac app's backend entry point (`elstin-app`): single-instance lock, free port on 127.0.0.1, per-launch token, rotating log in `~/Library/Logs/Elstin`, exits with its parent, prints one `ELSTIN_READY {port, token, pid}` line for the window; `selftest.py` is `--self-test`, what a packaged build runs on itself (every module imports, a migration, a LangGraph checkpoint round-trip, ...); `resources.py` finds `settings-ui/` and `alembic/` from a checkout or inside a PyInstaller bundle. `packaging/` builds the bundle | Read any env var but `DATABASE_URL`; print anything else on stdout |
 
 Entry points (`pyproject.toml`): `elstin-daemon`, `elstin-mcp-jira`,
 `elstin-mcp-github`. Production serves via
@@ -516,7 +531,7 @@ that already exists".
   per message and `MAX_PENDING_GUIDANCE` (10) unread per story.
 - **Queue:** `stories.pending_guidance` (`[{text, at}]`, migration `20260930_0033`),
   filled and drained through StateManager (`add_story_guidance`,
-  `take_story_guidance`; row-locked, so a message is delivered once and never lost).
+  `take_story_guidance`; each one transaction, so a message is delivered once and never lost).
   Durable, so nothing lives in the process's memory.
 - **Delivery:** `LoopConfig.pending_messages` is called at the start of every turn
   (off the event loop); each string joins the conversation as a user message
@@ -692,7 +707,7 @@ locally, like removing a ticket:
   unsynced when a ticket stops matching. Ingested epics land paused, exactly
   like "Add ticket", with the project's default folder when it has one.
 - **The board vs. its source** (`elstin/services/external_sync.py`,
-  `ticket_source.py`): the Postgres board is what agents read; the source
+  `ticket_source.py`): the local board is what agents read; the source
   owns what a ticket *says*. A ticket whose text changed is applied at once
   when no plan depends on it (unplanned or finished story, sub-task, epic)
   and **held** on the story (`external_pending`) when one does — a human
@@ -1091,7 +1106,7 @@ instead, since a full agent loop would be pure overhead for a call with no
 tools and no multi-turn state. Dev's turn-capped resume state
 (`dev_history`, elstin/llm/types.py's normalized message history,
 JSON-serialized) is a plain `FeatureRunState` field — durably checkpointed
-by LangGraph's `AsyncPostgresSaver` alongside every other piece of run
+by LangGraph's checkpointer alongside every other piece of run
 state, not a bespoke table.
 
 **Graph paths** (`elstin/orchestration/graph.py`):
@@ -1138,7 +1153,9 @@ state, not a bespoke table.
     the normal failure mode for a chatty model, not an exotic one.
 - qa story: `qa` → `END` (`route_entry` picks the path from `story_kind`)
 
-Checkpointer: Postgres (`langgraph-checkpoint-postgres`). `thread_id` =
+Checkpointer: SQLite (`langgraph-checkpoint-sqlite`), in `elstin.checkpoints.db`
+beside the database so its per-step writes never queue behind the board's own
+transactions (`checkpointer_from_url` in `orchestration/graph.py`). `thread_id` =
 story JIRA key.
 
 **Retry after a dev failure.** Retry (`POST /api/stories/{key}/retry`) of a
@@ -1234,7 +1251,7 @@ unattended: http(s) only, no credentials in the URL, no cookies, 15 s and
 1 MB per fetch, at most 20 000 characters back, text content types only
 (HTML is reduced to its text).
 The host is resolved first and refused unless every address is public —
-which keeps a fetched URL away from Postgres, the cloud metadata endpoint
+which keeps a fetched URL away from the database's host, the cloud metadata endpoint
 and the host's own services — and that check is repeated on every redirect
 (at most 5). A name that changes its answer between the check and the
 connect (DNS rebinding) is a known gap. Every result starts with an
@@ -1643,7 +1660,7 @@ and, with tracing on, sends it to LangSmith. Both pass through `redact` first:
 
 `services/tracing.py`. Off by default and opt-in, because a trace carries
 whole prompts — ticket text, source code, tool output — to a third party.
-Settings (`/settings`, Postgres, like everything else): `langsmith_tracing_enabled`,
+Settings (`/settings`, stored in the database like everything else): `langsmith_tracing_enabled`,
 `langsmith_api_key` (secret), `langsmith_project` (default `elstin`),
 `langsmith_endpoint` (blank = LangSmith cloud; the EU region or a
 self-hosted instance goes here), `langsmith_workspace_id` (only for an
@@ -1673,7 +1690,7 @@ One story run is one trace, `elstin:<story key>`, in the configured project:
 
 Rules that keep it safe:
 
-- **Config from Postgres, never env** (hard constraint #8). elstin does not
+- **Config from the database, never env** (hard constraint #8). elstin does not
   read `LANGSMITH_*`; the SDK client is built from the settings, and while a
   run executes with tracing off it is switched off explicitly, because the
   SDK would otherwise obey an ambient `LANGSMITH_TRACING=true` and send the
@@ -1699,7 +1716,7 @@ How a choice reaches a call:
 
 - **The graph carries only `project_id`** (`FeatureRunState.project_id`, set by
   the daemon on a fresh run and re-supplied on every resume). Never a key, and
-  not resolved model names: graph state is checkpointed to Postgres and sent to
+  not resolved model names: graph state is checkpointed and sent to
   LangSmith, so a secret in it would be stored and shipped.
 - **Roles resolve from it where they use it.** `resolve_text(key, project_id)`
   (`config/store.py`) is the project's own value, else the global one, and a
@@ -1749,6 +1766,14 @@ history and fine-grained run state — which elstin never duplicates: `GET
 
 - Config schema and UI fields: `elstin/config/store.py` (`CONFIG_FIELDS`,
   `PROJECT_OVERRIDABLE_KEYS`).
+- **Storage directories** (`worktrees_base_dir`, `cloned_repos_base_dir`, `data_dir`,
+  `jira_attachments_dir`) default to folders beside the database file (a
+  `ConfigField.default` may be a callable, resolved on every read:
+  `ConfigField.resolved_default`): `~/Library/Application Support/Elstin/{repos,
+  cloned-repos,jira-attachments}` for the Mac app and a checkout, `/data/...` in the
+  Docker image because its `DATABASE_URL` is `/data/elstin.db`. Code reads them
+  with `storage_dir(key)`, which also treats a blank saved value as unset; no
+  module may carry a `/data/...` literal of its own.
 - **A new setting needs a section.** The settings page groups fields into
   collapsible sections, and the server owns the grouping:
   `CONFIG_CATEGORIES` (`elstin/config/store.py`, served at
@@ -1770,20 +1795,40 @@ history and fine-grained run state — which elstin never duplicates: `GET
   override — it is its own table (`project_ticket_filters`), since it has
   no global default to fall back to.
 - Alembic: `alembic/versions/YYYYMMDD_NNNN_description.py`. Docstring must
-  explain backfill/default semantics for existing rows.
+  explain backfill/default semantics for existing rows. The chain starts at
+  `20261012_0001_sqlite_baseline.py`: the 37 Postgres-era revisions it replaced
+  are in git history, and nothing upgrades through it. The app runs
+  `upgrade_to_head()` (`elstin/db/migrate.py`) before it serves — in `app.py`'s
+  lifespan and in the standalone daemon's `main()` — so a new revision reaches a
+  database on its next start.
+- SQLite cannot ALTER most things in place: write revisions with
+  `op.batch_alter_table`, which rebuilds the table. `alembic/env.py` turns batch
+  mode and `transactional_ddl` on (a revision that fails halfway rolls back
+  whole) and runs with foreign keys off, which a rebuild needs. The old
+  revisions' habit of an `op.add_column` carrying a foreign key does not work.
 - Adding a column: model → migration → StateManager mixin → keep backfill
-  meaning stable. Tests build the schema from the models
-  (`Base.metadata.create_all` in `elstin_db`), not from migrations, so a
-  missing migration passes the suite and breaks a real database. A few
-  tests run Alembic in-process: `tests/test_ticket_source.py` upgrades to
-  the revision before one, writes old-shape rows, then upgrades and checks
-  the backfill (the pattern to copy when a backfill matters);
-  `test_run_outcome.py` and `test_lessons.py` upgrade to head and check the
-  result. `alembic/env.py` keeps existing loggers enabled for this, or every
-  logger created before the migration would go silent for `caplog`.
+  meaning stable. Tests copy a database built by `alembic upgrade head` (see
+  "Testing conventions"), so a model without its migration fails the suite;
+  `tests/test_migrations.py` also runs `alembic check` and the rollback case.
+  A migration test that needs old-shape rows upgrades to the revision before
+  the one under test, writes them, then upgrades to head. `alembic/env.py`
+  keeps existing loggers enabled for in-process runs, or every logger created
+  before the migration would go silent for `caplog`, and the app's own run
+  (`configure_logger=False`) leaves its logging setup alone.
+- **Timestamps are `UtcDateTime`** (`elstin/db/types.py`), never a bare
+  `DateTime`: SQLite stores text with no zone and returns naive datetimes, which
+  would either fail against `datetime.now(timezone.utc)` or be read as local
+  time. It stores UTC, restores the zone on read and refuses a naive value.
+- **Transactions** (`elstin/db/engine.py`): every one takes SQLite's write lock
+  at BEGIN, which is what makes a read-modify-write inside one `session_scope()`
+  atomic where Postgres needed `FOR UPDATE`. So a scope stays short — no
+  network, subprocess or model call inside it — and scopes never nest (the
+  second raises at once instead of waiting out the 30 s busy timeout for the
+  lock its own caller holds). `tests/test_db_engine.py` pins both.
 
-LangGraph checkpointer creates its own tables on first use
-(`AsyncPostgresSaver.setup()`).
+LangGraph's checkpointer creates its own tables on first use
+(`AsyncSqliteSaver.setup()`), in `elstin.checkpoints.db` rather than the
+database.
 
 ## API surface
 
@@ -1919,8 +1964,9 @@ and only gets there sooner elsewhere.
 
 ## Testing conventions
 
-- `tests/conftest.py`: `postgres_url` (testcontainers), `elstin_db` (points
-  the engine at it and creates the tables from the models), `project_id` (a
+- `tests/conftest.py`: `database_url` (this test's own copy of a database that
+  `alembic upgrade head` built once per session — the checkpoint file lands
+  beside it), `elstin_db` (points the engine at it), `project_id` (a
   bare project, for tests that only need the foreign key), `git_repo` (a
   real repo with an `origin` remote), `fake_agents` (patches all five graph
   entry points: planner, dev, deterministic gate, verifier, epic QA — and
@@ -1935,7 +1981,7 @@ and only gets there sooner elsewhere.
   `elstin.orchestration.graph` (names imported at module load), or fake
   `elstin.llm.registry.get_provider` directly when testing a role module
   itself (see `tests/test_dev_loop.py`, `tests/test_generation.py`).
-- Pure reconciler tests need no DB. Graph/daemon/API tests use Postgres.
+- Pure reconciler tests need no DB. Graph/daemon/API tests use a real SQLite file.
 - Prefer fakes at service boundaries over broad mocks.
 - `tests/test_architecture.py` enforces the hard constraints below by
   walking the real import graph — provider-SDK isolation, `elstin.db.models`
@@ -1975,7 +2021,7 @@ and only gets there sooner elsewhere.
    levels derived from it: a re-sync reads stored kinds for stories that
    already exist, so a human's override survives every later sweep.
 7. Dev writes stay **plan-scoped** (`dev_tools` + `path_guard`).
-8. Config from Postgres — not env (except `DATABASE_URL`). That includes
+8. Config from the database — not env (except `DATABASE_URL`). That includes
    LangSmith: `LANGSMITH_*` is not read (see "Tracing (LangSmith)").
 9. Planner/dev run **only** through `elstin/agents/loop.py`; verifier/qa
    **only** through `elstin/services/generation.py`. No role constructs an
@@ -2007,9 +2053,9 @@ and only gets there sooner elsewhere.
   exist with no caller. The `jira_attachments_dir` setting only tells ticket
   removal where such files would be.
 - Anything behind `qdrant-client`, `tree-sitter`, `tree-sitter-python` or
-  `pydantic-settings`: they are declared in `pyproject.toml`, but nothing in
-  `elstin/` or `tests/` imports them. `outline_file_tool` and the codebase
-  skeleton are text heuristics, not parsers.
+  `pydantic-settings`: they were once declared in `pyproject.toml` although
+  nothing imported them, and are gone from it. `outline_file_tool` and the
+  codebase skeleton are text heuristics, not parsers.
 - A second `elstin/llm/` provider adapter — `openai_compat.py` (OpenAI's
   own API, or any OpenAI-compatible endpoint via `llm_base_url`: Azure,
   OpenRouter, vLLM, Ollama, etc.) is the only one wired today. The port

@@ -5,8 +5,6 @@ are mined at all, what the evidence and the guards do to a reply, and how a
 repeated lesson is counted, not the model's prose."""
 from __future__ import annotations
 
-import os
-
 import pytest
 
 import elstin.services.lessons as lessons
@@ -238,25 +236,6 @@ def test_project_deletion_takes_its_lessons(world):
 
     assert counts["lessons"] == 1
     assert sm.list_project_lessons(project_id) == []
-
-
-def test_migration_produces_the_table_the_model_expects():
-    from alembic import command
-    from alembic.config import Config
-    from sqlalchemy import create_engine, inspect, text
-
-    from elstin.db.models import ProjectLesson
-
-    engine = create_engine(os.environ["DATABASE_URL"])
-    with engine.begin() as conn:
-        conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
-    config = Config("alembic.ini")
-    config.set_main_option("script_location", "alembic")
-    command.upgrade(config, "head")
-
-    columns = {c["name"] for c in inspect(engine).get_columns("project_lessons")}
-    expected = {c.name for c in ProjectLesson.__table__.columns}
-    assert columns == expected, f"migration/model drift: {expected ^ columns}"
 
 
 # --- what an agent is shown ---------------------------------------------

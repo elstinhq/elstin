@@ -1,5 +1,5 @@
-"""Runs the real ported LangGraph graph against a real (testcontainers)
-Postgres checkpointer. The graph structure, node wiring, and Postgres
+"""Runs the real ported LangGraph graph against a real SQLite checkpointer
+(a file in the test's temp directory). The graph structure, node wiring, and
 checkpointer are all real production code; elstin/agents/roles/*_loop.py's
 actual LLM-provider calls (via elstin/agents/loop.py and
 elstin/llm/registry.py) are replaced by the
@@ -8,10 +8,10 @@ access and no API key — they're proving the checkpointer/interrupt/resume
 mechanics, not agent output quality.
 
 The key thing this proves: a run parked at the planner-approval interrupt
-survives a *process restart* — a fresh AsyncPostgresSaver connection (a
+survives a *process restart* — a fresh AsyncSqliteSaver connection (a
 brand new `checkpointer_from_url` context, standing in for the daemon
-having crashed and been restarted) can resume it by thread_id alone. SQLite
-in a container wouldn't durably prove this the same way; Postgres does.
+having crashed and been restarted) can resume it by thread_id alone. The state
+is read back from the file, not from anything the first connection kept.
 """
 from __future__ import annotations
 
@@ -23,18 +23,18 @@ from elstin.orchestration.graph import checkpointer_from_url, compile_graph
 from elstin.orchestration.state import initial_state
 
 # elstin_db: graph.py's node functions call append_activity() directly
-# (outside the fake_agents swap), which now persists to Postgres — needs
+# (outside the fake_agents swap), which now persists to the database — needs
 # DATABASE_URL set, which only the elstin_db fixture does.
 pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("fake_agents", "elstin_db")]
 
 
-async def test_run_parks_at_planner_gate_and_resumes_after_reconnect(postgres_url: str):
+async def test_run_parks_at_planner_gate_and_resumes_after_reconnect(database_url: str):
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
     state = initial_state(thread_id, "Add a widget to the cart", "/repo")
 
     # First "process": run up to the planner-approval interrupt.
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=True)
         result = await graph.ainvoke(state, config)
         assert result["status"] == "awaiting_approval"
@@ -45,7 +45,7 @@ async def test_run_parks_at_planner_gate_and_resumes_after_reconnect(postgres_ur
     # Second "process": a brand-new checkpointer connection (simulating a
     # daemon restart), resuming purely from thread_id — no in-memory state
     # carried over from the first block.
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=True)
 
         snapshot = await graph.aget_state(config)
@@ -65,7 +65,7 @@ async def test_run_parks_at_planner_gate_and_resumes_after_reconnect(postgres_ur
 
 
 async def test_answering_a_clarification_resumes_into_planner_not_dev(
-    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+    database_url: str, monkeypatch: pytest.MonkeyPatch
 ):
     """Regression. route_after_planner only special-cased
     "failed"; every other status, including "awaiting_clarification",
@@ -111,7 +111,7 @@ async def test_answering_a_clarification_resumes_into_planner_not_dev(
     config = {"configurable": {"thread_id": thread_id}}
     state = initial_state(thread_id, "Add a widget to the cart", "/repo")
 
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=True)
         result = await graph.ainvoke(state, config)
         assert result["status"] == "awaiting_clarification"
@@ -133,7 +133,7 @@ async def test_answering_a_clarification_resumes_into_planner_not_dev(
     assert final["status"] == "awaiting_approval"  # a real plan now, parked for its own review
 
 
-async def test_gate_off_runs_straight_through_without_parking(postgres_url: str):
+async def test_gate_off_runs_straight_through_without_parking(database_url: str):
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
     state = initial_state(thread_id, "Add a widget to the cart", "/repo")
@@ -143,14 +143,14 @@ async def test_gate_off_runs_straight_through_without_parking(postgres_url: str)
     # workspace_mode="in_place" run, or a resume-from-approval call).
     state["worktree_path"] = "/repo-worktrees/eng-1"
 
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         result = await graph.ainvoke(state, config)
         assert result["status"] == "completed"
 
 
 async def test_dev_provider_error_ends_the_run_failed_not_uncaught(
-    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+    database_url: str, monkeypatch: pytest.MonkeyPatch
 ):
     """dev_node must catch DevLoopError and return status="failed"
     rather than let it propagate — nothing upstream of the graph (the
@@ -171,7 +171,7 @@ async def test_dev_provider_error_ends_the_run_failed_not_uncaught(
     state = initial_state(thread_id, "Add a widget to the cart", "/repo")
     state["worktree_path"] = "/repo-worktrees/eng-1"
 
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         result = await graph.ainvoke(state, config)  # must not raise
         assert result["status"] == "failed"
@@ -191,14 +191,14 @@ def _qa_state(thread_id: str) -> dict:
     return state
 
 
-async def test_qa_story_skips_planner_and_dev_entirely(postgres_url: str):
+async def test_qa_story_skips_planner_and_dev_entirely(database_url: str):
     """The core of the redesign: a validation ticket must not be planned or
     implemented. With the plan-approval gate ON it must also not park at
     the planner interrupt — there is no plan to approve."""
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
 
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=True)
         result = await graph.ainvoke(_qa_state(thread_id), config)
 
@@ -213,7 +213,7 @@ async def test_qa_story_skips_planner_and_dev_entirely(postgres_url: str):
 
 
 async def test_qa_story_fails_the_run_when_the_merged_branch_suite_fails(
-    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+    database_url: str, monkeypatch: pytest.MonkeyPatch
 ):
     """A failing full suite is deterministic evidence, so it fails the run.
     The report still comes back, because that is what a human needs to read
@@ -233,7 +233,7 @@ async def test_qa_story_fails_the_run_when_the_merged_branch_suite_fails(
 
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         result = await graph.ainvoke(_qa_state(thread_id), config)
 
@@ -242,13 +242,13 @@ async def test_qa_story_fails_the_run_when_the_merged_branch_suite_fails(
     assert result["qa_report"]["full_test_suite"]["passed"] is False
 
 
-async def test_qa_story_without_context_fails_rather_than_reviewing_nothing(postgres_url: str):
+async def test_qa_story_without_context_fails_rather_than_reviewing_nothing(database_url: str):
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
     state = _qa_state(thread_id)
     state["qa_context"] = {}
 
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         result = await graph.ainvoke(state, config)
 
@@ -256,7 +256,7 @@ async def test_qa_story_without_context_fails_rather_than_reviewing_nothing(post
     assert result["error"] == "QA context not assembled"
 
 
-async def test_verifier_failure_retries_dev_up_to_max_iterations(postgres_url: str, monkeypatch: pytest.MonkeyPatch):
+async def test_verifier_failure_retries_dev_up_to_max_iterations(database_url: str, monkeypatch: pytest.MonkeyPatch):
     async def _always_fails(**kwargs):
         return {"verifier_report": {"passed": False, "fake": True}, "diffs": [], "messages": []}
 
@@ -270,7 +270,7 @@ async def test_verifier_failure_retries_dev_up_to_max_iterations(postgres_url: s
     state["max_iterations"] = 2
     state["worktree_path"] = "/repo-worktrees/eng-1"
 
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         result = await graph.ainvoke(state, config)
         assert result["status"] == "failed"
@@ -290,7 +290,7 @@ def _failing_gate(*, blockers: list[str]) -> dict:
 
 
 async def test_gate_failure_routes_back_to_dev_with_feedback_and_never_enters_the_verifier(
-    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+    database_url: str, monkeypatch: pytest.MonkeyPatch
 ):
     """Tier 1 fails once (code doesn't compile), dev gets one targeted
     fix message on top of its existing history, Tier 1 then passes, and
@@ -321,7 +321,7 @@ async def test_gate_failure_routes_back_to_dev_with_feedback_and_never_enters_th
     state = initial_state(thread_id, "Add a widget to the cart", "/repo")
     state["worktree_path"] = "/repo-worktrees/eng-1"
 
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         result = await graph.ainvoke(state, config)
 
@@ -342,7 +342,7 @@ async def test_gate_failure_routes_back_to_dev_with_feedback_and_never_enters_th
 
 
 async def test_a_build_environment_problem_stops_the_run_instead_of_going_back_to_dev(
-    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+    database_url: str, monkeypatch: pytest.MonkeyPatch
 ):
     """One story: javac crashed on the wrong JDK, and three dev passes went on
     "fixing" working code. A failure the profile says is the environment
@@ -369,7 +369,7 @@ async def test_a_build_environment_problem_stops_the_run_instead_of_going_back_t
     state = initial_state(thread_id, "Add a widget to the cart", "/repo")
     state["worktree_path"] = "/repo-worktrees/eng-1"
 
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         result = await graph.ainvoke(state, config)
 
@@ -379,7 +379,7 @@ async def test_a_build_environment_problem_stops_the_run_instead_of_going_back_t
 
 
 async def test_gate_feedback_says_nothing_was_written_only_while_the_worktree_is_untouched(
-    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+    database_url: str, monkeypatch: pytest.MonkeyPatch
 ):
     """Round one writes nothing, round two writes a file but not the rest:
     dev is told it wrote nothing the first time and not the second."""
@@ -415,7 +415,7 @@ async def test_gate_feedback_says_nothing_was_written_only_while_the_worktree_is
     thread_id = str(uuid.uuid4())
     state = initial_state(thread_id, "Add a widget", "/repo")
     state["worktree_path"] = "/repo-worktrees/eng-1"
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         await graph.ainvoke(state, {"configurable": {"thread_id": thread_id}})
 
@@ -426,7 +426,7 @@ async def test_gate_feedback_says_nothing_was_written_only_while_the_worktree_is
 
 
 async def test_gate_failing_every_time_fails_the_run_without_a_verifier_call(
-    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+    database_url: str, monkeypatch: pytest.MonkeyPatch
 ):
     import elstin.orchestration.graph as graph_module
 
@@ -448,7 +448,7 @@ async def test_gate_failing_every_time_fails_the_run_without_a_verifier_call(
     state["worktree_path"] = "/repo-worktrees/eng-1"
     state["max_gate_attempts"] = 2
 
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         result = await graph.ainvoke(state, config)
 
@@ -461,7 +461,7 @@ async def test_gate_failing_every_time_fails_the_run_without_a_verifier_call(
     assert result["iteration"] == 0  # the verifier's own budget was never touched
 
 
-async def test_gate_runs_after_every_dev_pass_including_verifier_retries(postgres_url: str, monkeypatch: pytest.MonkeyPatch):
+async def test_gate_runs_after_every_dev_pass_including_verifier_retries(database_url: str, monkeypatch: pytest.MonkeyPatch):
     """dev -> gate -> verifier(fail) -> dev -> gate -> verifier(pass)."""
     import elstin.orchestration.graph as graph_module
 
@@ -484,7 +484,7 @@ async def test_gate_runs_after_every_dev_pass_including_verifier_retries(postgre
     state = initial_state(thread_id, "Add a widget to the cart", "/repo")
     state["worktree_path"] = "/repo-worktrees/eng-1"
 
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         result = await graph.ainvoke(state, config)
 
@@ -497,7 +497,7 @@ async def test_gate_runs_after_every_dev_pass_including_verifier_retries(postgre
 
 
 async def test_verifier_generation_error_fails_the_story_instead_of_escaping(
-    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+    database_url: str, monkeypatch: pytest.MonkeyPatch
 ):
     """The verifier and QA nodes used to catch nothing. Since the daemon's
     poll loop has no per-story handler, an unparseable model reply escaped
@@ -516,7 +516,7 @@ async def test_verifier_generation_error_fails_the_story_instead_of_escaping(
     state = initial_state(thread_id, "Add a widget to the cart", "/repo")
     state["worktree_path"] = "/repo-worktrees/eng-1"
 
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         result = await graph.ainvoke(state, config)  # must not raise
 
@@ -525,7 +525,7 @@ async def test_verifier_generation_error_fails_the_story_instead_of_escaping(
 
 
 async def test_qa_generation_error_fails_the_story_instead_of_escaping(
-    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+    database_url: str, monkeypatch: pytest.MonkeyPatch
 ):
     import elstin.orchestration.graph as graph_module
     from elstin.services.generation import GenerationError
@@ -538,7 +538,7 @@ async def test_qa_generation_error_fails_the_story_instead_of_escaping(
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
 
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         result = await graph.ainvoke(_qa_state(thread_id), config)  # must not raise
 
@@ -547,7 +547,7 @@ async def test_qa_generation_error_fails_the_story_instead_of_escaping(
 
 
 async def test_gate_and_verifier_populate_the_run_outcome_counters(
-    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+    database_url: str, monkeypatch: pytest.MonkeyPatch
 ):
     """The counters that answer "is the Tier 1 gate earning its keep":
     a high gate_failures with a low verifier_rejections means it is
@@ -569,7 +569,7 @@ async def test_gate_and_verifier_populate_the_run_outcome_counters(
     state = initial_state(thread_id, "Add a widget to the cart", "/repo")
     state["worktree_path"] = "/repo-worktrees/eng-1"
 
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         result = await graph.ainvoke(state, config)
 
@@ -586,7 +586,7 @@ async def test_gate_and_verifier_populate_the_run_outcome_counters(
 
 
 async def test_a_failed_verifier_is_still_counted_as_a_run(
-    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+    database_url: str, monkeypatch: pytest.MonkeyPatch
 ):
     """Regression: the counter sat after the error handler returned, so the
     one case worth measuring — how often a cheap model fails to return
@@ -605,7 +605,7 @@ async def test_a_failed_verifier_is_still_counted_as_a_run(
     state = initial_state(thread_id, "Add a widget to the cart", "/repo")
     state["worktree_path"] = "/repo-worktrees/eng-1"
 
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         result = await graph.ainvoke(state, config)
 
@@ -616,7 +616,7 @@ async def test_a_failed_verifier_is_still_counted_as_a_run(
 
 
 async def test_a_run_with_nothing_to_verify_fails_without_sending_dev_back(
-    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+    database_url: str, monkeypatch: pytest.MonkeyPatch
 ):
     """A verifier rejection normally means "dev, fix it and come back".
     This one cannot: dev may only write files the plan names, and the
@@ -650,7 +650,7 @@ async def test_a_run_with_nothing_to_verify_fails_without_sending_dev_back(
     state = initial_state(thread_id, "Show the currency next to each price", "/repo")
     state["worktree_path"] = "/repo-worktrees/eng-1"
 
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         result = await graph.ainvoke(state, config)
 
@@ -660,7 +660,7 @@ async def test_a_run_with_nothing_to_verify_fails_without_sending_dev_back(
 
 
 async def test_a_planner_that_cannot_produce_a_usable_plan_fails_the_run(
-    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+    database_url: str, monkeypatch: pytest.MonkeyPatch
 ):
     """A PlannerLoopError used to propagate out of the run, and the
     daemon's unwind restored the story to "pending" — which the next poll
@@ -688,7 +688,7 @@ async def test_a_planner_that_cannot_produce_a_usable_plan_fails_the_run(
     state = initial_state(thread_id, "Show the currency next to each price", "/repo")
     state["worktree_path"] = "/repo-worktrees/eng-1"
 
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         result = await graph.ainvoke(state, config)
 

@@ -1,5 +1,5 @@
 """Round-trips elstin/services/run_activity.py's append_activity/list_activity
-against Postgres — confirms the DB-backed rewrite behaves exactly like the
+against SQLite — confirms the DB-backed rewrite behaves exactly like the
 in-memory ring buffer it replaced: per-run isolation, insertion order, an
 empty list for a run with no events, and a working `limit`."""
 from __future__ import annotations

@@ -1,23 +1,19 @@
 [project]
 name = "elstin"
 version = "0.1.0"
-description = "Local, single-tenant JIRA-epic-to-PR agent platform with a deterministic reconciler, Postgres-backed state, and per-story worktree isolation"
+description = "Local, single-tenant JIRA-epic-to-PR agent platform with a deterministic reconciler, SQLite-backed state, and per-story worktree isolation"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi",
-    "uvicorn[standard]",
+    "uvicorn",
     "pydantic",
-    "pydantic-settings",
     "langgraph",
-    "langgraph-checkpoint-postgres",
+    "langgraph-checkpoint-sqlite",
+    "aiosqlite",
     "langchain-core",
     "langsmith>=0.11",
     "sqlalchemy>=2.0",
     "alembic>=1.13,<2",
-    "psycopg[binary]>=3.1,<4",
-    "tree-sitter",
-    "tree-sitter-python",
-    "qdrant-client",
     "openai>=3.0.0",
     "httpx",
     "jira",
@@ -31,11 +27,11 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "pytest-mock",
-    "testcontainers-postgres",
 ]
 
 [project.scripts]
 elstin-daemon = "elstin.daemon.main:main"
+elstin-app = "elstin.launcher:main"
 elstin-mcp-jira = "elstin.mcp.jira_server:main"
 elstin-mcp-github = "elstin.mcp.github_server:main"
 

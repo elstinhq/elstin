@@ -115,7 +115,7 @@ class _StoryMixin:
         many are now waiting, or None for an unknown story. Raises
         GuidanceQueueFull past MAX_PENDING_GUIDANCE."""
         with session_scope() as session:
-            story = session.get(Story, jira_key, with_for_update=True)
+            story = session.get(Story, jira_key)
             if story is None:
                 return None
             pending = list(story.pending_guidance or [])
@@ -130,7 +130,7 @@ class _StoryMixin:
         first. Atomic: a message added while this runs is in this batch or the
         next, never lost and never delivered twice."""
         with session_scope() as session:
-            story = session.get(Story, jira_key, with_for_update=True)
+            story = session.get(Story, jira_key)
             if story is None or not story.pending_guidance:
                 return []
             taken = list(story.pending_guidance)

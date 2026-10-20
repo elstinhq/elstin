@@ -1,63 +1,37 @@
 # elstin — local single-process stack.
 #
-# Two services: Postgres, and the app (FastAPI settings UI/API + the daemon
-# poll loop running as a background task inside the same process — no
-# control-plane/worker split, that's a fleet-scale concern, irrelevant
-# here). Alembic runs as a one-shot init container before the app starts.
+# One service: the app (FastAPI settings UI/API + the daemon poll loop running
+# as a background task inside the same process — no control-plane/worker split,
+# that's a fleet-scale concern, irrelevant here). Its database is one SQLite
+# file on the data volume; the app creates and migrates it before it serves.
 #
-# The ONLY env var the app needs is DATABASE_URL, wired below by service
-# name — every other setting (JIRA/GitHub/LLM credentials, gate toggles) is
-# entered through the settings UI at http://localhost:8000/settings and
-# stored in Postgres. There is no .env file to create.
+# The only env var the app reads is DATABASE_URL, wired below to that file —
+# every other setting (JIRA/GitHub/LLM credentials, gate toggles) is entered
+# through the settings UI at http://localhost:8000/settings and stored in the
+# database. There is no .env file to create.
 #
-# The UI (settings-ui/vendor/) is a pre-built asset — see the Dockerfile's
-# comment and ui-src/README.md if you've changed settings-ui/*.html or
-# ui-src/entry.js and need to rebuild it before `docker compose up --build`.
+# The UI (settings-ui/vendor/) is built inside the image by the Dockerfile's
+# ui-build stage — see ui-src/README.md if you've changed ui-src/ and need to
+# rebuild it with `docker compose up --build`.
 #
 # Usage:
 #   docker compose up
 #   open http://localhost:8000/settings
 
 services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: elstin
-      POSTGRES_PASSWORD: elstin
-      POSTGRES_DB: elstin
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "elstin"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 10s
-    volumes:
-      - elstin-pgdata:/var/lib/postgresql/data
-    ports:
-      - "${ELSTIN_PG_PORT:-5433}:5432"
-
-  migrate:
-    build: .
-    command: ["alembic", "upgrade", "head"]
-    environment:
-      DATABASE_URL: postgresql+psycopg://elstin:elstin@postgres:5432/elstin
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: "no"
-
   app:
     build: .
     command: ["uvicorn", "elstin.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
     environment:
-      DATABASE_URL: postgresql+psycopg://elstin:elstin@postgres:5432/elstin
+      DATABASE_URL: sqlite:////data/elstin.db
     ports:
       - "${ELSTIN_APP_PORT:-8000}:8000"
     volumes:
-      # /data itself, not only the two directories below it: the dev
-      # loop's pre-edit baselines (/data/baselines, what
+      # /data itself, not only the two directories below it: the database
+      # and its LangGraph checkpoints (/data/elstin.db, /data/elstin.checkpoints.db),
+      # the dev loop's pre-edit baselines (/data/baselines, what
       # roll_back_file_tool restores from) and downloaded JIRA
-      # attachments live directly under it, and without a volume they
+      # attachments all live directly under it, and without a volume they
       # sit in the container's writable layer — gone the moment the
       # container is recreated, which is every `scripts/elstin.sh up`.
       - elstin-data:/data
@@ -70,15 +44,10 @@ services:
       #   - /Users/you/code/shop-app:/workspace/shop-app
       # then attach /workspace/shop-app. A folder holding several repos works
       # too (mount it, attach it, pick which repos). Running elstin directly on
-      # the host (uvicorn) needs none of this — attach the host path as is.
-    depends_on:
-      postgres:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
+      # the host (scripts/start-local.sh) needs none of this — attach the host
+      # path as is.
 
 volumes:
-  elstin-pgdata:
   elstin-data:
   elstin-repos:
   elstin-cloned-repos:

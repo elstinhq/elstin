@@ -1,6 +1,6 @@
 """Durable per-run activity log for the daemon's agent roles.
 
-Persists to Postgres (elstin/db/models/activity.py's ActivityEvent) instead
+Persists to the database (elstin/db/models/activity.py's ActivityEvent) instead
 of the process-local in-memory ring this module used to keep — activity now
 survives an app restart and is queryable after a run finishes, which is what
 the UI's story detail dialog reads via GET /api/stories/{key}/activity and
@@ -8,7 +8,7 @@ streams live over GET /api/stories/{key}/stream (elstin/api/run_routes.py).
 
 Every append also hands the event to elstin/services/activity_stream.py,
 which pushes it straight to whoever is watching that run right now. The
-write to Postgres stays the durable record and the source of truth for a
+write to the database stays the durable record and the source of truth for a
 fresh page load; the fan-out is only a shortcut that removes the poll
 interval between an agent doing something and a human seeing it.
 

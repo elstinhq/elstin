@@ -1,4 +1,4 @@
-"""PO sessions over HTTP (elstin/api/po_routes.py), against a real Postgres. The
+"""PO sessions over HTTP (elstin/api/po_routes.py), against a real SQLite database. The
 epic lookup is faked at `inspect_epic`; the runner is not involved — these tests
 move sessions through their states directly, the way the daemon would."""
 from __future__ import annotations

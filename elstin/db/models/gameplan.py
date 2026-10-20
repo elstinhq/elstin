@@ -1,4 +1,4 @@
-"""Epic/story/PR bookkeeping: LangGraph's Postgres checkpointer already
+"""Epic/story/PR bookkeeping: LangGraph's checkpointer already
 persists per-run graph state (plan, dev diffs, verifier iterations, a
 fine-grained RunStatus), so these tables only need what LangGraph doesn't
 track — which wave a story is in, PR metadata, JIRA watermarks, and a
@@ -11,10 +11,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from elstin.db.base import Base
+from elstin.db.types import UtcDateTime
 
 
 def _utcnow() -> datetime:
@@ -85,15 +86,15 @@ class Epic(Base):
     # "skipped" = keep the branch local and complete without a pull request.
     pr_approval: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
-    # Where this ticket came from — see alembic revision 20260920_0020.
+    # Where this ticket came from — originally revision 20260920_0020, now folded into the 0001 baseline.
     # `external_source` is NULL for a ticket created natively on the board.
     # `external_hash` digests the content as last applied, so a later sync
     # can tell whether the ticket changed; NULL means baseline unknown.
     external_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
     external_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    external_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    external_synced_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     external_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # What the last sync saw — alembic revision 20260920_0021. `external_hash`
+    # What the last sync saw — originally revision 20260920_0021, now folded into the 0001 baseline. `external_hash`
     # above is the digest of source content last *resolved* (applied or
     # dismissed by a human), not merely last seen.
     external_status: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -101,9 +102,9 @@ class Epic(Base):
     # stories are skipped, in-flight ones only flagged, epics put on hold.
     external_closed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+        UtcDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
     )
 
     stories: Mapped[list["Story"]] = relationship(back_populates="epic", cascade="all, delete-orphan")
@@ -182,7 +183,7 @@ class Story(Base):
     gate_approved: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     # The planner's pending clarification question(s) — see alembic
-    # revision 20260922_0024. Straight from run_planner's `questions` field:
+    # revision 20260922_0024 (now folded into the 0001 baseline). Straight from run_planner's `questions` field:
     # [{id, question, context, options: [{id, label, description}]}]. NULL
     # means nothing is pending; set on every run completion
     # (elstin/daemon/main.py), not only when a question exists, so a story
@@ -217,7 +218,7 @@ class Story(Base):
     # way). Cleared by every status
     # transition, like parked_reason. See elstin/daemon/main.py's
     # _resume_stories_past_their_limit.
-    retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retry_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
 
     # Messages a person sent to this story's running agent that it has not read
     # yet — [{text, at}], oldest first. The agent takes them at the start of its
@@ -276,15 +277,15 @@ class Story(Base):
     # elstin/daemon/main.py's merge queue. Capped there; reset by a retry.
     merge_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
-    # Where this ticket came from — see alembic revision 20260920_0020.
+    # Where this ticket came from — originally revision 20260920_0020, now folded into the 0001 baseline.
     # `external_source` is NULL for a ticket created natively on the board.
     # `external_hash` digests the content as last applied, so a later sync
     # can tell whether the ticket changed; NULL means baseline unknown.
     external_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
     external_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    external_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    external_synced_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     external_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # What the last sync saw — alembic revision 20260920_0021. `external_hash`
+    # What the last sync saw — originally revision 20260920_0021, now folded into the 0001 baseline. `external_hash`
     # above is the digest of source content last *resolved* (applied or
     # dismissed by a human), not merely last seen.
     external_status: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -295,11 +296,11 @@ class Story(Base):
     # held for a human: {"summary", "description", "hash", "reasons"} — only
     # the keys that changed. NULL = nothing waiting.
     external_pending: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    external_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    external_changed_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+        UtcDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
     )
 
     epic: Mapped[Epic] = relationship(back_populates="stories")
@@ -334,9 +335,9 @@ class EpicPullRequest(Base):
     ci_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+        UtcDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
     )
 
 
@@ -363,9 +364,9 @@ class PullRequest(Base):
     url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     state: Mapped[str] = mapped_column(String(32), default="open", nullable=False)  # "open" | "merged" | "closed"
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+        UtcDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
     )
 
     story: Mapped[Story] = relationship(back_populates="pull_requests")
@@ -380,5 +381,5 @@ class JiraWatermark(Base):
     jira_key: Mapped[str] = mapped_column(String(64), primary_key=True)
     last_comment_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+        UtcDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
     )

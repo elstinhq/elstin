@@ -68,6 +68,7 @@ def test_run_safe_command_refuses_output_and_writes_nothing(git_repo, tmp_path):
         assert not target.exists()
 
 
+@pytest.mark.usefixtures("elstin_db")
 def test_run_safe_command_still_runs_an_allowed_diff(git_repo, tmp_path):
     (tmp_path / "widgets" / "README.md").write_text("changed\n")
 

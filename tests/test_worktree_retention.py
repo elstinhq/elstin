@@ -1,5 +1,5 @@
 """elstin/daemon/worktree_retention.py — a finished story's checkout holds a full
-dependency install and nothing used to take it away. Real git and real Postgres:
+dependency install and nothing used to take it away. Real git and a real SQLite database:
 what is under test is what is left on disk, in git and in the rows."""
 from __future__ import annotations
 

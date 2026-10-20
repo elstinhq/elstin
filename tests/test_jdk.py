@@ -80,6 +80,7 @@ def test_no_stated_version_or_none_installed_leaves_the_environment_alone(tmp_pa
     assert jdk.java_env(str(tmp_path)) == {}
 
 
+@pytest.mark.usefixtures("elstin_db")
 def test_every_command_in_a_java_worktree_runs_on_that_jdk(tmp_path, jdks):
     """The build check's commands (language_hooks.run) and the developer
     step's own (safe_shell) both get it."""

@@ -29,9 +29,9 @@ from elstin.tools.reference_folder import remove_reference_copy
 from elstin.config.store import (
     PROJECT_OVERRIDABLE_KEYS,
     clear_project_config,
-    get_config,
     list_project_config_for_display,
     set_project_config,
+    storage_dir,
 )
 from elstin.api.epic_routes import _with_stories
 from elstin.services.jira_filter import build_jql, preview_filter, sync_project_filter
@@ -123,14 +123,14 @@ class TicketFilterRunRequest(BaseModel):
 
 
 def _clone_dest_base_dir(project_id: int) -> str:
-    base = get_config("cloned_repos_base_dir") or "/data/cloned-repos"
+    base = storage_dir("cloned_repos_base_dir")
     return os.path.join(base, str(project_id))
 
 
 def _attach_and_register(
     sm: StateManager, project_id: int, path: str, *, label: str | None = None, kind: str = "repo", read_only: bool = False,
 ) -> int:
-    forbidden = [get_config("worktrees_base_dir") or "/data/repos"]
+    forbidden = [storage_dir("worktrees_base_dir")]
     try:
         if kind == "reference":
             folder = attach_reference_folder(path, forbidden_dirs=forbidden)
@@ -179,7 +179,7 @@ def create_project(body: ProjectCreateRequest) -> dict:
         raise HTTPException(status_code=400, detail="Give either a repository URL to clone or a folder path to attach")
     # Every folder is checked before the project exists, so a mistyped path
     # does not leave an empty project behind (a clone can only fail by trying).
-    forbidden = [get_config("worktrees_base_dir") or "/data/repos"]
+    forbidden = [storage_dir("worktrees_base_dir")]
     folders: list[str] = []
     try:
         for path in paths:
@@ -218,7 +218,7 @@ def scan_folder_route(body: ScanFolderRequest) -> dict:
     UI can offer which to attach one by one. Read-only; see
     elstin/services/repo_clone.py's scan_folder."""
     try:
-        result = scan_folder(body.path, forbidden_dirs=[get_config("worktrees_base_dir") or "/data/repos"])
+        result = scan_folder(body.path, forbidden_dirs=[storage_dir("worktrees_base_dir")])
     except RepoAttachError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     sm = StateManager()
@@ -330,7 +330,7 @@ def remove_project_repo(project_id: int, repo_id: int) -> dict:
     if result is None:
         raise HTTPException(status_code=404, detail=f"No such folder: {repo_id}")
     if result["removed"] and repo.get("kind") == "reference":
-        remove_reference_copy(get_config("worktrees_base_dir") or "/data/repos", repo_id)
+        remove_reference_copy(storage_dir("worktrees_base_dir"), repo_id)
     if not result["removed"]:
         blocked = result["blocked_by"]
         raise HTTPException(

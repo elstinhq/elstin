@@ -1,7 +1,7 @@
 # Elstin
 
 Elstin turns a JIRA epic (or a set of GitHub Issues) into a pull request. It
-runs on your own machine, in one process, against a Postgres database.
+runs on your own machine, in one process, keeping its state in one SQLite file.
 
 You point it at a project's git repos and a ticket. For each story in the
 ticket, an agent plans the change, you approve the plan, another agent writes
@@ -85,9 +85,8 @@ scripts/elstin.sh
 ```
 
 This is `docker compose up` with the rough edges taken off. It finds Docker or
-Podman, builds the image (including the web UI), starts Postgres, applies the
-database migrations, starts the app, waits until it answers, and prints where
-to go. **The first run can take a few minutes** while the image builds; later
+Podman, builds the image (including the web UI), starts the app (which creates and
+migrates its database), waits until it answers, and prints where to go. **The first run can take a few minutes** while the image builds; later
 runs are quicker.
 
 Plain `docker compose up --build` also works if you prefer it.
@@ -98,8 +97,8 @@ Plain `docker compose up --build` also works if you prefer it.
 - **http://localhost:8000/settings** — where all configuration lives.
 
 There is **no `.env` file**. The only environment variable Elstin reads is
-`DATABASE_URL`, and Docker Compose sets that for you. Every other setting is
-stored in Postgres and edited live in the browser: no restart needed.
+`DATABASE_URL` (the path of the SQLite file), and Docker Compose sets that for you. Every other setting is
+stored in that database and edited live in the browser: no restart needed.
 
 Go on to [Configure it](#configure-it).
 
@@ -302,28 +301,49 @@ scripts/elstin.sh status     # what is running, and whether the app is healthy
 scripts/elstin.sh logs       # follow the app's logs
 scripts/elstin.sh restart    # down + up
 scripts/elstin.sh rebuild    # rebuild from scratch, ignoring the layer cache
-scripts/elstin.sh migrate    # run database migrations against the running stack
 scripts/elstin.sh shell      # a shell inside the app container
-scripts/elstin.sh psql       # a psql prompt on the database
-scripts/elstin.sh reset      # DESTRUCTIVE: delete the database volume (asks first)
+scripts/elstin.sh reset      # DESTRUCTIVE: delete the data volumes, database included (asks first)
 scripts/elstin.sh --help     # the rest
 ```
 
-Ports can be changed with environment variables:
+The port can be changed with an environment variable:
 
 ```bash
-ELSTIN_APP_PORT=9000 ELSTIN_PG_PORT=6000 scripts/elstin.sh
+ELSTIN_APP_PORT=9000 scripts/elstin.sh
 ```
 
 **Updating:** `git pull`, then `scripts/elstin.sh`. It rebuilds the image on
 every start, because the image bakes in the code and the migrations, and a
-stale image can fail with a misleading "Can't locate revision" error.
+stale image can fail with a misleading "Can't locate revision" error. The app
+migrates its database itself on startup.
+
+## Moving from the Postgres version
+
+Earlier versions kept their state in Postgres. Elstin now starts with an empty
+SQLite database, so to keep your projects, tickets, settings and run history,
+copy them across once, with the old stack stopped and no run in flight:
+
+```bash
+pip install "psycopg[binary]" langgraph-checkpoint-postgres   # only to read the old database
+python scripts/migrate_postgres_to_sqlite.py --from-container code_forge-forge-postgres --dry-run
+python scripts/migrate_postgres_to_sqlite.py --from-container code_forge-forge-postgres
+```
+
+`--from-container` takes the connection details from the running container, so no
+password goes on the command line; `--from postgresql+psycopg://user:pass@host:port/db`
+names a database directly. The dry run shows what would be copied and writes
+nothing. The real run copies every table, and each story's latest checkpoint (its
+plan, dev history and where a parked run stands), into an empty SQLite database
+in one transaction: it all arrives or none of it does. The Postgres database is
+only read, so it stays as a backup. The old database must be at its last
+revision (start the old checkout once and it migrates itself), and the SQLite
+one must be empty (`python scripts/clear_db.py` empties it).
 
 ## Run it from source
 
 Use this to work on Elstin itself, or to run it where your repos' toolchains
 (JDK, Node, Flutter) are installed. You need **Python 3.11+**, **Node 22** (to
-build the UI) and Docker or Podman (for Postgres).
+build the UI). Nothing else: the database is a file the app creates.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -332,37 +352,41 @@ pip install -e ".[dev]"
 # The UI bundle is build output, not committed.
 (cd ui-src && npm ci && npm run build)
 
-# Postgres only, in a container (published on 5433).
-docker compose up postgres -d
-export DATABASE_URL=postgresql+psycopg://elstin:elstin@localhost:5433/elstin
-alembic upgrade head
-
+# Creates and migrates the database on startup.
 uvicorn elstin.app:create_app --factory --host 127.0.0.1 --port 8000
 ```
 
 Then open http://localhost:8000/ and [configure it](#configure-it).
 
-Two differences from the Docker stack:
+The database is `~/Library/Application Support/Elstin/elstin.db` on macOS
+(`~/.local/share/elstin/elstin.db` elsewhere), with LangGraph's checkpoints in
+`elstin.checkpoints.db` beside it. `DATABASE_URL=sqlite:////some/path.db` moves
+it, for instance to try a branch on a copy of your data.
 
-- **Set the storage directories.** The defaults under *Git and storage*
-  (`/data/repos`, `/data/cloned-repos`, `/data`) and the JIRA attachment
-  directory are the Docker volume's paths. Point them at folders you own.
+One difference from the Docker stack:
+
 - **Attach host paths as they are**, with no bind mount.
 
-Stop the Docker stack first if it is running, as both publish Postgres on 5433.
+The storage directories under *Git and storage* (worktrees, cloned repos, run
+snapshots, JIRA attachments) default to folders beside the database, so from
+source they are under `~/Library/Application Support/Elstin/` and in Docker under
+`/data`. Point them elsewhere in Settings if you like.
 
-`scripts/start-local.sh` automates the steps above (venv, UI build, migrations,
-uvicorn) against an *existing* Postgres container. It is named by
-`ELSTIN_PG_CONTAINER` (default `code_forge-forge-postgres`), reads the
-connection details from that container, and exits with a message if the
-container does not exist. Use the manual steps above unless you have one.
+Only one Elstin can use a database at a time (two would each pick up the same
+stories): a second one stops with a message naming the first. That includes the
+Mac app's backend, `elstin-app` — see below.
+
+The Docker stack keeps its own database in a volume, separate from this one, so
+the two can run side by side if you give them different ports.
+
+`scripts/start-local.sh` automates the steps above (venv, UI build, uvicorn).
 
 ## Troubleshooting
 
 | Symptom | Cause and fix |
 |---|---|
 | "The Docker daemon is not running" / "Podman is installed but its machine is not running" | Start Docker Desktop, or `podman machine start`. |
-| Port already in use | Another Elstin or a database holds 8000 or 5433. Stop it, or set `ELSTIN_APP_PORT` / `ELSTIN_PG_PORT`. |
+| Port already in use | Another Elstin holds 8000. Stop it, or set `ELSTIN_APP_PORT`. |
 | Nothing happens after adding a ticket | New epics start paused: press **Resume**. Also check the story's status, since a plan may be waiting on you under **Needs you**. |
 | Runs fail straight away with a model or auth error | The API key, base URL or model names in Settings. Make sure the configured models exist on your endpoint. |
 | The epic finishes but no PR appears | No GitHub token, the repo's `origin` is not on GitHub, or the PR gate is holding it for your **Open** decision. |
@@ -379,15 +403,13 @@ story's activity feed shows what its agents did and why a step failed.
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-docker compose up postgres -d
-export DATABASE_URL=postgresql+psycopg://elstin:elstin@localhost:5433/elstin
-alembic upgrade head
 pytest
 ```
 
 - Pure-logic tests (`tests/test_reconciler.py`) need no database. Most other
-  tests start their own throwaway Postgres through `testcontainers-postgres`,
-  so they need a running Docker daemon but no shared dev database.
+  tests get their own copy of a SQLite database that was built by
+  `alembic upgrade head`, so nothing needs to be running and no shared dev
+  database is touched.
 - Tests never make real LLM, GitHub or JIRA calls: `tests/conftest.py`'s
   `fake_agents` fixture and per-test fakes stand in at those boundaries.
 - A new column or table needs an Alembic migration under
@@ -422,7 +444,7 @@ npm run typecheck    # tsc --noEmit
 | `elstin/services/` | JIRA and GitHub clients, ticket sync, repo clone/attach |
 | `elstin/tools/` | Agent tools and per-language build/test profiles |
 | `elstin/state/`, `elstin/db/` | The only database access, and the models |
-| `elstin/config/` | Settings stored in Postgres |
+| `elstin/config/` | Settings stored in the database |
 | `ui-src/`, `settings-ui/` | The web UI source, and its shell and build output |
 
 Read [AGENTS.md](AGENTS.md) before a non-trivial change: it lists the layering
@@ -432,7 +454,7 @@ reconciler stays pure) and a "where to change what" table.
 
 ## What's real vs. not yet ported
 
-Everything in `elstin/` is real and tested against Postgres and git, except the
+Everything in `elstin/` is real and tested against SQLite and git, except the
 node bodies' RAG context pre-seeding: `elstin/agents/roles/planner_loop.py`'s
 agent still explores the target codebase live via its own read/grep/find tools
 every run (real), but does not yet get a pre-computed head start from a

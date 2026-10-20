@@ -21,10 +21,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, DateTime, Integer, Numeric, String, UniqueConstraint
+from sqlalchemy import BigInteger, Integer, Numeric, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from elstin.db.base import Base
+from elstin.db.types import UtcDateTime
 
 
 def _utcnow() -> datetime:
@@ -76,7 +77,7 @@ class StoryUsage(Base):
 
     invocation_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+        UtcDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
     )

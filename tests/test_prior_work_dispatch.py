@@ -1,6 +1,6 @@
 """Work that already exists for a ticket decides where elstin's branches start
 (elstin/daemon/prior_work_lookup.py, elstin/daemon/main.py's first dispatch).
-Real Postgres and git — branches pushed the way a teammate would push them;
+A real SQLite database and git — branches pushed the way a teammate would push them;
 the agents are fakes."""
 from __future__ import annotations
 

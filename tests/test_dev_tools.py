@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 from elstin.tools.dev_tools import PROGRESS_TOOLS, READ_ONLY_TOOLS, TOOL_SCHEMAS, make_dev_tools
 from elstin.tools.grep import MAX_READ_LINES
 
@@ -186,6 +188,7 @@ def test_an_unknown_refused_command_gets_the_general_guidance(tmp_path):
     assert "build, test and codegen commands" in result and "find_files_tool" in result
 
 
+@pytest.mark.usefixtures("elstin_db")
 def test_a_command_that_ran_is_not_decorated_with_a_hint(tmp_path):
     result = _run(tmp_path, "git status")  # allowed; fails here only because tmp_path is not a repo
 
@@ -257,6 +260,7 @@ def _multi_repo_tools(api: str, web: str, *, planned_tests: list[str] | None = N
     )
 
 
+@pytest.mark.usefixtures("elstin_db")
 def test_a_command_runs_in_the_repo_it_names_not_the_default_one(tmp_path):
     api, web = _two_repos(tmp_path)
     functions, _ = _multi_repo_tools(api, web)

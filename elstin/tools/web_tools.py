@@ -7,7 +7,7 @@ in its first line, and nothing here ever feeds it back into a prompt as
 instructions.
 
 The address check is what stops a fetched URL from reaching elstin's own
-network: Postgres, the cloud metadata endpoint (169.254.169.254), and the
+network: a local database, the cloud metadata endpoint (169.254.169.254), and the
 host's localhost services all resolve to non-global addresses and are
 refused, including when a public URL redirects to one. The check resolves
 the name itself before connecting, so a hostname that changes its answer

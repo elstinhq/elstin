@@ -12,10 +12,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, Integer, String, Text
+from sqlalchemy import JSON, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from elstin.db.base import Base
+from elstin.db.types import UtcDateTime
 
 
 def _utcnow() -> datetime:
@@ -41,4 +42,4 @@ class ActivityEvent(Base):
     meta: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # No updated_at — rows are append-only, never mutated after insert.
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utcnow, nullable=False)

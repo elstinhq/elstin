@@ -6,7 +6,7 @@ activity, usage and run-outcome tables is the story key (thread_id == story
 key, see elstin/daemon/main.py), and for a lone-story epic the epic and its
 one story share a key, so the set of keys below is de-duplicated.
 
-Two methods, split so the caller can clean up what lives outside Postgres
+Two methods, split so the caller can clean up what lives outside the database
 (worktrees, branches, checkpoints, downloaded files — elstin/daemon/
 ticket_removal.py) between reading the footprint and deleting the rows: the
 rows go last, so a cleanup that fails part-way leaves a ticket that is still

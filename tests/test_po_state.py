@@ -1,5 +1,5 @@
 """PO sessions' storage and lifecycle (elstin/state/manager_po.py), against a real
-Postgres: every transition is guarded by the status the row is in, because the
+SQLite database: every transition is guarded by the status the row is in, because the
 API, the runner and the publisher all move a session at once."""
 from __future__ import annotations
 
@@ -277,40 +277,6 @@ def test_cost_can_be_set_on_its_own(sm, project_id):
     sm.set_po_context(session["id"], {"epic_summary": "later"})
     saved = sm.get_po_session(session["id"])
     assert (saved["cost_usd"], saved["context"]) == (1.25, {"epic_summary": "later"})
-
-
-def test_migration_produces_the_tables_the_models_expect():
-    import os
-
-    from alembic import command
-    from alembic.config import Config
-    from sqlalchemy import create_engine, inspect, text
-
-    from elstin.db.models import PoMessage, PoSession
-
-    engine = create_engine(os.environ["DATABASE_URL"])
-    with engine.begin() as conn:
-        conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
-    config = Config("alembic.ini")
-    config.set_main_option("script_location", "alembic")
-    command.upgrade(config, "head")
-
-    inspector = inspect(engine)
-    for model in (PoSession, PoMessage):
-        columns = {c["name"] for c in inspector.get_columns(model.__tablename__)}
-        expected = {c.name for c in model.__table__.columns}
-        assert columns == expected, f"{model.__tablename__}: migration/model drift: {expected ^ columns}"
-
-    # A row written by hand, outside elstin, is still valid: the defaults are the database's too.
-    with engine.begin() as conn:
-        conn.execute(text("INSERT INTO projects (name, ticket_source, created_at, updated_at) VALUES ('p', 'jira', now(), now())"))
-        conn.execute(text(
-            "INSERT INTO po_sessions (project_id, mode, brief, status, created_at, updated_at) "
-            "VALUES (1, 'brainstorm', 'b', 'queued', now(), now())"
-        ))
-        row = conn.execute(text("SELECT draft_version, edited_by_person, cost_usd FROM po_sessions")).one()
-    assert (row[0], row[1], float(row[2])) == (0, False, 0.0)
-    engine.dispose()
 
 
 # -- publishing ----------------------------------------------------------------------------------------------------------

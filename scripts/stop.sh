@@ -7,8 +7,8 @@
 # a second implementation: engine detection and everything else live in
 # elstin.sh, and this delegates so the two can never drift.
 #
-# Nothing here deletes data. The containers go; the volumes — Postgres,
-# worktrees, cloned repos, /data — stay, and `scripts/elstin.sh up` brings
+# Nothing here deletes data. The containers go; the volumes — the
+# database, worktrees, cloned repos, /data — stay, and `scripts/elstin.sh up` brings
 # everything back where it was. Deleting data is `scripts/elstin.sh reset`,
 # which asks first.
 #

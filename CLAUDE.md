@@ -18,25 +18,56 @@ reconciler decides what to do next, a LangGraph planner → dev → verifier
 stories in parallel, a story waiting only for the stories it depends on —
 each finished story is verified and merged into the epic branch locally,
 and once all have merged the epic opens one GitHub pull request. Runs as one process (`docker compose up`) with
-Postgres-backed state — no Kubernetes, no multi-tenancy, no `.env` file
-(the only process env var is `DATABASE_URL`; everything else is configured
-live at `/settings` and stored in Postgres).
+SQLite-backed state — one file the app creates and migrates itself, nothing to
+install or start — no Kubernetes, no multi-tenancy, no `.env` file (the only
+process env var is an optional `DATABASE_URL=sqlite:////path/to/elstin.db`;
+everything else is configured live at `/settings` and stored in the database).
 
 ## Commands
 
-Local dev setup (no Docker for the app itself, Postgres via Docker):
+Local dev setup (no Docker, nothing else to install):
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-docker compose up postgres -d
-export DATABASE_URL=postgresql+psycopg://elstin:elstin@localhost:5433/elstin
-alembic upgrade head
+uvicorn elstin.app:create_app --factory   # creates and migrates the database on startup
 ```
 
-`scripts/start-local.sh` does all of that and then runs the server in the
-foreground — against the existing `code_forge-forge-postgres` container
-(the real database; `ELSTIN_PG_CONTAINER` overrides), not the compose one:
+The database is one SQLite file, `~/Library/Application Support/Elstin/elstin.db`
+on macOS (`~/.local/share/elstin/` elsewhere) — your real data when you run from
+a checkout. `DATABASE_URL=sqlite:////some/path.db` puts it elsewhere, e.g. to
+try a branch on a copy; a URL for any other database is refused. The server
+runs `alembic upgrade head` itself before it serves, so a branch with a new
+migration changes that file when you start it. LangGraph's checkpoints live in
+`elstin.checkpoints.db` beside it.
+
+Data from the old Postgres-backed version is copied across once with
+`scripts/migrate_postgres_to_sqlite.py` (`--dry-run` first; see the README). It
+needs `psycopg[binary]` and `langgraph-checkpoint-postgres`, which are not
+dependencies any more — install them by hand to run it.
+
+`elstin-app` (`python -m elstin.launcher`) is the entry point the macOS app's
+window starts instead of uvicorn: a free port on 127.0.0.1, a per-launch access
+token, the log in `~/Library/Logs/Elstin/`, and it exits with its parent. It
+prints `ELSTIN_READY {port, token, pid}` on stdout (see `elstin/launcher.py`);
+run it by hand with `--no-exit-with-parent` when poking at it from a terminal. The
+token is checked by `elstin/api/access_guard.py`, which only the launcher turns on.
+
+`packaging/build-backend.sh` freezes that launcher into a self-contained
+`build/dist/elstin-backend/` (PyInstaller, a standalone Python 3.12, dependencies from the
+hash-pinned `packaging/requirements.lock`), runs its `--self-test` and inspects every native
+file for the macOS it needs — see `packaging/README.md`. `elstin-app --self-test` is also
+worth running after adding a dependency or a lazily-imported module: it is what notices a
+freezer missing it.
+
+`packaging/build-app.sh` builds `build/Elstin.app`: the native Swift window (`packaging/app/`,
+SwiftPM, no dependencies; `swift test --package-path packaging/app --scratch-path build/swift`)
+around that frozen backend. The window asks `GET /api/status` what is running (to warn before
+quitting and keep the Mac awake) and starts the backend with `--prefer-port` — see
+`packaging/README.md`.
+
+`scripts/start-local.sh` does the venv, dependency and UI-bundle setup and then
+runs the server in the foreground:
 
 ```bash
 scripts/start-local.sh   # uvicorn from .venv on http://localhost:8000/
@@ -55,7 +86,7 @@ engine detection, an image rebuild on every `up` — the image bakes in
 `elstin/`, `alembic/` and the UI bundle, so a stale one runs code you no
 longer have and fails migrations with a misleading "Can't locate
 revision" — a health wait, and `stop`/`down`/`logs`/`status`/`rebuild`/
-`psql`/`reset` subcommands. `scripts/stop.sh` is the stop half (`--keep`
+`shell`/`reset` subcommands. `scripts/stop.sh` is the stop half (`--keep`
 stops the containers without removing them); both leave every volume
 alone, so only `reset` loses data. Plain `docker compose up` still works.
 
@@ -68,17 +99,32 @@ pytest tests/test_daemon.py::test_name  # one test
 ```
 
 There are no pytest markers separating unit vs. integration tests — DB-backed
-tests (most of them) pull in the `postgres_url` fixture, which spins up a
-real ephemeral Postgres via `testcontainers-postgres` per session; only
-`test_reconciler.py`-style pure-logic tests skip the DB. No Docker daemon
-running means those DB-backed tests will fail to start a container.
+tests (most of them) pull in the `database_url` fixture: each test gets its own
+copy of a database that `alembic upgrade head` built once per session, so the
+schema under test is the migrated one, and nothing external (no Docker) is
+needed. Only `test_reconciler.py`-style pure-logic tests skip the DB.
 
 No lint/format/typecheck tooling is configured in this repo (no ruff,
 black, or mypy) — match existing style by hand.
 
 New DB column/table: add an Alembic migration under
 `alembic/versions/YYYYMMDD_NNNN_description.py` (docstring must explain
-backfill/default semantics for existing rows), then `alembic upgrade head`.
+backfill/default semantics for existing rows). SQLite cannot ALTER most things in
+place, so write it with `op.batch_alter_table` (it rebuilds the table); the
+app applies it on its next start, or run `alembic upgrade head`. `tests/test_migrations.py`
+fails when the models and the migrations disagree.
+
+One elstin per database: the app takes an exclusive lock on `elstin.db.lock` for as
+long as it runs (`elstin/db/lock.py`), so a second one refuses to start. The
+storage directories (worktrees, cloned repos, baselines, JIRA attachments) default
+to folders beside the database file; read them with `storage_dir(key)`
+(`elstin/config/store.py`), never a hard-coded `/data/...`.
+
+Database rules that SQLite imposes (details in `elstin/db/engine.py`): every
+transaction takes the write lock when it begins, so keep a `session_scope()` short
+and never do network, subprocess or model calls inside one; scopes do not nest;
+and store timestamps timezone-aware — use the `UtcDateTime` column type
+(`elstin/db/types.py`), never a bare `DateTime`.
 
 UI changes: the UI is one TypeScript/React app under `ui-src/src/`
 with its own client-side routes (`components/App.tsx`, router in

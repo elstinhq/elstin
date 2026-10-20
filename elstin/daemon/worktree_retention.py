@@ -36,7 +36,7 @@ import time
 from collections import defaultdict
 from typing import Any
 
-from elstin.config.store import get_config, get_int_config
+from elstin.config.store import get_int_config, storage_dir
 from elstin.state.manager import StateManager
 from elstin.tools.worktree import discard_worktree, run_git
 
@@ -87,7 +87,7 @@ def reclaim_finished_worktrees(
     report: dict[str, Any] = {"reclaimed": [], "kept": 0, "skipped": []}
     if keep <= 0:
         return report
-    base = base_dir or get_config("worktrees_base_dir") or "/data/repos"
+    base = base_dir or storage_dir("worktrees_base_dir")
 
     # Stories that still have something on disk, newest first. One already
     # reclaimed takes no slot: the limit is about what is occupying disk.

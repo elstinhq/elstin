@@ -19,7 +19,7 @@ terminal_reason in _SOFT_STOP_REASONS — real work may have happened, so
 the caller proceeds to the deterministic gate/verification, and the next retry
 resumes from this run's persisted `dev_history` (elstin/orchestration/
 state.py's FeatureRunState field, durably checkpointed by LangGraph's
-AsyncPostgresSaver alongside every other piece of run state — see
+checkpointer alongside every other piece of run state — see
 elstin/orchestration/graph.py's checkpointer_from_url) instead of
 restarting cold. This is what replaced the old CLI's `resume=<session_id>`:
 elstin now owns the conversation history instead of the provider, and gets
@@ -60,7 +60,7 @@ from elstin.agents.roles.dev import (
     build_dev_system,
 )
 from elstin.agents.roles.plan_gate import person_actions_of
-from elstin.config.store import get_bool_config, get_config, get_float_config, get_int_config, resolve_text
+from elstin.config.store import get_bool_config, get_config, get_float_config, get_int_config, resolve_text, storage_dir
 from elstin.llm.errors import LlmError, ProviderLimit, provider_limit_of
 from elstin.llm.registry import LlmNotConfiguredError, get_provider
 from elstin.llm.types import ContentBlock, LlmResponse, history_from_json, history_to_json, text_message
@@ -408,7 +408,7 @@ async def run_dev(
                 repo_path,
                 story_key=run_id or "story",
                 summary=plan.get("feature_summary") or (run_id or "story"),
-                worktrees_base_dir=get_config("worktrees_base_dir") or "/data/repos",
+                worktrees_base_dir=storage_dir("worktrees_base_dir"),
                 repo_label=label,
                 # One story, one branch name — in every repo it writes. This
                 # worktree is for an extra repo the plan named, created after
@@ -495,7 +495,7 @@ async def run_dev(
 
         prompt = _build_prompt(continuing=continuing, plan=plan, context_bundle=context_bundle, brief=brief)
 
-        data_dir = get_config("data_dir") or "/data"
+        data_dir = storage_dir("data_dir")
         baseline_dir = f"{data_dir}/baselines/{baseline_key or run_id}" if (baseline_key or run_id) else None
         # Seeded from the plan on a first pass; carried forward verbatim on
         # a fix round. Mutated in place by update_progress_tool, read back

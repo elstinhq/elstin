@@ -1,7 +1,7 @@
 """Where tickets come from: one interface, one neutral ticket shape, and a
 per-project choice of source.
 
-elstin's own Postgres board (epics and stories) is what the agents read.
+elstin's own local board (epics and stories) is what the agents read.
 JIRA — and next GitHub Issues — is where a ticket's *content* is authored.
 This module is the seam between the two: sync code asks `get_ticket_source`
 for the project's source and speaks only `Ticket` and `TicketSource`, so
