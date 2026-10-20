@@ -374,12 +374,37 @@ source they are under `~/Library/Application Support/Elstin/` and in Docker unde
 
 Only one Elstin can use a database at a time (two would each pick up the same
 stories): a second one stops with a message naming the first. That includes the
-Mac app's backend, `elstin-app` — see below.
+Mac app's backend, `elstin-app` — see [Run it as a Mac app](#run-it-as-a-mac-app).
 
 The Docker stack keeps its own database in a volume, separate from this one, so
 the two can run side by side if you give them different ports.
 
 `scripts/start-local.sh` automates the steps above (venv, UI build, uvicorn).
+
+## Run it as a Mac app
+
+Elstin can also run as a native macOS app (Apple silicon, macOS 15 or later): a small
+window around the same web UI, with the server bundled inside, so no Python, virtualenv
+or Docker is needed. Build it from a checkout:
+
+```bash
+packaging/build-app.sh      # -> build/Elstin.app
+```
+
+It needs `uv`, Node and Xcode's command line tools. The app is signed ad hoc, which is
+enough to run on the Mac that built it; it is not yet signed for distribution or
+notarized, and there is no `.dmg`.
+
+- **Your data** is the same SQLite file as running from source, so the app and a
+  checkout share one database (and so cannot run at the same time).
+- **Quitting** asks first if work is in flight; closing the window does not quit, since
+  runs take hours. While anything runs, the Mac is kept awake and the Dock icon shows
+  the count.
+- **Tools** (`node`, `flutter`, `mvn`, ...) are found through your login shell's
+  environment, so what works in your terminal works in the app.
+- **Logs** are in `~/Library/Logs/Elstin/`.
+
+How it is built, and how to test it, is in [packaging/README.md](packaging/README.md).
 
 ## Troubleshooting
 
