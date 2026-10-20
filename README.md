@@ -14,11 +14,13 @@ It is a local, single-user tool: no Kubernetes, no multi-tenancy, no login.
 - [How it works](#how-it-works)
 - [What you need](#what-you-need)
 - [Set it up](#set-it-up)
+- [Run it as a Mac app](#run-it-as-a-mac-app)
+- [Run it from source](#run-it-from-source)
+- [Run it in Docker](#run-it-in-docker)
 - [Configure it](#configure-it)
 - [Your first run](#your-first-run)
 - [Things to know before you point it at real work](#things-to-know-before-you-point-it-at-real-work)
-- [Day to day](#day-to-day)
-- [Run it from source](#run-it-from-source)
+- [Moving from the Postgres version](#moving-from-the-postgres-version)
 - [Troubleshooting](#troubleshooting)
 - [Develop](#develop)
 
@@ -60,14 +62,14 @@ planner ──► you approve the plan ──► dev ──► checks ──► 
 
 | You need | For | Notes |
 |---|---|---|
-| **Docker Desktop** or **Podman**, with Compose | Running Elstin | Docker or Podman is picked automatically. |
+| **A Mac (Apple silicon, macOS 15+)**, or **Python 3.11+ and Node 22**, or **Docker Desktop / Podman** | Running Elstin | Pick one of the [three ways to run it](#set-it-up). Docker or Podman is picked automatically. |
 | **An LLM API key** | Every agent | OpenAI, or any OpenAI-compatible endpoint (Azure, OpenRouter, vLLM, Ollama, a corporate proxy). |
 | **A GitHub token** | Cloning private repos over HTTPS, pushing the epic branch, opening the PR, reading GitHub Issues | Classic token: `repo` scope. Fine-grained token: Contents and Pull requests read/write on the repos, plus Issues if tickets come from GitHub. |
 | **JIRA access** *(only if tickets come from JIRA)* | Reading epics and stories | Your Atlassian email, an [API token](https://id.atlassian.com/manage-profile/security/api-tokens), and the site URL, e.g. `https://yourco.atlassian.net`. |
 | **A git repo to work on** | The code the agents change | A GitHub URL to clone, or a repo already on your disk. |
 
-You do **not** need Python, Node or a database installed to run it in Docker.
-Those are only for [running from source](#run-it-from-source).
+There is no database to install: Elstin keeps its state in one SQLite file it creates
+itself.
 
 ## Set it up
 
@@ -78,7 +80,101 @@ git clone git@github.com:elstinhq/elstin.git
 cd elstin
 ```
 
-### 2. Start it
+### 2. Pick how to run it
+
+All three keep their state in one SQLite file and behave the same.
+
+| | Best for | |
+|---|---|---|
+| [**Mac app**](#run-it-as-a-mac-app) | Everyday use on a Mac | `packaging/build-app.sh`, then open `build/Elstin.app` |
+| [**From source**](#run-it-from-source) | Working on Elstin, or using your own installed toolchains | `scripts/start-local.sh` |
+| [**Docker**](#run-it-in-docker) | A server, or no local toolchain | `scripts/elstin.sh` |
+
+### 3. Open it and configure it
+
+From source and Docker serve **http://localhost:8000/** (the dashboard) and
+**http://localhost:8000/settings**; the Mac app opens its own window.
+
+There is **no `.env` file**. The only environment variable Elstin reads is
+`DATABASE_URL` (the path of the SQLite file; Docker Compose sets it for you).
+Every other setting is stored in that database and edited live in the browser: no
+restart needed.
+
+Go on to [Configure it](#configure-it).
+
+## Run it as a Mac app
+
+Elstin can also run as a native macOS app (Apple silicon, macOS 15 or later): a small
+window around the same web UI, with the server bundled inside, so no Python, virtualenv
+or Docker is needed. Build it from a checkout:
+
+```bash
+packaging/build-app.sh      # -> build/Elstin.app
+```
+
+It needs `uv`, Node and Xcode's command line tools. The app is signed ad hoc, which is
+enough to run on the Mac that built it; it is not yet signed for distribution or
+notarized, and there is no `.dmg`.
+
+- **Your data** is the same SQLite file as running from source, so the app and a
+  checkout share one database (and so cannot run at the same time).
+- **Quitting** asks first if work is in flight; closing the window does not quit, since
+  runs take hours. While anything runs, the Mac is kept awake and the Dock icon shows
+  the count.
+- **Tools** (`node`, `flutter`, `mvn`, ...) are found through your login shell's
+  environment, so what works in your terminal works in the app.
+- **Logs** are in `~/Library/Logs/Elstin/`.
+
+How it is built, and how to test it, is in [packaging/README.md](packaging/README.md).
+
+## Run it from source
+
+Use this to work on Elstin itself, or to run it where your repos' toolchains
+(JDK, Node, Flutter) are installed. You need **Python 3.11+**, **Node 22** (to
+build the UI). Nothing else: the database is a file the app creates.
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+
+# The UI bundle is build output, not committed.
+(cd ui-src && npm ci && npm run build)
+
+# Creates and migrates the database on startup.
+uvicorn elstin.app:create_app --factory --host 127.0.0.1 --port 8000
+```
+
+Then open http://localhost:8000/ and [configure it](#configure-it).
+
+The database is `~/Library/Application Support/Elstin/elstin.db` on macOS
+(`~/.local/share/elstin/elstin.db` elsewhere), with LangGraph's checkpoints in
+`elstin.checkpoints.db` beside it. `DATABASE_URL=sqlite:////some/path.db` moves
+it, for instance to try a branch on a copy of your data.
+
+One difference from the Docker stack:
+
+- **Attach host paths as they are**, with no bind mount.
+
+The storage directories under *Git and storage* (worktrees, cloned repos, run
+snapshots, JIRA attachments) default to folders beside the database, so from
+source they are under `~/Library/Application Support/Elstin/` and in Docker under
+`/data`. Point them elsewhere in Settings if you like.
+
+Only one Elstin can use a database at a time (two would each pick up the same
+stories): a second one stops with a message naming the first. That includes the
+Mac app's backend, `elstin-app` — see [Run it as a Mac app](#run-it-as-a-mac-app).
+
+The Docker stack keeps its own database in a volume, separate from this one, so
+the two can run side by side if you give them different ports.
+
+`scripts/start-local.sh` automates the steps above (venv, UI build, uvicorn).
+
+## Run it in Docker
+
+The whole stack in one container, with the database in a Docker volume. Good for a
+server or a machine without a toolchain.
+
+### Start it
 
 ```bash
 scripts/elstin.sh
@@ -91,16 +187,7 @@ runs are quicker.
 
 Plain `docker compose up --build` also works if you prefer it.
 
-### 3. Open it and configure it
-
-- **http://localhost:8000/** — the dashboard.
-- **http://localhost:8000/settings** — where all configuration lives.
-
-There is **no `.env` file**. The only environment variable Elstin reads is
-`DATABASE_URL` (the path of the SQLite file), and Docker Compose sets that for you. Every other setting is
-stored in that database and edited live in the browser: no restart needed.
-
-Go on to [Configure it](#configure-it).
+The dashboard is at **http://localhost:8000/** and settings at **http://localhost:8000/settings**.
 
 ### Stopping and restarting
 
@@ -113,6 +200,30 @@ scripts/elstin.sh        # start again, where you left off
 Neither stop command deletes anything: the database, worktrees, cloned repos
 and `/data` all live in Docker volumes that survive. Only
 `scripts/elstin.sh reset` deletes data, and it asks first.
+
+### Day to day
+
+```bash
+scripts/elstin.sh            # build, start, wait until healthy (default)
+scripts/elstin.sh status     # what is running, and whether the app is healthy
+scripts/elstin.sh logs       # follow the app's logs
+scripts/elstin.sh restart    # down + up
+scripts/elstin.sh rebuild    # rebuild from scratch, ignoring the layer cache
+scripts/elstin.sh shell      # a shell inside the app container
+scripts/elstin.sh reset      # DESTRUCTIVE: delete the data volumes, database included (asks first)
+scripts/elstin.sh --help     # the rest
+```
+
+The port can be changed with an environment variable:
+
+```bash
+ELSTIN_APP_PORT=9000 scripts/elstin.sh
+```
+
+**Updating:** `git pull`, then `scripts/elstin.sh`. It rebuilds the image on
+every start, because the image bakes in the code and the migrations, and a
+stale image can fail with a misleading "Can't locate revision" error. The app
+migrates its database itself on startup.
 
 ## Configure it
 
@@ -272,8 +383,8 @@ attach the host path as it is.
 - **There is no login.** Anyone who can reach the port can use the app and
   spend your API budget. `docker-compose.yml` publishes port 8000 on all
   interfaces, so on shared or office networks keep a firewall on, or
-  [run from source](#run-it-from-source) with the commands below, which bind
-  to `127.0.0.1`.
+  [run from source](#run-it-from-source) (it binds
+  to `127.0.0.1`).
 - **It spends money.** Runs are billed by your provider. Set a per-story
   budget and keep parallelism modest while you are learning what a typical
   story costs. A story's usage shows token counts and an estimated cost
@@ -292,30 +403,6 @@ attach the host path as it is.
 - **Nothing is written back to JIRA or GitHub unless you allow it.** The write
   switches are off by default. Epic QA's comment is the one thing the daemon
   writes back, and only with the write setting on.
-
-## Day to day
-
-```bash
-scripts/elstin.sh            # build, start, wait until healthy (default)
-scripts/elstin.sh status     # what is running, and whether the app is healthy
-scripts/elstin.sh logs       # follow the app's logs
-scripts/elstin.sh restart    # down + up
-scripts/elstin.sh rebuild    # rebuild from scratch, ignoring the layer cache
-scripts/elstin.sh shell      # a shell inside the app container
-scripts/elstin.sh reset      # DESTRUCTIVE: delete the data volumes, database included (asks first)
-scripts/elstin.sh --help     # the rest
-```
-
-The port can be changed with an environment variable:
-
-```bash
-ELSTIN_APP_PORT=9000 scripts/elstin.sh
-```
-
-**Updating:** `git pull`, then `scripts/elstin.sh`. It rebuilds the image on
-every start, because the image bakes in the code and the migrations, and a
-stale image can fail with a misleading "Can't locate revision" error. The app
-migrates its database itself on startup.
 
 ## Moving from the Postgres version
 
@@ -338,73 +425,6 @@ in one transaction: it all arrives or none of it does. The Postgres database is
 only read, so it stays as a backup. The old database must be at its last
 revision (start the old checkout once and it migrates itself), and the SQLite
 one must be empty (`python scripts/clear_db.py` empties it).
-
-## Run it from source
-
-Use this to work on Elstin itself, or to run it where your repos' toolchains
-(JDK, Node, Flutter) are installed. You need **Python 3.11+**, **Node 22** (to
-build the UI). Nothing else: the database is a file the app creates.
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-
-# The UI bundle is build output, not committed.
-(cd ui-src && npm ci && npm run build)
-
-# Creates and migrates the database on startup.
-uvicorn elstin.app:create_app --factory --host 127.0.0.1 --port 8000
-```
-
-Then open http://localhost:8000/ and [configure it](#configure-it).
-
-The database is `~/Library/Application Support/Elstin/elstin.db` on macOS
-(`~/.local/share/elstin/elstin.db` elsewhere), with LangGraph's checkpoints in
-`elstin.checkpoints.db` beside it. `DATABASE_URL=sqlite:////some/path.db` moves
-it, for instance to try a branch on a copy of your data.
-
-One difference from the Docker stack:
-
-- **Attach host paths as they are**, with no bind mount.
-
-The storage directories under *Git and storage* (worktrees, cloned repos, run
-snapshots, JIRA attachments) default to folders beside the database, so from
-source they are under `~/Library/Application Support/Elstin/` and in Docker under
-`/data`. Point them elsewhere in Settings if you like.
-
-Only one Elstin can use a database at a time (two would each pick up the same
-stories): a second one stops with a message naming the first. That includes the
-Mac app's backend, `elstin-app` — see [Run it as a Mac app](#run-it-as-a-mac-app).
-
-The Docker stack keeps its own database in a volume, separate from this one, so
-the two can run side by side if you give them different ports.
-
-`scripts/start-local.sh` automates the steps above (venv, UI build, uvicorn).
-
-## Run it as a Mac app
-
-Elstin can also run as a native macOS app (Apple silicon, macOS 15 or later): a small
-window around the same web UI, with the server bundled inside, so no Python, virtualenv
-or Docker is needed. Build it from a checkout:
-
-```bash
-packaging/build-app.sh      # -> build/Elstin.app
-```
-
-It needs `uv`, Node and Xcode's command line tools. The app is signed ad hoc, which is
-enough to run on the Mac that built it; it is not yet signed for distribution or
-notarized, and there is no `.dmg`.
-
-- **Your data** is the same SQLite file as running from source, so the app and a
-  checkout share one database (and so cannot run at the same time).
-- **Quitting** asks first if work is in flight; closing the window does not quit, since
-  runs take hours. While anything runs, the Mac is kept awake and the Dock icon shows
-  the count.
-- **Tools** (`node`, `flutter`, `mvn`, ...) are found through your login shell's
-  environment, so what works in your terminal works in the app.
-- **Logs** are in `~/Library/Logs/Elstin/`.
-
-How it is built, and how to test it, is in [packaging/README.md](packaging/README.md).
 
 ## Troubleshooting
 
