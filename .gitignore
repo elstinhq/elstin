@@ -17,3 +17,16 @@ settings-ui/vendor/
 
 # Usage exports downloaded from OpenRouter's activity page.
 openrouter_activity_*.csv
+
+# The app's database and its LangGraph checkpoints hold every credential the
+# settings page stores; one stray `sqlite:///elstin.db` must never be committed.
+*.db
+*.db-wal
+*.db-shm
+# The preview server's own database (.claude/launch.json), apart from your real one.
+.dev-data/
+
+# Packaging output: the standalone Python, the build venv, the bundle (packaging/build-backend.sh).
+build/
+dist/
+.build/

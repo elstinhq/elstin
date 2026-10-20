@@ -42,7 +42,7 @@ from typing import Any
 
 from elstin.agents.roles.dev_loop import run_dev
 from elstin.agents.roles.verifier import run_deterministic_gate
-from elstin.config.store import get_config, resolve_text
+from elstin.config.store import resolve_text, storage_dir
 from elstin.services.memory_usage import measured
 from elstin.services.run_activity import activity_label, append_activity
 from elstin.tools.workspace import labels_in_plan
@@ -202,8 +202,8 @@ async def run_dev_variants(
     Returns the winner's `run_dev` result, with the story's own worktree entry put
     back and a `variants` summary, or None when nothing was adopted (the story
     worktree is then untouched)."""
-    base_dir = get_config("worktrees_base_dir") or "/data/repos"
-    data_dir = get_config("data_dir") or "/data"
+    base_dir = storage_dir("worktrees_base_dir")
+    data_dir = storage_dir("data_dir")
     story_entry = (story_worktrees or {}).get(default_label) or {
         "repo_path": (repo_roots or {}).get(default_label, project_path), "worktree_path": worktree_path, "branch": "",
     }

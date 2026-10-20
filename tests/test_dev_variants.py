@@ -495,7 +495,7 @@ async def test_a_cancelled_run_still_removes_its_scratch_worktrees(arena, monkey
 
 
 @pytest.fixture()
-def run(postgres_url, project_id, fake_agents, monkeypatch):
+def run(database_url, project_id, fake_agents, monkeypatch):
     """The real graph and checkpointer with scripted agents: the gate fails `fails`
     times, then passes."""
     set_config("dev_variants", "2")
@@ -529,7 +529,7 @@ def run(postgres_url, project_id, fake_agents, monkeypatch):
     async def go(**state_overrides):
         state = initial_state(KEY, "Add a widget", "/repo")
         state.update({"worktree_path": "/tmp/anywhere", "project_id": project_id, "started_clean": True, **state_overrides})
-        async with checkpointer_from_url(postgres_url) as checkpointer:
+        async with checkpointer_from_url(database_url) as checkpointer:
             return await compile_graph(checkpointer, require_plan_approval=False).ainvoke(
                 state, {"configurable": {"thread_id": f"variants-{uuid.uuid4()}"}},
             )

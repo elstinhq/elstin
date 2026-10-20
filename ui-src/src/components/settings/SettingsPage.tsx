@@ -107,7 +107,7 @@ export function SettingsPage() {
     <Page crumbs={[{ label: "Global settings" }]}>
       <div className="mx-auto w-full max-w-3xl">
         <p className="text-muted-foreground text-sm">
-          Stored in Postgres, not a file. Changes save as you leave a field and take effect without a restart.
+          Stored in the database, not a file. Changes save as you leave a field and take effect without a restart.
         </p>
 
         <div className="mt-5 flex flex-wrap items-center gap-2">

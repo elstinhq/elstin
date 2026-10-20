@@ -1,6 +1,6 @@
 """Stories run in parallel: poll_once starts every story whose dependencies
 have merged as its own background task, up to max_parallel_stories, and
-returns without waiting (elstin/daemon/main.py's _launch). Real Postgres and
+returns without waiting (elstin/daemon/main.py's _launch). A real SQLite database and
 git; the agents are fakes, and a gate event holds runs open so the test can
 see them overlap."""
 from __future__ import annotations
@@ -138,18 +138,18 @@ async def test_one_story_crashing_does_not_stop_the_others(git_repo, tmp_path, p
 
 
 async def test_runs_starting_together_on_a_fresh_database_set_up_the_checkpointer_once():
-    """The first parallel runs against a new database used to race to create
-    LangGraph's tables; Postgres rejected the loser and its run failed."""
+    """The first parallel runs against a new checkpoint file each open their own
+    connection and run LangGraph's schema script at once; they have to queue on
+    the file's write lock, not fail with "database is locked"."""
     import os
 
-    import psycopg
-
     import elstin.orchestration.graph as graph
+    from elstin.db.engine import checkpoints_path
 
     url = os.environ["DATABASE_URL"]
-    with psycopg.connect(url.replace("postgresql+psycopg://", "postgresql://", 1), autocommit=True) as conn:
-        for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints", "checkpoint_migrations"):
-            conn.execute(f"DROP TABLE IF EXISTS {table}")
+    path = checkpoints_path(url)
+    for leftover in (path, path.with_name(path.name + "-wal"), path.with_name(path.name + "-shm")):
+        leftover.unlink(missing_ok=True)
 
     async def open_one() -> bool:
         async with graph.checkpointer_from_url(url) as saver:

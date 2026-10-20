@@ -16,11 +16,11 @@ at which epic-wide validation is answerable).
 
 Notable design points:
 
-1. The checkpointer is Postgres (`langgraph-checkpoint-postgres`) instead of
-   SQLite — this is what turns `interrupt_after` into durable suspend/wake:
-   a run parked at the planner-approval gate survives a process restart and
-   resumes from exactly where it left off via its `thread_id`, for free
-   from LangGraph.
+1. The checkpointer is durable (`langgraph-checkpoint-sqlite`, in a file beside
+   the database — see `checkpointer_from_url`) — this is what turns
+   `interrupt_after` into durable suspend/wake: a run parked at the
+   planner-approval gate survives a process restart and resumes from exactly
+   where it left off via its `thread_id`, for free from LangGraph.
 2. `interrupt_after=["planner"]` is not hardcoded at compile time — it's
    conditional on the `require_plan_approval` app_config gate (see
    elstin/config/store.py), read once per compile.
@@ -64,6 +64,7 @@ from elstin.agents.roles.dev_variants import (
 from elstin.agents.roles.planner_loop import PlannerLoopError, run_planner
 from elstin.agents.roles.qa import run_epic_qa
 from elstin.agents.roles.verifier import format_gate_feedback, run_deterministic_gate, run_verifier
+from elstin.db.engine import BUSY_TIMEOUT_SECONDS, checkpoints_path, make_private
 from elstin.orchestration.state import FeatureRunState
 from elstin.services.generation import GenerationError
 from elstin.services.memory_usage import measured
@@ -646,31 +647,37 @@ def build_graph() -> StateGraph:
 
 
 # setup() runs one caller at a time. Stories run in parallel
-# (elstin/daemon/main.py), and on a fresh database two runs starting together
-# both created LangGraph's tables — Postgres rejects the second CREATE of the
-# same type, failing that run. It still runs on every open rather than once
+# (elstin/daemon/main.py), and several runs starting together on a fresh
+# checkpoint file would each run its schema script at once, queueing behind one
+# another's write lock for no gain. It still runs on every open rather than once
 # per process: it is a cheap no-op on existing tables, and it recreates them
-# if the schema was reset underneath a running process. Locks are per event
+# if the file was deleted underneath a running process. Locks are per event
 # loop: an asyncio lock belongs to the loop it was first used on.
 _checkpointer_setup_locks: dict[tuple[int, str], asyncio.Lock] = {}
 
 
 @asynccontextmanager
 async def checkpointer_from_url(database_url: str):
-    """Postgres checkpointer — the durable-suspend/wake mechanism (see this
-    module's docstring). `setup()` creates its tables on first use, same as
-    alembic upgrade head does for elstin's own tables, just LangGraph-owned.
+    """The checkpointer — the durable-suspend/wake mechanism (see this
+    module's docstring). `setup()` creates its tables on first use; they are
+    LangGraph-owned, not Alembic's.
 
-    Accepts the same `DATABASE_URL` used everywhere else in the app
-    (SQLAlchemy's `postgresql+psycopg://` form) and strips the `+psycopg`
-    driver suffix — `AsyncPostgresSaver` wants a plain psycopg conninfo
-    (`postgresql://...`), not a SQLAlchemy dialect URL.
+    Takes the same `DATABASE_URL` used everywhere else in the app but opens
+    the checkpoint file beside it (elstin/db/engine.py's `checkpoints_path`),
+    not the database itself: one checkpoint is written per graph step, with
+    sizeable blobs, and those writes must not queue behind the board's own
+    transactions. The connection waits as long as the engine does for the
+    write lock when parallel runs checkpoint at once.
     """
-    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    import aiosqlite
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-    conninfo = database_url.replace("postgresql+psycopg://", "postgresql://", 1)
-    async with AsyncPostgresSaver.from_conn_string(conninfo) as saver:
-        async with _checkpointer_setup_locks.setdefault((id(asyncio.get_running_loop()), conninfo), asyncio.Lock()):
+    path = checkpoints_path(database_url)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    async with aiosqlite.connect(path, timeout=BUSY_TIMEOUT_SECONDS) as conn:
+        make_private(path)  # holds each story's whole run state; before setup() makes its WAL files
+        saver = AsyncSqliteSaver(conn)
+        async with _checkpointer_setup_locks.setdefault((id(asyncio.get_running_loop()), str(path)), asyncio.Lock()):
             await saver.setup()
         yield saver
 

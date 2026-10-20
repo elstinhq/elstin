@@ -4,7 +4,7 @@ Everything an agent runs in a worktree — the dev step's allowlisted shell, the
 build/lint/test commands of the gate, the Dart analysis server — executes code
 the agent may have just written or edited (a test file, a build script, a
 package manifest's hooks). Handed the daemon's whole environment, that code
-could read whatever the daemon can: `DATABASE_URL` (the Postgres password), or,
+could read whatever the daemon can: `DATABASE_URL` (where the database file lives), or,
 on a laptop, every token in the shell elstin was started from.
 
 So a command gets a **minimal** environment instead: the variables a toolchain

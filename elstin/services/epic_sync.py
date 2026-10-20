@@ -1,4 +1,4 @@
-"""Pulls a JIRA epic and its descendant tickets into elstin's Postgres
+"""Pulls a JIRA epic and its descendant tickets into elstin's local
 bookkeeping (Epic/Story rows) so the daemon has something to poll.
 
 Re-running against an already-synced epic picks up newly added child

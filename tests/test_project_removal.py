@@ -1,7 +1,7 @@
 """Deleting a project (elstin/daemon/project_removal.py, DELETE /api/projects/{id}):
 every ticket as Remove ticket does, elstin's own clones, and the project's
 rows — but never an attached folder, and never anything on GitHub or JIRA.
-Real Postgres and git; the agents are fakes."""
+A real SQLite database and git; the agents are fakes."""
 from __future__ import annotations
 
 import os

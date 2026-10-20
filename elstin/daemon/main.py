@@ -36,8 +36,9 @@ import os
 import threading
 from datetime import datetime, timezone
 
-from elstin.config.store import get_config, get_int_config, resolve_bool_config
+from elstin.config.store import get_config, get_int_config, resolve_bool_config, storage_dir
 from elstin.db.engine import get_database_url
+from elstin.db.migrate import upgrade_to_head
 from elstin.orchestration.graph import checkpointer_from_url, compile_graph
 from elstin.orchestration.integration import (
     ensure_integration_worktree, epic_branch_changes_since, existing_epic_worktree, fast_forward_epic,
@@ -259,7 +260,7 @@ def _workspace_roots(
     repos = sm.list_project_repos(epic["project_id"]) if epic.get("project_id") else []
     default_label, roots = build_repo_roots(repos, default_repo)
     by_path = {repo["path"]: repo for repo in repos}
-    base = get_config("worktrees_base_dir") or "/data/repos"
+    base = storage_dir("worktrees_base_dir")
     read_only: list[str] = []
     reference: list[str] = []
     for label, path in list(roots.items()):
@@ -453,7 +454,7 @@ def _bring_done_work_into_epic(sm: StateManager, epic: dict) -> dict[str, list[s
     _default, all_roots = build_repo_roots(repos, epic.get("repo"))
     writable = {repo["path"] for repo in repos if repo.get("kind", "repo") == "repo" and not repo.get("read_only")}
     roots = {label: path for label, path in all_roots.items() if path in writable}
-    base = get_config("worktrees_base_dir") or "/data/repos"
+    base = storage_dir("worktrees_base_dir")
     closed = sorted(
         (
             s for s in sm.list_stories_for_epic(epic["jira_key"])
@@ -575,7 +576,7 @@ def _replan_behind_done_work(sm: StateManager, epic: dict) -> list[str]:
     latest = _latest_done_work_merge(sm, epic)
     if latest is None:
         return []
-    base = get_config("worktrees_base_dir") or "/data/repos"
+    base = storage_dir("worktrees_base_dir")
     live = live_run_keys()
     replanned: list[str] = []
     for story in sm.list_stories_for_epic(epic["jira_key"]):
@@ -769,7 +770,7 @@ def _build_qa_context(sm: StateManager, epic: dict, qa_story: dict) -> dict:
     and the repo — the roles stay free of StateManager imports.
 
     Only plain JSON-safe values go in: this ends up inside a LangGraph
-    checkpoint, which is serialized to Postgres.
+    checkpoint, which is serialized into the checkpoint file.
     """
     stories = sm.list_stories_for_epic(epic["jira_key"])
     # Top-level dev stories only, each carrying its own sub-tasks nested.
@@ -994,7 +995,7 @@ async def _execute_story_run(sm: StateManager, epic: dict, story: dict, *, resum
         for entry in await asyncio.to_thread(sm.list_story_worktrees, story_key)
     }
 
-    worktrees_base_dir = get_config("worktrees_base_dir") or "/data/repos"
+    worktrees_base_dir = storage_dir("worktrees_base_dir")
     if not resume:
         # Work that already exists for this ticket decides where its branch
         # starts (elstin/daemon/prior_work_lookup.py). The poll has normally
@@ -1754,7 +1755,7 @@ async def _merge_story_into_epic(sm: StateManager, epic: dict, story: dict) -> N
 async def _land_story(sm: StateManager, epic: dict, story: dict) -> None:
     story_key, epic_key = story["jira_key"], epic["jira_key"]
     sm.set_story_status(story_key, "merging")
-    worktrees_base_dir = get_config("worktrees_base_dir") or "/data/repos"
+    worktrees_base_dir = storage_dir("worktrees_base_dir")
     epic_branch = epic.get("integration_branch") or integration_branch_name(
         epic_key, external_source=epic.get("external_source"), external_id=epic.get("external_id"),
     )
@@ -2292,6 +2293,7 @@ async def run_forever(*, interval_seconds: int = 15) -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    upgrade_to_head()
     asyncio.run(run_forever())
 
 

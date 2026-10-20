@@ -13,10 +13,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from elstin.db.base import Base
+from elstin.db.types import UtcDateTime
 
 
 def _utcnow() -> datetime:
@@ -41,4 +42,4 @@ class StoryWorktree(Base):
     worktree_path: Mapped[str] = mapped_column(Text, nullable=False)
     branch: Mapped[str] = mapped_column(String(256), nullable=False)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utcnow, nullable=False)

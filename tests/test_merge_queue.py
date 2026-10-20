@@ -2,7 +2,7 @@
 elstin/orchestration/integration.py): a finished story is brought up to date
 with the epic branch, re-verified, and fast-forwarded into it — locally.
 
-Real Postgres, real git repos, the daemon's own poll loop. Only the agents
+A real SQLite database, real git repos, the daemon's own poll loop. Only the agents
 are fakes (`fake_agents`, conftest.py); each test's dev writes real files, so
 what lands on the epic branch is real content."""
 from __future__ import annotations

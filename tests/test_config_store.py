@@ -12,9 +12,44 @@ pytestmark = pytest.mark.usefixtures("elstin_db")
 def test_unset_fields_fall_back_to_declared_defaults():
     from elstin.config.store import get_bool_config, get_config
 
-    assert get_config("worktrees_base_dir") == "/data/repos"
+    assert get_config("worktrees_base_dir").endswith("/repos")
     assert get_bool_config("require_plan_approval") is True
     assert get_config("jira_base_url") is None  # no default — genuinely unset
+
+
+def test_the_storage_directories_default_to_places_beside_the_database(database_url):
+    """Everything elstin owns lives in one directory — the database's. In the Docker
+    image that is /data (DATABASE_URL=sqlite:////data/elstin.db), which is where its
+    volumes have always been mounted; for the Mac app it is its Application Support
+    directory."""
+    from pathlib import Path
+
+    from elstin.config.store import get_config, set_config, storage_dir
+    from sqlalchemy.engine import make_url
+
+    home = Path(make_url(database_url).database).parent
+    assert get_config("data_dir") == str(home)
+    assert get_config("worktrees_base_dir") == str(home / "repos")
+    assert get_config("cloned_repos_base_dir") == str(home / "cloned-repos")
+    assert get_config("jira_attachments_dir") == str(home / "jira-attachments")
+
+    set_config("worktrees_base_dir", "/elsewhere/worktrees")
+    assert storage_dir("worktrees_base_dir") == "/elsewhere/worktrees"  # a saved value wins
+
+    set_config("worktrees_base_dir", "")
+    assert storage_dir("worktrees_base_dir") == str(home / "repos")  # a blank one is no value at all
+
+
+def test_the_docker_image_keeps_its_volume_paths(monkeypatch):
+    from elstin.config.store import get_config
+
+    get_config("data_dir")  # the engine opens on the test database before the variable changes
+    monkeypatch.setenv("DATABASE_URL", "sqlite:////data/elstin.db")
+
+    assert get_config("data_dir") == "/data"
+    assert get_config("worktrees_base_dir") == "/data/repos"
+    assert get_config("cloned_repos_base_dir") == "/data/cloned-repos"
+    assert get_config("jira_attachments_dir") == "/data/jira-attachments"
 
 
 def test_set_config_round_trips_and_invalidates_cache():

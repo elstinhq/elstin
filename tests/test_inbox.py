@@ -1,5 +1,5 @@
 """What is waiting on a person (elstin/services/inbox.py, elstin/api/inbox_routes.py),
-against a real Postgres: one item per gate, the per-project counts, and what
+against a real SQLite database: one item per gate, the per-project counts, and what
 never shows up — sub-tasks, a story elstin will retry itself, an approved plan."""
 from __future__ import annotations
 

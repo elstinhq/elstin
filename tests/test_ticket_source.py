@@ -3,8 +3,6 @@ project uses, that unknown ones fail loudly, and that a synced ticket
 records where it came from."""
 from __future__ import annotations
 
-import os
-
 import pytest
 from fastapi.testclient import TestClient
 
@@ -98,59 +96,3 @@ def test_the_project_route_only_accepts_a_registered_source(fake_source_register
         assert client.put(f"/api/projects/{project_id}", json={"ticket_source": "nope"}).status_code == 422
         ok = client.put(f"/api/projects/{project_id}", json={"ticket_source": "fake"})
         assert ok.status_code == 200 and ok.json()["ticket_source"] == "fake"
-
-
-def test_the_migration_backfills_existing_rows_as_jira():
-    """create_all bypasses Alembic, so this is the only check that the
-    migration itself does what its docstring says to rows that predate it."""
-    from alembic import command
-    from alembic.config import Config
-    from sqlalchemy import create_engine, text
-
-    engine = create_engine(os.environ["DATABASE_URL"])
-    with engine.begin() as conn:
-        conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
-
-    config = Config("alembic.ini")
-    config.set_main_option("script_location", "alembic")
-    command.upgrade(config, "20260919_0019")
-    with engine.begin() as conn:
-        conn.execute(text("INSERT INTO projects (id, name, created_at, updated_at) VALUES (1, 'P', now(), now())"))
-        conn.execute(text(
-            "INSERT INTO epics (jira_key, project_id, summary, phase, plan_approved, manual_gate, created_at, updated_at) "
-            "VALUES ('OLD-1', 1, '', 'planning', false, true, now(), now())"
-        ))
-        conn.execute(text(
-            "INSERT INTO stories (jira_key, epic_key, summary, wave, status, kind, gate_approved, coverage_gap, retry_count, created_at, updated_at) "
-            "VALUES ('OLD-2', 'OLD-1', '', 0, 'pending', 'dev', false, false, 0, now(), now())"
-        ))
-
-    command.upgrade(config, "20260920_0020")
-
-    with engine.connect() as conn:
-        assert conn.execute(text("SELECT ticket_source FROM projects WHERE id = 1")).scalar() == "jira"
-        for table, key in (("epics", "OLD-1"), ("stories", "OLD-2")):
-            row = conn.execute(text(f"SELECT external_source, external_id, external_hash, external_synced_at FROM {table} WHERE jira_key = '{key}'")).one()
-            assert tuple(row) == ("jira", key, None, None)
-
-
-def test_migrations_produce_every_column_the_models_have_on_the_synced_tables():
-    """create_all bypasses Alembic, so a column added to a model but missing
-    from its migration would pass every other test and break a real deploy."""
-    from alembic import command
-    from alembic.config import Config
-    from sqlalchemy import create_engine, inspect, text
-
-    from elstin.db.models import Epic, Project, Story
-
-    engine = create_engine(os.environ["DATABASE_URL"])
-    with engine.begin() as conn:
-        conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
-    config = Config("alembic.ini")
-    config.set_main_option("script_location", "alembic")
-    command.upgrade(config, "head")
-
-    for model in (Epic, Story, Project):
-        columns = {c["name"] for c in inspect(engine).get_columns(model.__tablename__)}
-        expected = {c.name for c in model.__table__.columns}
-        assert columns == expected, f"{model.__tablename__}: migration/model drift {expected ^ columns}"

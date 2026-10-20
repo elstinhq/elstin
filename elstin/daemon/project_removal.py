@@ -33,7 +33,7 @@ import os
 import shutil
 from typing import Any
 
-from elstin.config.store import get_config
+from elstin.config.store import storage_dir
 from elstin.daemon.main import live_run_keys
 from elstin.daemon.ticket_removal import TicketBusy, TicketNotFound, TicketRemovalError, remove_epic
 from elstin.state.manager import StateManager
@@ -100,7 +100,7 @@ async def remove_project(sm: StateManager, project_id: int) -> dict[str, Any]:
 
     repos = await asyncio.to_thread(sm.list_project_repos, project_id)
     local = await asyncio.to_thread(_remove_clones, project_id, repos)
-    worktrees_base = get_config("worktrees_base_dir") or "/data/repos"
+    worktrees_base = storage_dir("worktrees_base_dir")
     for repo in repos:
         if repo.get("kind") == "reference":
             await asyncio.to_thread(remove_reference_copy, worktrees_base, repo["id"])
@@ -147,7 +147,7 @@ def _remove_clones(project_id: int, repos: list[dict]) -> dict[str, list[str]]:
     is under the project's own clone folder (`cloned_repos_base_dir/<id>`), so
     a stored path can never send this outside it — then that folder.
     Attached folders are not touched."""
-    base = os.path.realpath(os.path.join(get_config("cloned_repos_base_dir") or "/data/cloned-repos", str(project_id)))
+    base = os.path.realpath(os.path.join(storage_dir("cloned_repos_base_dir"), str(project_id)))
     clones: list[str] = []
     warnings: list[str] = []
     for repo in repos:

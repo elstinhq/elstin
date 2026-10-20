@@ -1,7 +1,7 @@
 """In-process fan-out of run activity to live (SSE) subscribers.
 
 The activity a human watches during a run is already being written to
-Postgres by elstin/services/run_activity.py's append_activity — every agent
+the database by elstin/services/run_activity.py's append_activity — every agent
 role calls it for each reasoning block, tool call and status change. Until
 now the only way to see those events was to re-fetch the whole list on a
 timer, which put the UI a poll interval behind the agent and re-read the
@@ -12,18 +12,18 @@ here as it is written, and `publish` drops it into the queue of every
 listener currently watching that run_id. Because the API and the daemon
 share one process by design (see elstin/app.py's lifespan — the poll loop
 is an asyncio task next to the routes), an in-memory registry reaches
-every writer there is; no Redis, no LISTEN/NOTIFY, nothing else to run.
+every writer there is; no Redis, nothing else to run.
 
 Two properties this deliberately does NOT give up by going in-memory:
 
 - **No gap on subscribe.** `iter_events` registers its queue *before*
-  reading the backlog out of Postgres, so an event written in between is
+  reading the backlog out of the database, so an event written in between is
   queued rather than lost, and is then dropped as a duplicate by id. The
   other order — read, then subscribe — has a hole exactly the width of the
   backlog query.
 - **No silent loss on a slow reader.** Queues are bounded; a subscriber
   that can't keep up is flagged rather than blocked, and re-reads what it
-  missed from the table (the durable record) on its next wakeup. Postgres
+  missed from the table (the durable record) on its next wakeup. The table
   stays the source of truth and this is only a low-latency shortcut to it.
 
 `publish` is called from both the event loop thread (the async SDK runner
@@ -105,7 +105,7 @@ def publish(event: dict[str, Any]) -> None:
 
     Never raises: a failure to notify a watcher must not fail the agent
     turn that produced the event — the event is already durable in
-    Postgres by the time we get here, so the worst case is that a browser
+    the database by the time we get here, so the worst case is that a browser
     sees it a heartbeat later via the catch-up read instead of instantly.
     """
     run_id = event.get("run_id")

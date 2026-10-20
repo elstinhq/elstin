@@ -13,22 +13,27 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from elstin.api.access_guard import Access, AccessGuard
 from elstin.api.config_routes import router as config_router
 from elstin.api.epic_routes import router as epic_router
 from elstin.api.inbox_routes import router as inbox_router
 from elstin.api.po_routes import router as po_router
 from elstin.api.project_routes import router as project_router
 from elstin.api.run_routes import router as run_router
+from elstin.api.status_routes import router as status_router
 from elstin.daemon.main import run_forever
 from elstin.daemon.ticket_sync import run_ticket_sync_forever
+from elstin.db.engine import close_engine, database_path
+from elstin.db.lock import acquire as acquire_instance_lock, release as release_instance_lock
+from elstin.db.migrate import upgrade_to_head
+from elstin.resources import resource_root
 
-_UI_DIR = Path(__file__).resolve().parent.parent / "settings-ui"
+_UI_DIR = resource_root() / "settings-ui"
 
 # The UI's pages and bundles keep fixed names (settings-ui/vendor/app-*.js),
 # so without this a browser could run a cached bundle for a while after a
@@ -47,21 +52,35 @@ class _RevalidatedStaticFiles(StaticFiles):
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     logging.basicConfig(level=logging.INFO)
-    tasks = [asyncio.create_task(run_forever()), asyncio.create_task(run_ticket_sync_forever())]
+    # One elstin per database: refuse to start beside another, before touching it.
+    database = database_path()
+    acquire_instance_lock(database)
     try:
-        yield
+        # Before anything reads the database — including the first request.
+        await asyncio.to_thread(upgrade_to_head)
+        tasks = [asyncio.create_task(run_forever()), asyncio.create_task(run_ticket_sync_forever())]
+        try:
+            yield
+        finally:
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
     finally:
-        for task in tasks:
-            task.cancel()
-        for task in tasks:
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        await asyncio.to_thread(close_engine)  # a clean quit leaves one complete file
+        release_instance_lock(database)
 
 
-def create_app() -> FastAPI:
+def create_app(access: Access | None = None) -> FastAPI:
+    """`access` is passed by the Mac app's launcher (elstin/launcher.py) and makes the
+    server answer only to its own window — see elstin/api/access_guard.py. `uvicorn
+    elstin.app:create_app --factory` calls this with nothing: no access control."""
     app = FastAPI(title="elstin", lifespan=_lifespan)
+    if access is not None:
+        app.add_middleware(AccessGuard, access=access)
 
     app.include_router(config_router)
     app.include_router(run_router)
@@ -69,6 +88,7 @@ def create_app() -> FastAPI:
     app.include_router(project_router)
     app.include_router(po_router)
     app.include_router(inbox_router)
+    app.include_router(status_router)
 
     @app.get("/healthz")
     def healthz() -> dict:

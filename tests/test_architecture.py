@@ -205,3 +205,21 @@ def test_tools_that_run_repo_code_always_pass_an_environment():
         "Commands that run repo code must pass env=language_hooks.profile_command_env(<worktree>). "
         f"Offenders: {offenders}"
     )
+
+
+_STORAGE_LITERALS = {"/data"} | {f"/data/{name}" for name in ("repos", "cloned-repos", "jira-attachments", "baselines")}
+
+
+def test_nothing_hard_codes_a_storage_path():
+    """Where worktrees, cloned repos, baselines and attachments live follows the
+    database (elstin/config/store.py's `storage_dir`): `/data/...` in the Docker
+    image, the user's Application Support folder in the Mac app. A literal path in
+    some module would send that module's files somewhere the settings never say."""
+    offenders = []
+    for path in _python_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and node.value in _STORAGE_LITERALS:
+                offenders.append(f"{_relative(path)}:{node.lineno}: {node.value!r}")
+
+    assert offenders == [], "use storage_dir(<setting>) instead:\n" + "\n".join(offenders)

@@ -8,10 +8,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from elstin.db.base import Base
+from elstin.db.types import UtcDateTime
 
 
 def _utcnow() -> datetime:
@@ -30,9 +31,9 @@ class Project(Base):
     # client. Existing projects are "jira".
     ticket_source: Mapped[str] = mapped_column(String(16), default="jira", server_default="jira", nullable=False)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+        UtcDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
     )
 
     repos: Mapped[list["ProjectRepo"]] = relationship(back_populates="project", cascade="all, delete-orphan")
@@ -64,9 +65,9 @@ class ProjectRepo(Base):
     # repo so elstin never edits a checkout it does not own; a guide the repo
     # ships itself always wins over this one.
     generated_guide: Mapped[str | None] = mapped_column(Text, nullable=True)
-    generated_guide_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    generated_guide_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utcnow, nullable=False)
 
     project: Mapped[Project] = relationship(back_populates="repos")
 
@@ -84,7 +85,7 @@ class ProjectConfig(Base):
     value: Mapped[str | None] = mapped_column(Text, nullable=True)
     secret: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+        UtcDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
     )
 
 
@@ -113,7 +114,7 @@ class ProjectTicketFilter(Base):
 
     The `last_*` columns are observability, not state the sync depends on:
     every sweep re-derives what to do from JIRA plus the epics/stories
-    already in Postgres, so a wiped or stale row here changes nothing about
+    already in the database, so a wiped or stale row here changes nothing about
     the outcome — it only changes what the UI can tell the user about the
     previous sweep (including `last_error`, which is otherwise a log line
     nobody sees, since the sweep runs unattended).
@@ -137,12 +138,12 @@ class ProjectTicketFilter(Base):
     issue_types: Mapped[list | None] = mapped_column(JSON, nullable=True)
     extra_jql: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     last_matched_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_synced_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+        UtcDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
     )

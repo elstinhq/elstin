@@ -1,4 +1,4 @@
-"""End-to-end for the QA path, against real Postgres and a real git repo:
+"""End-to-end for the QA path, against a real SQLite database and a real git repo:
 a dev story runs and merges, then the epic's QA ticket dispatches in the
 final wave, gets a QA context assembled from the merged integration branch,
 completes without a PR, and has its report posted to JIRA.

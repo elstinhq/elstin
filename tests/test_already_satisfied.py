@@ -246,7 +246,7 @@ async def test_a_run_with_declarations_is_always_reviewed_even_when_trivial_diff
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("elstin_db", "fake_agents")
-async def test_declarations_travel_from_dev_to_the_gate_and_into_the_next_dev_round(postgres_url, monkeypatch):
+async def test_declarations_travel_from_dev_to_the_gate_and_into_the_next_dev_round(database_url, monkeypatch):
     import uuid
 
     import elstin.orchestration.graph as graph_module
@@ -277,7 +277,7 @@ async def test_declarations_travel_from_dev_to_the_gate_and_into_the_next_dev_ro
     thread_id = str(uuid.uuid4())
     state = initial_state(thread_id, "Add a widget", "/repo")
     state["worktree_path"] = "/repo-worktrees/eng-1"
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         graph = compile_graph(checkpointer, require_plan_approval=False)
         await graph.ainvoke(state, {"configurable": {"thread_id": thread_id}})
 

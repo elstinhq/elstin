@@ -19,10 +19,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from elstin.db.base import Base
+from elstin.db.types import UtcDateTime
 
 LESSON_PROPOSED = "proposed"
 LESSON_ACCEPTED = "accepted"
@@ -64,7 +65,7 @@ class ProjectLesson(Base):
     # lesson against what actually happened instead of trusting it.
     evidence_quote: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+        UtcDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
     )

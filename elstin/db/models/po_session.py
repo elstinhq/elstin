@@ -30,10 +30,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import JSON, Boolean, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from elstin.db.base import Base
+from elstin.db.types import UtcDateTime
 
 PO_QUEUED = "queued"
 PO_RUNNING = "running"
@@ -106,9 +107,9 @@ class PoSession(Base):
     # for run id `po-<id>`), kept here so the session list can show it.
     cost_usd: Mapped[float] = mapped_column(Numeric(12, 6), nullable=False, default=0, server_default="0")
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+        UtcDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
     )
 
 
@@ -132,5 +133,5 @@ class PoMessage(Base):
     text: Mapped[str] = mapped_column(Text, nullable=False)
     # The draft version the agent's reply answers; NULL for a person's message.
     draft_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    delivered_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utcnow, nullable=False)

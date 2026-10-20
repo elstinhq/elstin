@@ -164,8 +164,8 @@ def test_a_value_set_after_the_cache_was_filled_is_covered_once_it_expires(monke
     assert redact("x second-token-0123456789") == f"x {REDACTED}"
 
 
-def test_unreadable_settings_fall_back_to_shapes_and_do_not_fail(monkeypatch):
-    monkeypatch.delenv("DATABASE_URL", raising=False)
+@pytest.mark.usefixtures("unreadable_database")
+def test_unreadable_settings_fall_back_to_shapes_and_do_not_fail():
     assert redact(f"x {GITHUB}") == f"x {REDACTED}"
 
 

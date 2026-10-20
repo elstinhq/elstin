@@ -30,23 +30,20 @@
 #   rebuild   rebuild from scratch, ignoring the layer cache, then up
 #   logs      follow the app's logs
 #   status    what is running, and whether the app is healthy
-#   migrate   run `alembic upgrade head` against the running stack
 #   shell     a shell inside the app container
-#   psql      a psql prompt on the app's database
-#   reset     DESTRUCTIVE — delete the database volume and start fresh
+#   reset     DESTRUCTIVE — delete the data volumes (database included) and start fresh
 #
-# Ports come from the same variables compose reads, so they stay in sync:
-#   ELSTIN_APP_PORT=9000 ELSTIN_PG_PORT=6000 scripts/elstin.sh up
+# The port comes from the same variable compose reads, so they stay in sync:
+#   ELSTIN_APP_PORT=9000 scripts/elstin.sh up
 
 set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 APP_PORT="${ELSTIN_APP_PORT:-8000}"
-PG_PORT="${ELSTIN_PG_PORT:-5433}"
 # The app answers /healthz almost immediately once uvicorn is up; the
-# budget is really for the first run, where compose is still pulling
-# postgres and applying migrations before the app is even started.
+# budget is really for the first run, which builds the image and then creates
+# and migrates the database before the app serves anything.
 HEALTH_TIMEOUT_SECONDS="${ELSTIN_HEALTH_TIMEOUT:-180}"
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -99,7 +96,8 @@ require_engine() {
 }
 
 # A port collision surfaces from compose as a bind failure after it has
-# already started postgres, which is a confusing place to read it from.
+# already built and created the container, which is a confusing place to read
+# it from.
 require_port_free() {
     local port="$1" what="$2" var="$3"
     # Only complain about a port held by something that is not our own
@@ -149,7 +147,7 @@ banner() {
     say "${GREEN}elstin is up.${RESET}"
     say "  Dashboard  http://localhost:${APP_PORT}/"
     say "  Settings   http://localhost:${APP_PORT}/settings"
-    say "  Postgres   localhost:${PG_PORT}  ${DIM}(elstin/elstin, db elstin)${RESET}"
+    say "  Database   /data/elstin.db  ${DIM}(the elstin-data volume; \`reset\` deletes it)${RESET}"
     say ""
     say "${DIM}Nothing is read from a .env file: open /settings and fill in JIRA,${RESET}"
     say "${DIM}GitHub and your LLM provider before the daemon has work to poll for.${RESET}"
@@ -158,19 +156,18 @@ banner() {
 
 # --- commands ----------------------------------------------------------
 
-# The image bakes in elstin/ and the UI bundle, so an image built before
-# your last edit runs code you no longer have — and, since it also carries
-# alembic/, a stale image against a current database fails migration with
-# "Can't locate revision", which reads like database corruption rather
-# than what it is. Building every time removes that whole class of
-# confusion; with layers cached an unchanged tree costs a few seconds.
+# The image bakes in elstin/, alembic/ and the UI bundle, so an image built
+# before your last edit runs code you no longer have — and, against a database a
+# newer checkout already migrated, fails at startup with "Can't locate
+# revision", which reads like database corruption rather than what it is.
+# Building every time removes that whole class of confusion; with layers cached
+# an unchanged tree costs a few seconds.
 cmd_up() {
     require_engine
     require_port_free "$APP_PORT" "the app" ELSTIN_APP_PORT
-    require_port_free "$PG_PORT" "Postgres" ELSTIN_PG_PORT
-    step "Building the image and starting Postgres, migrations and the app"
-    # `migrate` is a one-shot the app waits on, so once this returns the
-    # schema is already at head.
+    step "Building the image and starting the app"
+    # The app creates and migrates its own database before it serves, so the
+    # health wait below is also the wait for the schema to be at head.
     if ! "${COMPOSE[@]}" up -d --build "$@"; then
         explain_startup_failure
         die "Stack did not start."
@@ -179,41 +176,23 @@ cmd_up() {
     banner
 }
 
-# Compose reports a failed dependency by name and swallows its output, so
-# the one thing you need — what the migration or the app actually said —
-# is not on screen. Put it there, and only the relevant half of it: a
-# failed migration means the app never started, and dumping the previous
-# container's healthy log underneath the real error only obscures it.
-exit_code_of() {
-    local cid; cid="$("${COMPOSE[@]}" ps -aq "$1" 2>/dev/null | head -1)"
-    [ -n "$cid" ] || return 1
-    "$ENGINE" inspect -f '{{.State.ExitCode}}' "$cid" 2>/dev/null
-}
-
+# Compose swallows the app's own output when it fails to start, so the one
+# thing you need — what the app (or its migration) actually said — is not on
+# screen. Put it there.
 explain_startup_failure() {
-    local migrate_exit; migrate_exit="$(exit_code_of migrate || echo "")"
-    if [ -n "$migrate_exit" ] && [ "$migrate_exit" != "0" ]; then
-        local migrate_log
-        migrate_log="$("${COMPOSE[@]}" logs --tail 30 migrate 2>/dev/null || true)"
-        say ""
-        say "${RED}Migrations did not complete (exit $migrate_exit):${RESET}"
-        say "$migrate_log"
-        case "$migrate_log" in
-            *"Can't locate revision"*)
-                say ""
-                say "That revision is in the database but not in this image or checkout."
-                say "The database is newer than the code — pull, or ${BOLD}scripts/elstin.sh reset${RESET} to start clean."
-                ;;
-        esac
-        return 0
-    fi
-
     local app_log
     app_log="$("${COMPOSE[@]}" logs --tail 30 app 2>/dev/null || true)"
     if [ -n "$app_log" ]; then
         say ""
         say "${RED}App output:${RESET}"
         say "$app_log"
+        case "$app_log" in
+            *"Can't locate revision"*)
+                say ""
+                say "That revision is in the database but not in this image or checkout."
+                say "The database is newer than the code — pull, or ${BOLD}scripts/elstin.sh reset${RESET} to start clean."
+                ;;
+        esac
     fi
 }
 
@@ -267,25 +246,14 @@ cmd_status() {
     fi
 }
 
-cmd_migrate() {
-    require_engine
-    step "alembic upgrade head"
-    "${COMPOSE[@]}" run --rm migrate
-}
-
 cmd_shell() {
     require_engine
     "${COMPOSE[@]}" exec app /bin/sh
 }
 
-cmd_psql() {
-    require_engine
-    "${COMPOSE[@]}" exec postgres psql -U elstin -d elstin
-}
-
 cmd_reset() {
     require_engine
-    say "${RED}This deletes the Postgres volume: every project, epic, story," \
+    say "${RED}This deletes the database: every project, epic, story," \
         "run and setting is lost.${RESET}"
     say "The /data volumes go too: worktrees, cloned repos, JIRA attachments,"
     say "and the dev loop's pre-edit baselines."
@@ -311,9 +279,7 @@ case "$command" in
     rebuild)  cmd_rebuild ;;
     logs)     cmd_logs "$@" ;;
     status)   cmd_status ;;
-    migrate)  cmd_migrate ;;
     shell)    cmd_shell ;;
-    psql)     cmd_psql ;;
     reset)    cmd_reset ;;
     -h|--help|help) usage ;;
     *)        die "Unknown command '$command'. Try: scripts/elstin.sh --help" ;;

@@ -310,7 +310,7 @@ LIMIT = ProviderLimit(kind="rate", reset_at=time.time() + 3600, message="daily l
 
 @pytest.mark.usefixtures("elstin_db", "fake_agents")
 @pytest.mark.parametrize("node", ["planner", "dev", "verifier", "qa"])
-async def test_a_run_that_ends_on_a_limit_says_so_in_its_final_state(node, postgres_url, monkeypatch):
+async def test_a_run_that_ends_on_a_limit_says_so_in_its_final_state(node, database_url, monkeypatch):
     errors = {
         "planner": ("run_planner", PlannerLoopError), "dev": ("run_dev", DevLoopError),
         "verifier": ("run_verifier", generation.GenerationError), "qa": ("run_epic_qa", generation.GenerationError),
@@ -327,7 +327,7 @@ async def test_a_run_that_ends_on_a_limit_says_so_in_its_final_state(node, postg
         state["story_kind"] = "qa"
         state["qa_context"] = {"epic": {"jira_key": "ENG-1"}}
 
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         final = await compile_graph(checkpointer, require_plan_approval=False).ainvoke(
             state, {"configurable": {"thread_id": f"limit-{node}"}},
         )
@@ -337,14 +337,14 @@ async def test_a_run_that_ends_on_a_limit_says_so_in_its_final_state(node, postg
 
 
 @pytest.mark.usefixtures("elstin_db", "fake_agents")
-async def test_a_failure_that_is_not_a_limit_leaves_the_field_empty(postgres_url, monkeypatch):
+async def test_a_failure_that_is_not_a_limit_leaves_the_field_empty(database_url, monkeypatch):
     async def refused(**kwargs):
         raise DevLoopError("bad schema")
 
     monkeypatch.setattr(graph_module, "run_dev", refused)
     state = initial_state("ENG-2", "Add a widget", "/repo")
     state["worktree_path"] = "/tmp/anywhere"
-    async with checkpointer_from_url(postgres_url) as checkpointer:
+    async with checkpointer_from_url(database_url) as checkpointer:
         final = await compile_graph(checkpointer, require_plan_approval=False).ainvoke(
             state, {"configurable": {"thread_id": "no-limit"}},
         )

@@ -92,7 +92,7 @@ class FeatureRunState(TypedDict, total=False):
     messages: Annotated[list[dict[str, Any]], operator.add]
     # The dev loop's own elstin/llm/types.py message history, JSON-serialized
     # (elstin/llm/types.py:history_to_json/history_from_json) — durably
-    # checkpointed by LangGraph's AsyncPostgresSaver alongside every other
+    # checkpointed by LangGraph's checkpointer alongside every other
     # field here, which is what lets a turn-capped run resume from exactly
     # where it stopped (see elstin/agents/roles/dev_loop.py's module
     # docstring) instead of restarting cold. Replaces the old Claude Agent
@@ -156,7 +156,7 @@ class FeatureRunState(TypedDict, total=False):
     # project can choose for itself — which model each role runs on, and which
     # provider, endpoint and key the calls go to — instead of reading the
     # global setting. Only the id: a key must never be put in this state, which
-    # is checkpointed to Postgres and sent to LangSmith. None (a run
+    # is checkpointed and sent to LangSmith. None (a run
     # checkpointed before this existed) means the global settings.
     project_id: int | None
 

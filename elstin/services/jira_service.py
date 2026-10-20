@@ -1,5 +1,5 @@
 """A thin wrapper around the `jira` SDK. Every credential/URL/gate read goes
-through `get_config("x")` (Postgres), per elstin's no-`.env` rule.
+through `get_config("x")` (the database), per elstin's no-`.env` rule.
 Tuning constants that aren't credentials/URLs/gates (timeouts, result caps)
 are plain module constants instead of settings-UI fields — not worth
 exposing in the UI.
@@ -17,7 +17,7 @@ from pathlib import Path
 
 from jira import JIRA, JIRAError
 
-from elstin.config.store import get_config, resolve_bool_config, resolve_config
+from elstin.config.store import get_config, resolve_bool_config, resolve_config, storage_dir
 from elstin.services.adf import markdown_to_adf
 from elstin.services.ticket_source import Ticket, TicketWriteDisabled, TicketWriteError
 
@@ -343,7 +343,7 @@ class JiraService:
     # -- attachments --------------------------------------------------------------
 
     def download_attachment(self, attachment_id: str, filename: str, ticket_key: str) -> Path:
-        dest_dir = Path(get_config("jira_attachments_dir") or "/data/jira-attachments") / ticket_key
+        dest_dir = Path(storage_dir("jira_attachments_dir")) / ticket_key
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest_path = dest_dir / filename
 

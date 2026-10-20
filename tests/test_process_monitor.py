@@ -162,6 +162,7 @@ def test_the_trees_own_process_has_resident_memory():
 # --- the shared runners ---------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("elstin_db")
 def test_the_gates_runner_and_the_dev_shell_are_measured(tmp_path, monkeypatch):
     monkeypatch.setattr(safe_shell, "is_safe_command", lambda command: True)
     script = tmp_path / "heavy.sh"

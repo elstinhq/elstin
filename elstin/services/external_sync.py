@@ -1,6 +1,6 @@
 """Keeping the board in step with the source it was pulled from.
 
-The board (elstin's Postgres) is what the agents read; the source (JIRA, …)
+The board (elstin's own database) is what the agents read; the source (JIRA, …)
 owns what a ticket *says*. Every walk of an epic's tree — the manual sync,
 the background sweep — passes the tickets it just read through
 `reconcile_epic`, which decides, per ticket, what that means for the board:

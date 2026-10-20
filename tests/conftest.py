@@ -1,9 +1,38 @@
 from __future__ import annotations
 
+import os
+import shutil
+import sqlite3
 import subprocess
+from contextlib import closing
+from pathlib import Path
 
 import pytest
-from testcontainers.postgres import PostgresContainer
+
+
+@pytest.fixture(autouse=True)
+def _never_the_users_database(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
+    """With no DATABASE_URL, elstin opens the file in the user's own data
+    directory — the real one, if the suite runs on a developer's machine. Point
+    that default at a directory nothing has made, and fail any test that makes
+    it by opening the database without choosing one (use `elstin_db`)."""
+    import elstin.db.engine as engine_mod
+
+    unused = tmp_path_factory.mktemp("elstin-default-home") / "must-stay-absent"
+    monkeypatch.setattr(engine_mod, "data_home", lambda: unused)
+    # No engine carried over from an earlier test: a cached one would open
+    # nothing and hide that this test never chose a database.
+    engine_mod._engine = None
+    engine_mod._SessionLocal = None
+    yield
+    if engine_mod._engine is not None:
+        engine_mod._engine.dispose()
+    engine_mod._engine = None
+    engine_mod._SessionLocal = None
+    assert not unused.exists(), (
+        "this test opened elstin's default database (no DATABASE_URL set); "
+        "take the `elstin_db` fixture so it gets a database of its own"
+    )
 
 
 def _run_git(cmd: list[str], cwd: str) -> None:
@@ -31,9 +60,37 @@ def git_repo(tmp_path):
 
 
 @pytest.fixture(scope="session")
-def postgres_url() -> str:
-    with PostgresContainer("postgres:16-alpine", driver="psycopg") as pg:
-        yield pg.get_connection_url()
+def _migrated_database(tmp_path_factory) -> Path:
+    """A database built the way production builds one — `alembic upgrade head`
+    on an empty file — once per session. Each test gets a copy of it, so every
+    test runs on the migrated schema and a model that drifts from the migration
+    fails the whole suite, not one test."""
+    from elstin.db.migrate import upgrade_to_head
+
+    path = tmp_path_factory.mktemp("elstin-template") / "elstin.db"
+    previous = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = f"sqlite:///{path}"
+    try:
+        upgrade_to_head()
+    finally:
+        if previous is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous
+    # Fold the write-ahead log into the one file that gets copied.
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    return path
+
+
+@pytest.fixture()
+def database_url(_migrated_database: Path, tmp_path_factory: pytest.TempPathFactory) -> str:
+    """This test's own copy of the migrated database (and so its own checkpoint
+    file, which sits beside it). In a directory of its own, not the test's
+    `tmp_path`: tests use that one as a repo or a data directory and list it."""
+    path = tmp_path_factory.mktemp("elstin-db") / "elstin.db"
+    shutil.copyfile(_migrated_database, path)
+    return f"sqlite:///{path}"
 
 
 async def fake_run_planner(**kwargs) -> dict:
@@ -103,34 +160,16 @@ def fake_agents(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture()
-def elstin_db(postgres_url: str, monkeypatch: pytest.MonkeyPatch):
-    """Points elstin.db.engine at the throwaway testcontainers Postgres,
-    creates all tables, and tears down cleanly. Also resets the config
-    cache so each test starts from a known-empty app_config table."""
-    monkeypatch.setenv("DATABASE_URL", postgres_url)
+def elstin_db(database_url: str, monkeypatch: pytest.MonkeyPatch):
+    """Points elstin.db.engine at this test's own migrated database. Also
+    resets the config cache so each test starts from a known-empty app_config
+    table."""
+    monkeypatch.setenv("DATABASE_URL", database_url)
 
     import elstin.db.engine as engine_mod
 
     engine_mod._engine = None
     engine_mod._SessionLocal = None
-
-    from elstin.db.base import Base
-    from elstin.db.models import (  # noqa: F401
-        ActivityEvent,
-        AppConfig,
-        Epic,
-        JiraWatermark,
-        Project,
-        ProjectConfig,
-        ProjectRepo,
-        ProjectTicketFilter,
-        PullRequest,
-        Story,
-        StoryUsage,
-    )
-
-    engine = engine_mod.get_engine()
-    Base.metadata.create_all(engine)
 
     import elstin.config.store as store_mod
 
@@ -138,8 +177,25 @@ def elstin_db(postgres_url: str, monkeypatch: pytest.MonkeyPatch):
 
     yield
 
-    Base.metadata.drop_all(engine)
     store_mod.invalidate_cache()
+    if engine_mod._engine is not None:
+        engine_mod._engine.dispose()
+    engine_mod._engine = None
+    engine_mod._SessionLocal = None
+
+
+@pytest.fixture()
+def unreadable_database(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
+    """A DATABASE_URL SQLite cannot open (the directory in its path is a file),
+    for the tests of what code does when settings cannot be read."""
+    import elstin.db.engine as engine_mod
+
+    blocker = tmp_path_factory.mktemp("elstin-unreadable") / "not-a-directory"
+    blocker.write_text("")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{blocker}/elstin.db")
+    engine_mod._engine = None
+    engine_mod._SessionLocal = None
+    yield
     engine_mod._engine = None
     engine_mod._SessionLocal = None
 

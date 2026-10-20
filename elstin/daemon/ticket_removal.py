@@ -37,7 +37,7 @@ import os
 import shutil
 from typing import Any
 
-from elstin.config.store import get_config
+from elstin.config.store import storage_dir
 from elstin.daemon.main import claim_run, release_run
 from elstin.db.engine import get_database_url
 from elstin.orchestration.graph import checkpointer_from_url
@@ -89,9 +89,9 @@ def _remove_dir(path: str, base: str, removed: list[str], warnings: list[str]) -
 def _clean_local_artifacts(footprint: dict[str, Any]) -> dict[str, Any]:
     """Worktrees, branches and directories. Never raises on a missing or stuck
     path; returns what went and what could not."""
-    worktrees_base = get_config("worktrees_base_dir") or "/data/repos"
-    baselines_base = os.path.join(get_config("data_dir") or "/data", "baselines")
-    attachments_base = get_config("jira_attachments_dir") or "/data/jira-attachments"
+    worktrees_base = storage_dir("worktrees_base_dir")
+    baselines_base = os.path.join(storage_dir("data_dir"), "baselines")
+    attachments_base = storage_dir("jira_attachments_dir")
     epic_key = footprint["epic"]
 
     removed_worktrees: list[str] = []

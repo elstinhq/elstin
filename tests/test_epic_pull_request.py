@@ -2,7 +2,7 @@
 merge into the epic branch locally; once every one has, the daemon pushes
 the epic branch and opens one pull request into the default branch
 (elstin/daemon/main.py's _finish_epic), then follows its CI status and a
-human's merge. Real Postgres and git; GitHub is a fake."""
+human's merge. A real SQLite database and git; GitHub is a fake."""
 from __future__ import annotations
 
 import os

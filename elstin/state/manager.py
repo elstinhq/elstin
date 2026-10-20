@@ -1,4 +1,4 @@
-"""StateManager — the only interface to elstin's Postgres-backed epic/story/PR
+"""StateManager — the only interface to elstin's database-backed epic/story/PR
 bookkeeping (never touch elstin.db.models directly outside elstin/state/).
 
 Uses a mixin-composition shape: the class body is empty, each concern lives

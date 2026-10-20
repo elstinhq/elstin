@@ -3,7 +3,7 @@
 Off unless `langsmith_tracing_enabled` is on (globally, or for one project — a
 trace carries prompts, ticket text, source code and tool output to a third
 party, so a project can decide for itself). Everything is configured at
-/settings and stored in Postgres, like the rest of elstin: the LangSmith SDK's
+/settings and stored in the database, like the rest of elstin: the LangSmith SDK's
 own `LANGSMITH_*` environment variables are never read for tracing, and while
 a run executes here an ambient `LANGSMITH_TRACING=true` is switched off rather
 than obeyed.

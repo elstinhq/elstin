@@ -94,8 +94,8 @@ def test_parse_names(raw, expected):
     assert agent_env.parse_names(raw) == expected
 
 
-def test_the_setting_is_unreadable_without_a_database_and_that_is_not_an_error(monkeypatch):
-    monkeypatch.delenv("DATABASE_URL", raising=False)
+@pytest.mark.usefixtures("unreadable_database")
+def test_the_setting_is_unreadable_without_a_database_and_that_is_not_an_error():
     assert agent_env.configured_passthrough() == ()
 
 

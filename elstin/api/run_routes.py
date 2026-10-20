@@ -70,7 +70,7 @@ plan's files. 409 when no agent run is in progress to read it.
 Plan: the planner's structured plan (feature_summary, plan_markdown,
 files_to_create/modify, acceptance_criteria, ...) lives only inside the
 story's LangGraph checkpoint (elstin/db/models/gameplan.py's docstring on
-why elstin doesn't duplicate it into Postgres) — once a human clears the
+why elstin doesn't duplicate it into the board) — once a human clears the
 plan-approval gate there was previously no way to read it back short of
 scrolling the activity feed. GET /{key}/plan reopens that checkpoint by
 thread_id and returns the `plan` key from its state, same mechanism

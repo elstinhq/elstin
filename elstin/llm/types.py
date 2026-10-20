@@ -179,7 +179,7 @@ class LlmResponse:
 # --- (de)serialization -------------------------------------------------
 # elstin/orchestration/state.py's FeatureRunState carries a run's dev-loop
 # history as plain JSON (a `dev_history: list[dict]` field) because it is
-# durably checkpointed by LangGraph's AsyncPostgresSaver alongside every
+# durably checkpointed by LangGraph's checkpointer alongside every
 # other piece of run state — see elstin/orchestration/graph.py's
 # checkpointer_from_url. That's what replaces the old Claude Agent SDK's
 # `resume=<session_id>` (the SDK owned its own server-side conversation

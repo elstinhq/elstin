@@ -2,7 +2,7 @@
 yet (elstin/daemon/main.py's _bring_done_work_into_epic and
 _replan_behind_done_work). One such case: two item-search tickets Done
 in JIRA, their branches unmerged, and the next story planning against a main
-that had no item search at all. Real Postgres and git; agents are fakes."""
+that had no item search at all. A real SQLite database and git; agents are fakes."""
 from __future__ import annotations
 
 import os

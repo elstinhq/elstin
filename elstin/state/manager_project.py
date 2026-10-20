@@ -132,7 +132,7 @@ class _ProjectMixin:
         """Oldest first — this order is what picks the *default* repo for a
         new epic (the first-added one, see epic_sync.py) and what a
         multi-repo tool description lists as "the default", so it needs to
-        be deterministic rather than whatever order Postgres feels like."""
+        be deterministic rather than whatever order the database feels like."""
         with session_scope() as session:
             rows = session.execute(
                 select(ProjectRepo).where(ProjectRepo.project_id == project_id).order_by(ProjectRepo.id)

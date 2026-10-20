@@ -7,8 +7,6 @@ a deployed database actually gets matches the model.
 """
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from elstin.services.usage import get_run_outcome, get_story_usage, record_run_outcome
@@ -95,33 +93,3 @@ def test_story_usage_carries_the_outcome_and_distinguishes_unmeasured():
     assert measured["run_outcome"]["gate_failures"] == 1
     assert measured["run_outcome"]["outcome"] == "completed"
     assert unmeasured["run_outcome"] is None
-
-
-def test_migration_produces_the_table_the_model_expects():
-    """The test suite builds its schema with create_all, which bypasses
-    Alembic entirely — so nothing else here would notice a migration that
-    is missing a column the model has. A deployed database only ever gets
-    the migration.
-    """
-    from alembic import command
-    from alembic.config import Config
-    from sqlalchemy import create_engine, inspect, text
-
-    from elstin.db.models import StoryRunOutcome
-
-    url = os.environ["DATABASE_URL"]
-    engine = create_engine(url)
-    # elstin_db already created every table via create_all; drop them so
-    # alembic runs against a clean database, then leave it migrated (the
-    # fixture drops everything again on teardown).
-    with engine.begin() as conn:
-        conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
-
-    config = Config("alembic.ini")
-    config.set_main_option("script_location", "alembic")
-    command.upgrade(config, "head")
-
-    columns = {c["name"] for c in inspect(engine).get_columns("story_run_outcomes")}
-    expected = {c.name for c in StoryRunOutcome.__table__.columns}
-
-    assert columns == expected, f"migration/model drift: {expected ^ columns}"
